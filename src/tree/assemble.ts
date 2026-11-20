@@ -113,7 +113,9 @@ export function buildTree(spec: TreeSpec, textures: TreeTextures) {
       Boolean(e.spineOffsets?.length)))
     const lift = Math.max(0, Math.min(.75, spec.crown.canopyLift ?? 0))
     const info = generateLeafCards({ limbs: carriers, clusters: skeleton.clusters, config: { seed: spec.seed } }, spec.leaves, {
-      radius: hasBranchGeomEdit ? p => Math.min(env.rho(p), 1.02) : p => env.rho(p),
+      // When node edits reshaped the skeleton, let leaves.ts use its live post-edit fitted envelope
+      // instead of pre-edit CrownEnvelope rho so moved/bent outer lobes never inherit dark interior AO.
+      radius: hasBranchGeomEdit ? undefined : p => env.rho(p),
       keep: (p, r) => {
         if (lift > 0) {
           const u = (p.y - env.y0) / Math.max(.2, env.height)

@@ -279,7 +279,7 @@ const editor = viewer ? new CrownEditor(viewer, {
     const p = activePart()
     if (!p) return new Vector3()
     const s = p.spec
-    const key = JSON.stringify([p.id, s.kind, s.seed, s.trunk, s.crown.base, s.palm.bend, s.palm.sCurve])
+    const key = JSON.stringify([p.id, s.kind, s.seed, s.trunk, s.crown.base, s.palm.bend, s.palm.sCurve, s.branchEdits])
     if (key !== cachedAxis.key) cachedAxis = { key, axis: axisOf(s) }
     return cachedAxis.axis
   },

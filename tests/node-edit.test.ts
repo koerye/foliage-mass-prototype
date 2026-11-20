@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { Texture, Vector3 } from 'three'
+import { Mesh, Texture, Vector3 } from 'three'
+import { envelopeNormal, fitEnvelope } from '../src/broadleaf/leaves'
 import { buildTree, type TreeTextures } from '../src/tree/assemble'
 import { buildSkeleton } from '../src/tree/skeleton'
 import { parseTreeSpec, presetSpec, type BranchEdit } from '../src/tree/spec'
@@ -195,5 +196,61 @@ describe('SpeedTree-style per-branch node editing (branchEdits)', () => {
     expect(parsed.branchEdits![1].pitchDelta).toBe(-65)
     expect(parsed.branchEdits![1].bare).toBe(true)
     expect(parsed.branchEdits![1].spineOffsets).toEqual([[.1, .2, 0], [0, .3, -.1]])
+  })
+
+  it('refits CrownEnvelope & prevents dark AO / inverted clump normals after S-curve trunk and limb node edits', () => {
+    // Reproduces sculpting a dramatic S-curved trunk + pushed-out limb like the user's screenshot
+    const base = presetSpec('broadleaf-round')
+    const sculpted = {
+      ...base,
+      branchEdits: [
+        {
+          id: 0,
+          pitchDelta: 14,
+          spineOffsets: [
+            [.85, 0, 0],
+            [.35, .15, 0],
+            [-.55, .25, 0],
+            [-.2, .4, 0],
+          ] as [number, number, number][],
+        },
+        { id: 1, lengthScale: 1.45, pitchDelta: 18 },
+      ],
+    }
+    const sk0 = buildSkeleton(base)
+    const sk1 = buildSkeleton(sculpted)
+    // Crown envelope dynamically refits to the sculpted canopy rather than staying stuck at pre-edit bounds
+    expect(sk1.envelope.axis.distanceTo(sk0.envelope.axis)).toBeGreaterThan(.1)
+
+    // No clump normal may ever invert inward against the outward crown normal (prevents black concave creases)
+    const fitted = fitEnvelope([], sk1.branches, sk1.clusters, sculpted.leaves)
+    const nCrown = new Vector3(), nClump = new Vector3()
+    for (const c of sk1.clusters) {
+      for (const dir of [
+        new Vector3(1, 0, 0), new Vector3(-1, 0, 0),
+        new Vector3(0, 1, 0), new Vector3(0, -1, 0),
+        new Vector3(0, 0, 1), new Vector3(0, 0, -1),
+      ]) {
+        const pt = c.center.clone().addScaledVector(dir, c.width * .45)
+        envelopeNormal(fitted, pt, 'crown', nCrown)
+        envelopeNormal(fitted, pt, 'clumps', nClump)
+        expect(nClump.dot(nCrown)).toBeGreaterThan(0)
+      }
+    }
+
+    // Build full broadleaf leaves & verify no extreme near-black vertex colors collapse on exterior edited lobes
+    const built = buildTree(sculpted, dummyTextures)
+    let leafMesh: Mesh | undefined
+    built.group.traverse(o => { if (o instanceof Mesh && o.name === 'Leaf cards') leafMesh = o })
+    expect(leafMesh).toBeDefined()
+    const col = leafMesh!.geometry.getAttribute('color')
+    let minLum = Infinity
+    for (let i = 0; i < col.count; i++) {
+      const lum = col.getX(i) * .2126 + col.getY(i) * .7152 + col.getZ(i) * .0722
+      if (lum < minLum) minLum = lum
+    }
+    // Linear luminance floor stays well above dark mud (no black vertex patches)
+    expect(minLum).toBeGreaterThan(.04)
+    built.dispose()
   })
 })

@@ -248,8 +248,16 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
     })
     trunk.curve = makeCurve(trunk.points)
     trunk.length = trunk.curve.getLength()
+    const palmEdited = Boolean(spec.branchEdits?.some(hasGeometricEdit))
     applyBranchEdits([trunk], spec.branchEdits)
-    return { branches: [trunk], trunk, envelope: env, clusters: [] }
+    const finalEnv = palmEdited
+      ? new CrownEnvelope(spec, trunk.curve.getPoint(1), {
+          y0: Math.max(.2, trunk.curve.getPoint(1).y - env.height * .4),
+          y1: trunk.curve.getPoint(1).y + env.height * .6,
+          width: env.width,
+        })
+      : env
+    return { branches: [trunk], trunk, envelope: finalEnv, clusters: [] }
   }
 
   // ---- trunk ---------------------------------------------------------------
@@ -496,6 +504,40 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
 
   // ---- apply SpeedTree-style per-branch node overrides (prune/bare/bend/scale) ---
   const finalBranches = applyBranchEdits(branches, spec.branchEdits)
+  const hasGeomNodeEdit = Boolean(spec.branchEdits?.some(hasGeometricEdit))
+
+  // Re-fit the crown envelope when node edits moved/bent/scaled the trunk or branches
+  // so downstream foliage AO, conifer fronds, outer flowers, petals, canopyLift & editor cage
+  // all stay locked onto the sculpted geometry instead of using stale pre-edit bounds.
+  let finalEnv = env
+  if (hasGeomNodeEdit) {
+    const crownBranches = finalBranches.filter(b => b.role === 'limb' || b.role === 'child')
+    if (crownBranches.length > 0) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity
+      for (const b of crownBranches) {
+        for (const p of b.points) {
+          if (p.x < minX) minX = p.x
+          if (p.x > maxX) maxX = p.x
+          if (p.y < minY) minY = p.y
+          if (p.y > maxY) maxY = p.y
+          if (p.z < minZ) minZ = p.z
+          if (p.z > maxZ) maxZ = p.z
+        }
+      }
+      const pad = Math.max(.25, env.width * .16)
+      const cx = (minX + maxX) * .5
+      const cz = (minZ + maxZ) * .5
+      const rx = (maxX - minX) * .5 + pad
+      const rz = ((maxZ - minZ) * .5 + pad) / Math.max(.35, C.depth)
+      const newWidth = Math.max(env.width * .45, Math.max(rx, rz))
+      const newY0 = Math.max(.08, minY - pad * .35)
+      const newY1 = Math.max(newY0 + .4, maxY + pad * .6)
+      finalEnv = new CrownEnvelope(spec, new Vector3(cx, 0, cz), { y0: newY0, y1: newY1, width: newWidth })
+    } else {
+      const tip = trunk.curve.getPoint(1)
+      finalEnv = new CrownEnvelope(spec, tip)
+    }
+  }
 
   // crown clusters (clump centres for leaves / normals) at branch ends + mid-crown bridges
   const clusters: CrownCluster[] = []
@@ -507,7 +549,7 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
     direction.normalize()
     // Big-Medium-Small rhythmic sizing when cloud pads are enabled
     const rhythm = padFlat > 0 ? MathUtils.lerp(1, rank, padFlat * .7) : 1
-    const size = Math.min(env.width * .68, Math.max(.34, b.length * scale * rhythm))
+    const size = Math.min(finalEnv.width * .68, Math.max(.34, b.length * scale * rhythm))
     if (padFlat > 0) center.y += size * padFlat * .16
     clusters.push({
       center, direction,
@@ -520,11 +562,11 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
   for (const b of finalBranches) {
     if (b.bare) continue
     if (b.role !== 'limb' && b.role !== 'child') continue
-    if (b.role === 'limb' && !conifer && b.length < env.width * .25) continue
+    if (b.role === 'limb' && !conifer && b.length < finalEnv.width * .25) continue
     const rank = b.role === 'limb' ? (limbIdx++ % 3 === 0 ? 1.24 : limbIdx % 3 === 1 ? .96 : .76) : .88
     addCluster(b, .84, b.role === 'limb' ? .48 : .85, rank)
     // bridge mid-crown gaps on primary broadleaf limbs so foliage reads as cohesive clouds instead of isolated balls
-    if (!conifer && b.role === 'limb' && b.length > env.width * .4) addCluster(b, .56, .38, .92)
+    if (!conifer && b.role === 'limb' && b.length > finalEnv.width * .4) addCluster(b, .56, .38, .92)
   }
-  return { branches: finalBranches, trunk, envelope: env, clusters }
+  return { branches: finalBranches, trunk, envelope: finalEnv, clusters }
 }

@@ -1,5 +1,10 @@
 # Vegetation Studio (`foliage-mass-prototype`)
 
+> **在线体验（GitHub Pages）**：
+> - **[打开经典工作台（主入口）](https://koerye.github.io/foliage-mass-prototype/broadleaf.html)** — 全品类程序化植被、SpeedTree 枝干节点编辑、3D 程序化树皮、LOD 与 GLB 导出
+> - **[打开 AI 模式（丢图生成 & 案例库）](https://koerye.github.io/foliage-mass-prototype/ai.html)** — 拖入参考图自动拆解多部件植物、抠图画笔与内置成品案例
+> - **[打开 V1 体块原型](https://koerye.github.io/foliage-mass-prototype/)** — 早期松杉树冠分层体块原型
+
 一个基于 **TypeScript + Three.js + WebGL 2 + Vite** 构建的实时程序化 3D 植被与树木创作工作台，面向游戏与风格化三维场景的植被资产生产。
 
 支持**阔叶树、松杉针叶树、棕榈树、灌木、实体 3D 草叶、蕨类、花丛**等多品类程序化生成，内置 **SpeedTree 风格 3D 枝干节点编辑**、**AI 识图自动拆解多部件植物**、**3D 程序化树皮与抗平铺三平面贴图**、**四档/目标面数自动 LOD 减面**、**可视化预设库（悬停实时 3D 预览）**以及面向 Blender / Unity / Unreal Engine 的 **GLB 单网格多材质槽合并导出**。

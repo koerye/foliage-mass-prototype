@@ -118,7 +118,7 @@ let editUi: ReturnType<typeof bindEditToolsUi> | undefined
 const editor = viewer ? new CrownEditor(viewer, {
   spec: () => spec,
   axis: () => {
-    const key = JSON.stringify([spec.kind, spec.seed, spec.trunk, spec.crown.base, spec.palm.bend, spec.palm.sCurve])
+    const key = JSON.stringify([spec.kind, spec.seed, spec.trunk, spec.crown.base, spec.palm.bend, spec.palm.sCurve, spec.branchEdits])
     if (key !== cachedAxis.key) cachedAxis = { key, axis: axisOf(spec) }
     return cachedAxis.axis
   },

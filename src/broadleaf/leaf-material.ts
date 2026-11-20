@@ -218,19 +218,22 @@ export interface LeafStyleOptions {
   shadowFrom?: string
 }
 
-/** Derive a rich cool shadow tint from the foliage's inner color so shadows stay
- *  painterly & luminous (cool teal for greens, cool rose-violet for pinks/blossoms). */
+/** Derive a luminance-preserving cool shadow tint from the foliage's inner color so
+ *  shaded lobes shift cleanly into painterly cool teal/violet instead of black mud. */
 function deriveShadowTint(hex?: string) {
   const c = new Color(hex || '#5c7a3c')
   const hsl = { h: 0, s: 0, l: 0 }
   c.getHSL(hsl)
-  // pull hue gently toward cool blue-violet (0.68 = ~245 deg) without turning muddy
-  const targetH = hsl.h > .15 && hsl.h < .52 ? .52 : .78
+  // pull hue gently toward cool teal (greens) or cool rose-violet (warm/blossom)
+  const targetH = hsl.h > .15 && hsl.h < .52 ? .52 : .76
   const dh = ((targetH - hsl.h + 1.5) % 1) - .5
-  const h = (hsl.h + dh * .32 + 1) % 1
-  const s = Math.min(.78, Math.max(.32, hsl.s * 1.05))
-  const l = Math.min(.62, Math.max(.36, hsl.l * .95 + .1))
-  return new Color().setHSL(h, s, l)
+  const h = (hsl.h + dh * .30 + 1) % 1
+  const s = Math.min(.52, Math.max(.22, hsl.s * .72))
+  const tint = new Color().setHSL(h, s, .62)
+  // Normalize perceived linear luminance to ~0.94 so indirect shadow light shifts hue without crushing brightness
+  const lum = Math.max(.1, tint.r * .2126 + tint.g * .7152 + tint.b * .0722)
+  tint.multiplyScalar(.94 / lum)
+  return tint
 }
 
 /** Double-sided alpha-tested stylized foliage material.
@@ -314,11 +317,11 @@ float leafProcNoise(vec3 x) {
             float leafBack = pow( clamp( dot( geometryViewDir, -leafL ), 0.0, 1.0 ), 2.2 ) * 0.55
                            + clamp( ( -leafNdL ) * 0.5 + 0.5, 0.0, 1.0 ) * 0.45;
             reflectedLight.directDiffuse += diffuseColor.rgb * directionalLights[0].color * leafBack * uLeafSSS * 0.36;
-            // Cool shadow hue enrichment instead of muddy gray darkening
+            // Cool shadow hue enrichment (luminance-preserving so shaded clumps stay luminous, never black)
             float leafDark = 1.0 - smoothstep( -0.15, 0.55, leafNdL );
             reflectedLight.indirectDiffuse = mix(
               reflectedLight.indirectDiffuse,
-              reflectedLight.indirectDiffuse * uShadowTint * 1.55,
+              reflectedLight.indirectDiffuse * uShadowTint,
               leafDark * uShadowShift
             );
             // Soft sunlit silhouette rim

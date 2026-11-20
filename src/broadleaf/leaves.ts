@@ -315,8 +315,15 @@ export function envelopeNormal(env: Envelope, point: Vector3, source: NormalSour
   })
   if (field.lengthSq() < 1e-12) return target
   field.normalize()
-  // Keep the global crown silhouette readable: blend in a little crown normal.
-  return target.multiplyScalar(.3).add(field).normalize()
+  // Never let concave saddle creases between neighboring clumps invert normals inward into darkness:
+  // remove any inward-pointing component opposing the convex crown normal, then blend smoothly.
+  const align = field.dot(target)
+  if (align < 0) {
+    field.addScaledVector(target, -align)
+    if (field.lengthSq() < 1e-8) return target
+    field.normalize()
+  }
+  return target.multiplyScalar(.45).addScaledVector(field, .55).normalize()
 }
 
 function randomUnit(u: number, v: number) {
@@ -493,9 +500,20 @@ export function buildCardGeometry(cards: LeafCard[], env: Envelope, p: LeafParam
           centers.set([card.position.x, card.position.y, card.position.z], v * 3)
           corners.set([x * cs - y * sn, x * sn + y * cs], v * 2)
           uvs.set([(col + u) / p.atlasCols, 1 - (row + 1 - w) / p.atlasRows], v * 2)
-          const rho = radiusOf(world)
+          let rho = radiusOf(world)
+          if (env.clumps.length > 0 && rho < .9) {
+            // On asymmetric or node-edited crowns, an exposed exterior clump skin may sit inside
+            // the global bounding ellipsoid. Lift outerness by local clump-surface exposure so
+            // exterior lobes never collapse into dark interior AO.
+            let minClump = Infinity
+            for (const clump of env.clumps) {
+              const cr = clumpRadius(clump, world, 1)
+              if (cr < minClump) minClump = cr
+            }
+            if (minClump > .72) rho = Math.max(rho, Math.min(1.02, minClump * .84))
+          }
           const outerness = clamp((rho - .35) / .75)
-          const occlusion = 1 - p.aoStrength * (1 - outerness) * .75 - p.aoStrength * clamp(-env3.y) * .25
+          const occlusion = Math.max(.44, 1 - p.aoStrength * (1 - outerness) * .72 - p.aoStrength * clamp(-env3.y) * .22)
           color.copy(inner).lerp(outer, outerness).multiplyScalar(occlusion * shade)
           colors.set([color.r, color.g, color.b], v * 3)
           v++

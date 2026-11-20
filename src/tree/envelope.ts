@@ -27,12 +27,12 @@ export class CrownEnvelope {
   private readonly shapes: { anchor: Vector3; offset: Vector3; radius: number }[]
   private readonly bares: { center: Vector3; radius: number }[]
 
-  constructor(spec: TreeSpec, axis = new Vector3()) {
+  constructor(spec: TreeSpec, axis = new Vector3(), bounds?: { y0: number; y1: number; width: number }) {
     const { trunk, crown } = spec
     this.kind = spec.kind
-    this.y0 = trunk.height * crown.base
-    this.y1 = Math.max(this.y0 + .3, trunk.height * crown.top)
-    this.width = crown.width
+    this.y0 = bounds ? bounds.y0 : trunk.height * crown.base
+    this.y1 = Math.max(this.y0 + .3, bounds ? bounds.y1 : trunk.height * crown.top)
+    this.width = Math.max(.2, bounds ? bounds.width : crown.width)
     this.axis = new Vector3(axis.x, 0, axis.z)
     this.depth = crown.depth
     this.n = Math.max(1.2, crown.roundness)

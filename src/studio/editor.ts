@@ -548,7 +548,13 @@ export class CrownEditor {
     }
   }
 
-  private envelope(spec = this.host.spec()) { return new CrownEnvelope(spec, this.host.axis()) }
+  private envelope(spec = this.host.spec()) {
+    const skEnv = this.host.skeleton?.()?.envelope
+    if (skEnv && spec.branchEdits?.length) {
+      return new CrownEnvelope(spec, skEnv.axis, { y0: skEnv.y0, y1: skEnv.y1, width: skEnv.width })
+    }
+    return new CrownEnvelope(spec, this.host.axis())
+  }
 
   private clearHandleMeshes() {
     for (const child of [...this.handleMeshes.children]) {
