@@ -8,6 +8,6 @@ export default defineConfig({
   optimizeDeps: { include: ['three', 'three/addons/controls/OrbitControls.js', 'three/addons/loaders/GLTFLoader.js', 'three/addons/exporters/GLTFExporter.js'] },
   build: {
     chunkSizeWarningLimit: 610,
-    rollupOptions: { input: { conifer: 'index.html', broadleaf: 'broadleaf.html', ai: 'ai.html', legacy: 'legacy.html' } },
+    rollupOptions: { input: { index: 'index.html', broadleaf: 'broadleaf.html', ai: 'ai.html', legacy: 'legacy.html' } },
   },
 })

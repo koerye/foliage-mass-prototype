@@ -1,9 +1,8 @@
 # Vegetation Studio (`foliage-mass-prototype`)
 
 > **在线体验（GitHub Pages）**：
-> - **[打开经典工作台（主入口）](https://koerye.github.io/foliage-mass-prototype/broadleaf.html)** — 全品类程序化植被、SpeedTree 枝干节点编辑、3D 程序化树皮、LOD 与 GLB 导出
+> - **[打开经典工作台（主入口）](https://koerye.github.io/foliage-mass-prototype/)** — 全品类程序化植被、SpeedTree 枝干节点编辑、3D 程序化树皮、LOD 与 GLB 导出
 > - **[打开 AI 模式（丢图生成 & 案例库）](https://koerye.github.io/foliage-mass-prototype/ai.html)** — 拖入参考图自动拆解多部件植物、抠图画笔与内置成品案例
-> - **[打开 V1 体块原型](https://koerye.github.io/foliage-mass-prototype/)** — 早期松杉树冠分层体块原型
 
 一个基于 **TypeScript + Three.js + WebGL 2 + Vite** 构建的实时程序化 3D 植被与树木创作工作台，面向游戏与风格化三维场景的植被资产生产。
 
@@ -77,18 +76,16 @@ npm run dev
 
 | 入口路径 | 说明 |
 | --- | --- |
-| `/broadleaf.html` | **经典工作台（主入口）**：全品类程序化植被、节点编辑、LOD、材质与预设库 |
+| `/`（或 `/broadleaf.html`） | **经典工作台（主入口）**：全品类程序化植被、节点编辑、LOD、材质与预设库 |
 | `/ai.html` | **AI 模式（空白工程）**：拖入参考图生成多部件植物、案例库、抠图画笔、整体/单体编辑 |
-| `/index.html` | **早期体块原型（V1）**：松杉树冠分层体块原型 |
 | `/legacy.html` | **旧版工作台**：薄片阔叶与松树对照页面 |
 
 Windows 用户也可以直接双击或运行 `start.cmd`：
 
 ```bat
-start.cmd            :: 默认启动经典工作台 (/broadleaf.html)
+start.cmd            :: 默认启动经典工作台
 start.cmd ai         :: 启动 AI 模式 (/ai.html)
 start.cmd sakura     :: 直达 AI 樱花盆景案例
-start.cmd v1         :: 启动 V1 体块原型 (/index.html)
 ```
 
 ### 构建与测试
@@ -97,7 +94,7 @@ start.cmd v1         :: 启动 V1 体块原型 (/index.html)
 # TypeScript 类型检查 + Vite 生产构建
 npm run build
 
-# 运行 Vitest 单元测试套件（196 项）
+# 运行 Vitest 单元测试套件（172 项）
 npm test
 ```
 
@@ -109,9 +106,9 @@ npm test
 
 ```text
 foliage-mass-prototype/
-├── broadleaf.html             # 经典程序化植被工作台入口
+├── index.html                 # 经典程序化植被工作台主入口
+├── broadleaf.html             # 经典工作台兼容入口
 ├── ai.html                    # AI 识图多部件工作台入口
-├── index.html                 # V1 树冠体块原型入口
 ├── legacy.html                # 旧版工作台入口
 ├── start.cmd                  # Windows 一键启动脚本
 ├── src/

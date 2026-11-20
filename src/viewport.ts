@@ -4,8 +4,6 @@ import {
 } from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { foliageWind } from './broadleaf/leaf-material'
-import type { TreeMassConfig } from './config'
-import { assembleStylizedTree, type TreeAsset, type View } from './tree'
 
 export const cameraMap = {
   front: [0, .07, 1],
@@ -53,7 +51,6 @@ export class Viewer {
   readonly scene = new Scene()
   readonly camera = new OrthographicCamera(-6, 6, 6, -6, .025, 140)
   readonly controls: OrbitControls
-  asset?: TreeAsset
   reference?: Object3D
   private readonly floorMat = new ShadowMaterial({ color: lightingPresets.neutral.shadowColor, opacity: lightingPresets.neutral.shadowOpacity })
   private readonly floor = new Mesh(new PlaneGeometry(200, 200), this.floorMat)
@@ -67,10 +64,8 @@ export class Viewer {
   private frameHeight = 7.2
   private shownHeight = 6
   private fixedView: Camera = 'angle'
-  private view: View = 'final'
   private frames = 0
   private stamp = performance.now()
-  private config?: TreeMassConfig
   private readonly renderListeners = new Set<() => void>()
 
   constructor(readonly host: HTMLElement, private readonly onStats = (_fps: number, _calls: number) => {}) {
@@ -120,33 +115,6 @@ export class Viewer {
     this.camera.updateProjectionMatrix()
   }
 
-  setTree(config: TreeMassConfig, frame = false) {
-    this.config = config
-    const prior = this.asset
-    if (prior) {
-      this.scene.remove(prior.group)
-      prior.dispose()
-    }
-    this.asset = assembleStylizedTree(config)
-    if (this.reference) this.scene.remove(this.reference)
-    this.reference = undefined
-    this.scene.add(this.asset.group)
-    this.shownHeight = config.totalHeight
-    this.animLighting()
-    this.setView(this.view, config)
-    if (frame || !prior) this.frame(this.fixedView)
-    return this.asset.stats()
-  }
-
-  setView(view: View, config = this.config) {
-    if (!config) return
-    this.view = view
-    this.config = config
-    this.asset?.display(view, config)
-    this.floor.visible = view !== 'silhouette' && view !== 'wireframe' && view !== 'flat'
-    this.renderer.shadowMap.needsUpdate = true
-  }
-
   setReference(model: Object3D, height: number) {
     const box = new Box3().setFromObject(model)
     const size = box.getSize(new Vector3()), center = box.getCenter(new Vector3())
@@ -159,7 +127,6 @@ export class Viewer {
 
   showModel(model: Object3D, height: number, reframe = true) {
     if (this.reference) this.scene.remove(this.reference)
-    if (this.asset) this.scene.remove(this.asset.group)
     this.scene.add(model)
     this.reference = model
     this.shownHeight = height
@@ -250,7 +217,6 @@ export class Viewer {
     cancelAnimationFrame(this.frameId)
     this.observer.disconnect()
     this.controls.dispose()
-    this.asset?.dispose()
     this.floor.geometry.dispose()
     this.floor.material.dispose()
     this.key.dispose()
