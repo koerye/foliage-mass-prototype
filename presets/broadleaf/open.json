@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "species": "open",
+  "treeHeight": 5.8,
+  "trunkHeight": 1.58,
+  "trunkRadius": 0.265,
+  "trunkCurvature": 0.49,
+  "primaryBranchCount": 5,
+  "primaryBranchAngle": 57,
+  "branchSpread": 1.06,
+  "branchCurvature": 0.67,
+  "crownShape": "irregular",
+  "crownWidth": 6.55,
+  "crownHeight": 3.35,
+  "crownDepth": 5.4,
+  "crownClusterCount": 15,
+  "crownClusterSize": 0.91,
+  "crownIrregularity": 0.76,
+  "foliageDensity": 0.83,
+  "foliageScale": 1,
+  "seed": 7123
+}

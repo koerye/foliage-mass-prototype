@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.qa/
+__pycache__/
+*.pyc
+user-presets/
+.DS_Store
+Thumbs.db
+*.log
