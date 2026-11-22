@@ -69,6 +69,27 @@ describe('leaf card distribution', () => {
     }
   })
 
+  it('fills flattened pads deeper with the same candidate count and preserves shell-only fill', () => {
+    const center = new Vector3(0, 3, 0)
+    const growth = {
+      limbs: [],
+      clusters: [{ center, direction: new Vector3(1, 0, 0), width: 2, height: .7, depth: 1.6 }],
+      config: { seed: 8824 },
+    }
+    const params = { ...defaultLeafParams, leafJitter: 0, leafOffset: 0, clumpFillDepth: .25 }
+    const shaping = { radius: () => .8, flat: true }
+    const ordinary = generateLeafCards(growth, params, shaping)
+    const layered = generateLeafCards(growth, params, { ...shaping, padFlatten: .64 })
+    expect(layered.cards.length).toBeGreaterThan(0)
+    expect(layered.cards).toHaveLength(ordinary.cards.length)
+    expect(layered.cards.every((card, i) =>
+      card.position.distanceToSquared(center) < ordinary.cards[i].position.distanceToSquared(center))).toBe(true)
+    const shell = generateLeafCards(growth, { ...params, clumpFillDepth: 0 }, shaping)
+    const flatShell = generateLeafCards(growth, { ...params, clumpFillDepth: 0 }, { ...shaping, padFlatten: .64 })
+    expect(flatShell.cards.map(card => card.position)).toEqual(shell.cards.map(card => card.position))
+    for (const entry of [ordinary, layered, shell, flatShell]) entry.geometry.dispose()
+  })
+
   it('validates parameters and fills defaults for partial input', () => {
     expect(parseLeafParams(undefined)).toEqual(defaultLeafParams)
     expect(parseLeafParams({ leafSize: 1.2 }).leafSize).toBe(1.2)

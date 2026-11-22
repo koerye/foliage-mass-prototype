@@ -1,10 +1,10 @@
 ﻿import { describe, expect, it } from 'vitest'
-import { Texture, Vector3 } from 'three'
+import { LineCurve3, Texture, Vector3 } from 'three'
 import { buildTree } from '../src/tree/assemble'
 import { buildFronds } from '../src/tree/fronds'
 import { buildSkeleton, drapeDown, drapeTilt } from '../src/tree/skeleton'
 import { presetSpec, presetIds, type TreeSpec } from '../src/tree/spec'
-import { cardTypes } from '../src/broadleaf/leaves'
+import { cardTypes, generateLeafCards } from '../src/broadleaf/leaves'
 
 const textures = { leaf: new Texture(), needle: new Texture(), drape: new Texture(), palm: new Texture(), grass: new Texture(), fern: new Texture() }
 const leafMesh = (spec: TreeSpec) => {
@@ -33,7 +33,7 @@ describe('leaf insertion types', () => {
     expect(asset.stats.leaves).toBeLessThanOrEqual(asset.stats.twigs + 50)
   })
 
-  it('drape mode (weeping willow) hangs every curtain strictly downward above ground with unit normals', () => {
+  it('hangs one descending, ground-cleared spray per willow anchor with unit normals', () => {
     const spec = presetSpec('broadleaf-willow')
     expect(spec.leaves.cardType).toBe('drape')
     const { asset, geometry } = leafMesh(spec)
@@ -41,25 +41,47 @@ describe('leaf insertion types', () => {
     const uv = geometry.getAttribute('uv')
     const nor = geometry.getAttribute('normal')
     expect(asset.stats.leaves).toBeGreaterThan(150)
+    expect(asset.stats.leaves).toBeLessThan(300)
+    expect(pos.count).toBe(asset.stats.leaves * 10)
 
-    // Each curtain plane has (ny + 1) * 2 = 10 vertices: row 0 has v=1 (branch anchor), row ny has v=0 (trailing tip)
-    let curtainsChecked = 0
-    let minY = Infinity
-    for (let i = 0; i < pos.count; i++) {
-      minY = Math.min(minY, pos.getY(i))
-      if (i % 10 === 0) {
-        const topY = pos.getY(i)
-        const tipY = pos.getY(i + 8)
-        expect(uv.getY(i)).toBeCloseTo(1, 3)
-        expect(uv.getY(i + 8)).toBeCloseTo(0, 3)
-        expect(tipY).toBeLessThan(topY - 0.15)
-        curtainsChecked++
+    for (let i = 0; i < pos.count; i += 10) {
+      expect(uv.getY(i)).toBeCloseTo(1, 3)
+      expect(uv.getY(i + 8)).toBeCloseTo(0, 3)
+      expect(pos.getY(i + 8)).toBeGreaterThanOrEqual(.179)
+      for (let row = 1; row <= 4; row++) {
+        expect(pos.getY(i + row * 2)).toBeLessThan(pos.getY(i + row * 2 - 2))
       }
-      if (i % 25 === 0) expect(Math.hypot(nor.getX(i), nor.getY(i), nor.getZ(i))).toBeCloseTo(1, 3)
+      expect(Math.hypot(nor.getX(i), nor.getY(i), nor.getZ(i))).toBeCloseTo(1, 3)
     }
-    expect(curtainsChecked).toBeGreaterThan(200)
-    expect(minY).toBeGreaterThanOrEqual(0.07)
     asset.dispose()
+  })
+
+  it('anchors willow sprays to the branch rather than the crown envelope and keeps LOD anchor positions', () => {
+    const spec = presetSpec('broadleaf-willow')
+    const start = new Vector3(0, 2, 0)
+    const end = new Vector3(3, 2, 0)
+    const curve = new LineCurve3(start, end)
+    const growth = {
+      limbs: [{ id: 1, kind: 'primary' as const, curve, rootRadius: .12, tipRadius: .03 }],
+      clusters: [{ center: new Vector3(4, 6, 1), direction: new Vector3(1, 0, 0), width: 3, height: 3, depth: 3 }],
+      config: { seed: spec.seed },
+    }
+    const leaves = { ...spec.leaves, twigFrequency: 0, clumpFill: 8 }
+    const high = generateLeafCards(growth, leaves, { radius: () => 1 })
+    const low = generateLeafCards(growth, leaves, { radius: () => 1, reduce: .6, flat: true })
+    const pos = high.geometry.getAttribute('position')
+    expect(high.cards.length).toBeGreaterThan(2)
+    for (let i = 0; i < pos.count; i += 10) {
+      expect(pos.getY(i)).toBeCloseTo(2, 6)
+      expect((pos.getZ(i) + pos.getZ(i + 1)) / 2).toBeCloseTo(0, 6)
+      const x = (pos.getX(i) + pos.getX(i + 1)) / 2
+      expect(x).toBeGreaterThanOrEqual(start.x)
+      expect(x).toBeLessThanOrEqual(end.x + 1e-6)
+    }
+    expect(low.cards.length).toBeLessThan(high.cards.length)
+    expect(low.cards.every(card => high.cards.some(source => source.position.equals(card.position)))).toBe(true)
+    high.geometry.dispose()
+    low.geometry.dispose()
   })
 })
 

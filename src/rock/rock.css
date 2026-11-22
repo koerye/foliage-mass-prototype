@@ -1,0 +1,129 @@
+/* Stylized Rock Studio — lightweight extensions over studio.css */
+.rk-stats { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+
+.rk-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.rk-preset-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  border: 1px solid #d7dccf;
+  background: #f8f9f3;
+  color: #314738;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background .12s, border-color .12s, color .12s;
+}
+
+.rk-preset-btn:hover {
+  background: #eef3ea;
+  border-color: #a9bea9;
+}
+
+.rk-preset-btn[aria-pressed="true"] {
+  background: #2f5a3f;
+  color: #fff;
+  border-color: #2f5a3f;
+}
+
+.rk-preset-tag {
+  font-size: 10px;
+  font-weight: 500;
+  opacity: .78;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, .06);
+}
+
+.rk-preset-btn[aria-pressed="true"] .rk-preset-tag {
+  background: rgba(255, 255, 255, .18);
+  opacity: .95;
+}
+
+.rk-preset-btn.is-overridden {
+  border-color: #c9a66b;
+}
+
+.rk-preset-btn.is-overridden[aria-pressed="true"] {
+  border-color: #2f5a3f;
+}
+
+.rk-preset-btn.is-overridden .rk-preset-tag {
+  background: #f5e6c8;
+  color: #7c5218;
+  opacity: 1;
+}
+
+.rk-preset-btn.is-overridden[aria-pressed="true"] .rk-preset-tag {
+  background: #f3d58d;
+  color: #2c2008;
+}
+
+.rk-style-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+  background: #e8ece0;
+  padding: 3px;
+  border-radius: 7px;
+  margin: 4px 0 6px;
+}
+
+.rk-style-tabs button {
+  border: 0;
+  background: transparent;
+  color: #465e4c;
+  font-weight: 600;
+  font-size: 11.5px;
+  padding: 5px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.rk-style-tabs button[aria-pressed="true"] {
+  background: #fffef8;
+  color: #1f4c32;
+  box-shadow: 0 1px 4px rgba(24, 38, 28, .12);
+}
+
+.rk-sub-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  grid-column: 2 / 4;
+}
+
+.rk-sub-row button {
+  font-size: 11px;
+  padding: 4px 2px;
+  border-radius: 5px;
+  border: 1px solid #d8dccd;
+  background: #f8f9f3;
+  color: #36523d;
+  cursor: pointer;
+}
+
+.rk-sub-row button[aria-pressed="true"] {
+  background: #2f5a3f;
+  color: #fff;
+  border-color: #2f5a3f;
+}
+
+.rk-mark {
+  background: linear-gradient(135deg, #5f6f78, #3d4d58) !important;
+  color: #f4f7f8 !important;
+}
+
+@media (max-width: 665px) {
+  .rk-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}

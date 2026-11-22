@@ -8,6 +8,7 @@ import {
   BufferAttribute, BufferGeometry, Color, QuadraticBezierCurve3, Vector3,
 } from 'three'
 import { clamp, rng, seedFor } from '../shape'
+import type { AtlasRegion } from '../texgraph/types'
 import type { Curve } from 'three'
 
 /** Any branch carrier (old growth.ts limbs or the new skeleton). */
@@ -29,8 +30,11 @@ export interface CrownCluster {
 export interface LeafShaping {
   radius?: (p: Vector3) => number
   keep?: (p: Vector3, random: number) => boolean
+  padFlatten?: number
   flat?: boolean
   reduce?: number
+  /** When true (sculpted/node-edited skeletons), preserve protruding clump shells against global ellipsoid outer clipping. */
+  preserveClumpShells?: boolean
 }
 
 export const normalSources = ['clumps', 'crown'] as const
@@ -89,10 +93,12 @@ export interface LeafParams {
   alphaCutoff: number
   atlasCols: number
   atlasRows: number
+  /** Optional non-uniform asymmetric atlas region rects (`atlas_compose` v2); overrides uniform grid UVs when non-empty. */
+  atlasRegions?: AtlasRegion[]
   leafSeed: number
 }
 
-type NumericKey = { [K in keyof LeafParams]: LeafParams[K] extends number ? K : never }[keyof LeafParams]
+type NumericKey = { [K in keyof LeafParams]-?: LeafParams[K] extends number ? K : never }[keyof LeafParams]
 type Range = readonly [min: number, max: number, step: number]
 
 export const leafRules: Record<Exclude<NumericKey, 'schemaVersion'>, Range> = {
@@ -183,6 +189,33 @@ export function parseLeafParams(value: unknown): LeafParams {
     if (data[key] === undefined) continue
     if (typeof data[key] !== 'string' || !hex.test(data[key] as string)) throw new Error(key + ' 必须是 #RRGGBB 颜色')
     result[key] = data[key] as string
+  }
+  if (data.atlasRegions !== undefined) {
+    if (!Array.isArray(data.atlasRegions)) throw new Error('atlasRegions 必须是数组')
+    const valid: AtlasRegion[] = []
+    for (const raw of data.atlasRegions) {
+      if (!raw || typeof raw !== 'object') continue
+      const r = raw as Record<string, unknown>
+      const x = Number(r.x), y = Number(r.y), w = Number(r.w), h = Number(r.h)
+      if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) continue
+      const pad = Number.isFinite(Number(r.padding)) ? Math.max(0, Number(r.padding)) : 0
+      const rawSlot = Number(r.slot)
+      const slot = Number.isFinite(rawSlot) ? Math.max(0, Math.min(3, Math.round(rawSlot))) : 0
+      valid.push({
+        id: typeof r.id === 'string' && r.id ? r.id : `r${valid.length + 1}`,
+        x: clamp(x, 0, 1),
+        y: clamp(y, 0, 1),
+        w: clamp(w, 0.01, 1),
+        h: clamp(h, 0.01, 1),
+        padding: clamp(pad, 0, 0.1),
+        slot,
+        ...(Number.isFinite(Number(r.anchorX)) ? { anchorX: clamp(Number(r.anchorX), 0, 1) } : {}),
+        ...(Number.isFinite(Number(r.anchorY)) ? { anchorY: clamp(Number(r.anchorY), 0, 1) } : {}),
+        ...(Number.isFinite(Number(r.weight)) ? { weight: Math.max(0.05, Number(r.weight)) } : {}),
+        ...(r.role === 'canopy' || r.role === 'accent' ? { role: r.role } : {}),
+      })
+    }
+    if (valid.length > 0) result.atlasRegions = valid
   }
   if (result.twigEnd < result.twigStart) throw new Error('细枝结束位置不能小于起始位置')
   return result
@@ -345,7 +378,20 @@ export function distributeLeaves(limbs: Limb[], twigs: Twig[], env: Envelope, p:
     const outward = envelopeNormal(env, position, p.normalSource)
     position.addScaledVector(outward, p.leafOffset * p.leafSize * .5)
     const rho = radiusOf(position)
-    if (rho > p.pruneOuter || rho < p.pruneInner) { pruned++; return }
+    // On sculpted / node-edited crowns (`!shaping.radius`), `fitEnvelope` is a tight L2 ellipsoid around
+    // base cluster bounds, which can scalp circular craters out of protruding clump shells on diagonals.
+    // Measure outer pruning against the union of the envelope and local clump shells so sculpted lobes stay lush.
+    let outerRho = rho
+    if (shaping.preserveClumpShells && env.clumps.length > 0 && outerRho > p.pruneOuter) {
+      const shellScale = Math.max(1, p.clumpFillScale)
+      let minClump = Infinity
+      for (const cl of env.clumps) {
+        const cr = clumpRadius(cl, position, shellScale)
+        if (cr < minClump) minClump = cr
+      }
+      outerRho = Math.min(outerRho, minClump)
+    }
+    if (outerRho > p.pruneOuter || rho < p.pruneInner) { pruned++; return }
     if (shaping.keep && !shaping.keep(position, r[9])) { pruned++; return }
     const t = tangent.clone().normalize()
     const radial = anyPerpendicular(t).applyAxisAngle(t, k * golden + r[3] * .5)
@@ -388,9 +434,11 @@ export function distributeLeaves(limbs: Limb[], twigs: Twig[], env: Envelope, p:
     const count = stochasticCount(p.limbLeafFrequency * limb.curve.getLength() * (1 - p.twigStart), random)
     along(limb.curve, count, p.twigStart, limb.kind === 'secondary' ? p.tipLeaves : 0)
   }
-  // Clump shell fill: SpeedTree "mesh force"/hull style coverage. Points are
-  // sampled on the union surface of the (inflated) crown clumps so the crown
-  // reads as soft masses without holes, independent of twig randomness.
+  // A flattened pad has less room between its top and underside. Distribute its
+  // fill across a deeper radial band so overlapping pads don't expose a dark interior.
+  // Depth 0 remains a pure shell, and the number of candidates stays the same.
+  const padFlatten = clamp(shaping.padFlatten ?? 0, 0, .85)
+  const fillDepth = p.clumpFillDepth ** (1 - .7 * padFlatten)
   const fillRandom = rng(seedFor(seed ^ p.leafSeed, 9400))
   env.clumps.forEach((clump, i) => {
     const r = clump.radii.clone().multiplyScalar(p.clumpFillScale)
@@ -403,7 +451,7 @@ export function distributeLeaves(limbs: Limb[], twigs: Twig[], env: Envelope, p:
       const y = 1 - 2 * (k + .2 + jitter * .6) / count
       const radial = Math.sqrt(Math.max(0, 1 - y * y)), theta = k * golden + offset
       const local = new Vector3(Math.cos(theta) * radial * r.x, y * r.y, Math.sin(theta) * radial * r.z)
-      local.applyAxisAngle(UP, clump.yaw).multiplyScalar(1 - p.clumpFillDepth * depth)
+      local.applyAxisAngle(UP, clump.yaw).multiplyScalar(1 - fillDepth * depth)
       const point = local.add(clump.center)
       // hidden inside a neighbouring clump -> skip (interior culling of the union)
       const hidden = env.clumps.some((other, j) => j !== i && clumpRadius(other, point, p.clumpFillScale) < .82)
@@ -474,17 +522,47 @@ export function buildCardGeometry(cards: LeafCard[], env: Envelope, p: LeafParam
   const indices: number[] = []
   const inner = new Color(p.tintInner), outer = new Color(p.tintOuter)
   const color = new Color(), local = new Vector3(), world = new Vector3(), geo = new Vector3(), env3 = new Vector3()
+  const regions = p.atlasRegions && p.atlasRegions.length > 0 ? p.atlasRegions : undefined
+  const canopyRegions = regions ? regions.filter(r => r.role !== 'accent') : undefined
+  const accentRegions = regions ? regions.filter(r => r.role === 'accent') : undefined
+  const pickWeightedRegion = (pool: AtlasRegion[], hash01: number): AtlasRegion => {
+    let totalW = 0
+    for (const r of pool) totalW += Math.max(0.05, r.weight ?? 1)
+    let acc = hash01 * totalW
+    for (const r of pool) {
+      acc -= Math.max(0.05, r.weight ?? 1)
+      if (acc <= 0) return r
+    }
+    return pool[pool.length - 1]
+  }
+
+  const isAtlas = Boolean(regions) || p.atlasCols > 1 || p.atlasRows > 1
+  const atlasPad = isAtlas ? .008 : 0
   let v = 0
   cards.forEach((card, c) => {
     const col = card.cell % p.atlasCols, row = Math.floor(card.cell / p.atlasCols)
+    const hashBits = ((c * 2654435761 + Math.round(card.shade * 997)) >>> 0)
+    const hash01 = (hashBits & 0xffff) / 65536
+    // Non-uniform asymmetric atlas region selection: smaller tip/accent cards prefer small accent regions when present!
+    let reg: AtlasRegion | undefined
+    if (regions) {
+      const wantAccent = Boolean(accentRegions?.length && canopyRegions?.length && (card.width < p.leafSize * 0.88 || (c % 5 === 0)))
+      const pool = wantAccent ? accentRegions! : (canopyRegions?.length ? canopyRegions : regions)
+      reg = pickWeightedRegion(pool, hash01)
+    }
+    // Multi-tile atlases get deterministic 50% horizontal mirror flip (effectively 2x silhouettes) + safe UV anti-bleed inset
+    const flipU = isAtlas && (((c * 2654435761) >>> 31) === 1)
+    const cardPivotY = reg?.anchorY !== undefined ? clamp(1 - reg.anchorY, 0.05, 0.95) : p.leafPivot
     const shade = 1 + (card.shade * 2 - 1) * p.tintVariance
+    // Gentle warm-cool painterly shift softens repeating card boundaries into continuous cloud billows
+    const warmShift = (card.shade - .5) * p.tintVariance * .24
     const cs = Math.cos(card.spin), sn = Math.sin(card.spin)
     for (const plane of planes[c]) {
       for (let j = 0; j <= ny; j++) {
         for (let i = 0; i <= nx; i++) {
           const u = i / nx, w = j / ny
           const x = (u - .5) * card.width
-          const y = (w - p.leafPivot) * card.height
+          const y = (w - cardPivotY) * card.height
           const fx = (u - .5) * 2
           const z = p.leafFold * Math.abs(fx) * card.width * .35 + p.leafCurl * w * w * card.height * .4 + plane.offset * card.height
           local.set(-p.leafFold * Math.sign(fx) * .7, -p.leafCurl * .8 * w, 1).normalize()
@@ -499,7 +577,19 @@ export function buildCardGeometry(cards: LeafCard[], env: Envelope, p: LeafParam
           normals.set([n.x, n.y, n.z], v * 3)
           centers.set([card.position.x, card.position.y, card.position.z], v * 3)
           corners.set([x * cs - y * sn, x * sn + y * cs], v * 2)
-          uvs.set([(col + u) / p.atlasCols, 1 - (row + 1 - w) / p.atlasRows], v * 2)
+          if (reg) {
+            const padX = Math.min(reg.w * 0.16, Math.max(0.002, reg.padding))
+            const padY = Math.min(reg.h * 0.16, Math.max(0.002, reg.padding))
+            const su = flipU ? (1 - u) : u
+            const sv = 1 - w
+            const uvX = reg.x + padX + su * (reg.w - 2 * padX)
+            const uvYTop = reg.y + padY + sv * (reg.h - 2 * padY)
+            uvs.set([uvX, 1 - uvYTop], v * 2)
+          } else {
+            const tu = isAtlas ? atlasPad + (flipU ? 1 - u : u) * (1 - 2 * atlasPad) : u
+            const tv = isAtlas ? atlasPad + (1 - w) * (1 - 2 * atlasPad) : (1 - w)
+            uvs.set([(col + tu) / p.atlasCols, 1 - (row + tv) / p.atlasRows], v * 2)
+          }
           let rho = radiusOf(world)
           if (env.clumps.length > 0 && rho < .9) {
             // On asymmetric or node-edited crowns, an exposed exterior clump skin may sit inside
@@ -515,6 +605,11 @@ export function buildCardGeometry(cards: LeafCard[], env: Envelope, p: LeafParam
           const outerness = clamp((rho - .35) / .75)
           const occlusion = Math.max(.44, 1 - p.aoStrength * (1 - outerness) * .72 - p.aoStrength * clamp(-env3.y) * .22)
           color.copy(inner).lerp(outer, outerness).multiplyScalar(occlusion * shade)
+          if (warmShift !== 0) {
+            color.r = Math.max(0, color.r * (1 + warmShift * .65))
+            color.g = Math.max(0, color.g * (1 + warmShift * .22))
+            color.b = Math.max(0, color.b * (1 - warmShift * .55))
+          }
           colors.set([color.r, color.g, color.b], v * 3)
           v++
         }
@@ -612,10 +707,7 @@ function mergeGeometry(a: BufferGeometry, b: BufferGeometry) {
   return out
 }
 
-/** Dedicated gravity-hanging curtain algorithm ("垂帘下挂") for weeping willows & cascading vines.
- *  Strictly isolated from standard broadleaf card modes: every strand anchors at a high limb/dome point
- *  and hangs vertically downward (-Y) with gentle outward fountain arch, ground clearance, and crossed
- *  dual-curtain depth so the silhouette reads as cascading curtains from every camera angle. */
+/** Build individual hanging sprays attached to the edited branch skeleton. */
 function buildDrapeCurtains(
   limbs: Limb[],
   twigs: Twig[],
@@ -639,121 +731,90 @@ function buildDrapeCurtains(
     shade: number
     yawJitter: number
     swayDir: number
-    outerness: number
   }
 
   const rawAnchors: DrapeAnchor[] = []
   let pruned = 0
 
-  const addAnchor = (rawPos: Vector3, dropBoost: number, isDome: boolean) => {
-    const r = [random(), random(), random(), random(), random(), random(), random(), random()]
-    const pos = rawPos.clone()
-    pos.x += (r[0] - .5) * p.leafJitter * p.leafSize * .34
-    pos.y += (r[1] - .5) * p.leafJitter * p.leafSize * .18
-    pos.z += (r[2] - .5) * p.leafJitter * p.leafSize * .34
+  const addAnchor = (pos: Vector3, direction: Vector3, dropBoost: number) => {
+    const shade = random(), azimuth = random(), length = random(), clearance = random(), sway = random()
     const rho = radiusOf(pos)
     if (rho > p.pruneOuter * 1.12 || rho < p.pruneInner) { pruned++; return }
-    if (shaping.keep && !shaping.keep(pos, r[3])) { pruned++; return }
+    if (shaping.keep && !shaping.keep(pos, shade)) { pruned++; return }
 
     const radialXZ = new Vector3(pos.x - env.center.x, 0, pos.z - env.center.z)
-    if (radialXZ.lengthSq() < 1e-5) radialXZ.set(Math.cos(r[4] * Math.PI * 2), 0, Math.sin(r[4] * Math.PI * 2))
+    if (radialXZ.lengthSq() < 1e-5) radialXZ.set(Math.cos(azimuth * Math.PI * 2), 0, Math.sin(azimuth * Math.PI * 2))
     else radialXZ.normalize()
+    direction.y = 0
+    if (direction.lengthSq() > 1e-5) {
+      direction.normalize()
+      if (direction.dot(radialXZ) > -.15) radialXZ.lerp(direction, .4).normalize()
+    }
 
     const heightFrac = clamp((pos.y - envMinY) / envHeight)
     const outerness = clamp((rho - .25) / .78)
 
-    // Cascading curtain length profile:
-    // - outer mid-to-upper canopy hangs longest (classic weeping willow waterfall)
-    // - very top dome cap is slightly shorter to bridge softly without flat-top banding
-    // - lower inner canopy stays shorter so trunk arch stays readable
-    const domeFactor = heightFrac > .84
-      ? .68 + (1 - heightFrac) * 2.0
-      : (.72 + .62 * Math.sin(Math.min(1, heightFrac * 1.15) * Math.PI * .78)) * (.72 + .48 * outerness)
-    const variance = Math.max(.35, 1 + (r[5] * 2 - 1) * Math.max(.22, p.leafSizeVariance))
-    const wantedDrop = p.leafSize * dropBoost * domeFactor * variance
-    // Never let trailing tips clip below ground plane (keep graceful clearance above y = 0)
-    const maxClearDrop = Math.max(.28, pos.y - (.16 + r[6] * .28))
-    const dropLen = Math.min(wantedDrop, maxClearDrop)
+    const crownLength = (.74 + .33 * Math.sin(heightFrac * Math.PI)) * (.75 + .45 * outerness)
+    const variance = 1 + (length * 2 - 1) * p.leafSizeVariance
+    const wantedDrop = p.leafSize * dropBoost * crownLength * variance
+    const dropLen = Math.min(wantedDrop, pos.y - (.18 + clearance * .32))
     if (dropLen < .22) { pruned++; return }
 
-    const width = p.leafSize * p.leafAspect * (isDome ? .96 : .84) * (.76 + .28 * Math.min(1.5, dropLen / Math.max(.3, p.leafSize)))
+    const width = dropLen * p.leafAspect * (.86 + sway * .24)
     rawAnchors.push({
       pos,
       radialXZ,
       dropLen,
       width,
-      cell: Math.min(cells - 1, Math.floor(r[6] * cells)),
-      shade: r[3],
-      yawJitter: (r[4] - .5) * .65,
-      swayDir: (r[7] - .5) * 2,
-      outerness,
+      cell: Math.min(cells - 1, Math.floor(clearance * cells)),
+      shade,
+      yawJitter: (azimuth - .5) * 2.5,
+      swayDir: (sway - .5) * 2,
     })
   }
 
-  // 1. Anchors along outer arching limbs & secondary branches (tight branch-to-curtain connection)
+  // Fill the crown along real branches so rotating the tree reveals connected sprays and open space.
+  const branchRate = p.limbLeafFrequency * .45 + Math.sqrt(p.clumpFill) * .35
   for (const limb of limbs) {
     if (limb.kind === 'trunk') continue
     const len = limb.curve.getLength()
-    const count = stochasticCount(Math.max(2, len * (limb.kind === 'secondary' ? 3.2 : 2.4)), random)
+    const count = stochasticCount(len * branchRate * (limb.kind === 'secondary' ? 1.2 : .85), random)
     for (let k = 0; k < count; k++) {
-      const t = clamp(.28 + .72 * (k + .2 + random() * .6) / Math.max(1, count))
-      addAnchor(limb.curve.getPoint(t), .92 + .52 * t, false)
+      const t = .28 + .72 * (k + .2 + random() * .6) / count
+      addAnchor(limb.curve.getPointAt(t), limb.curve.getTangentAt(t), .92 + .50 * t)
     }
-    // Extra lush waterfall tuft right at arching branch tip
-    addAnchor(limb.curve.getPoint(1), 1.38, false)
+    if (count > 0 && limb.kind === 'primary') {
+      addAnchor(limb.curve.getPoint(1), limb.curve.getTangent(1), .86)
+    }
   }
 
   // 2. Anchors along drooping twig ends
-  const twigRate = clamp(p.leavesPerTwig / 6.5, .25, 2.2)
+  const twigRate = clamp(p.leavesPerTwig / 8, 0, 2)
   for (const twig of twigs) {
     const count = stochasticCount(twigRate, random)
     for (let k = 0; k < count; k++) {
-      const t = clamp(.55 + .45 * (k + .3 + random() * .5) / Math.max(1, count))
-      addAnchor(twig.curve.getPoint(t), 1.05 + .25 * t, false)
+      const t = .55 + .45 * (k + .3 + random() * .5) / count
+      addAnchor(twig.curve.getPoint(t), twig.curve.getTangent(t), .85 + .25 * t)
     }
   }
 
-  // 3. Upper & outer dome shell anchors across canopy clumps (never upside-down!)
-  const domeRng = rng(seedFor(seed ^ p.leafSeed, 9910))
-  env.clumps.forEach((clump, i) => {
-    const r = clump.radii.clone().multiplyScalar(p.clumpFillScale * .95)
-    const a = (r.x * r.y) ** 1.6, b = (r.x * r.z) ** 1.6, c = (r.y * r.z) ** 1.6
-    const area = 4 * Math.PI * ((a + b + c) / 3) ** (1 / 1.6)
-    const count = stochasticCount(p.clumpFill * area * .55, domeRng)
-    const offset = domeRng() * Math.PI * 2
-    for (let k = 0; k < count; k++) {
-      const jitter = domeRng(), depth = domeRng()
-      // Sample upper dome & outer skirt (-0.18..0.98), skipping flat underside so curtains drape DOWN
-      const y = .98 - 1.16 * (k + .2 + jitter * .6) / Math.max(1, count)
-      const radial = Math.sqrt(Math.max(0, 1 - y * y))
-      const theta = k * golden + offset
-      const local = new Vector3(Math.cos(theta) * radial * r.x, y * r.y, Math.sin(theta) * radial * r.z)
-      local.applyAxisAngle(UP, clump.yaw).multiplyScalar(1 - p.clumpFillDepth * .7 * depth)
-      const point = local.add(clump.center)
-      const hidden = env.clumps.some((other, j) => j !== i && clumpRadius(other, point, p.clumpFillScale * .95) < .84)
-      if (hidden) { pruned++; continue }
-      addAnchor(point, 1.08 + .32 * Math.max(0, 1 - Math.abs(y - .2)), true)
-    }
-  })
-
-  // Apply LOD thinning with area-preserving width compensation
+  // Thin sprays at lower LODs without closing the spaces between them.
   const reduce = clamp(shaping.reduce ?? 0, 0, .78)
   let anchors = rawAnchors
   let widthBoost = 1
   if (reduce > 0 && rawAnchors.length > 0) {
     const keep = 1 - reduce
-    widthBoost = Math.min(1.8, (1 / keep) ** .44)
+    widthBoost = Math.min(1.32, (1 / keep) ** .23)
     anchors = []
     for (let i = 0; i < rawAnchors.length; i++) {
       if (i === 0 || Math.floor(i * keep) !== Math.floor((i - 1) * keep)) anchors.push(rawAnchors[i])
     }
   }
 
-  // Build crossed vertical hanging curtain ribbons (v = 1 top branch anchor -> v = 0 trailing tip)
+  // One curved surface per spray, with UV v running from attachment to tip.
   const ny = shaping.flat ? 2 : 4
-  const planesPerAnchor = shaping.flat && reduce > .45 ? 1 : 2
   const perPlane = 2 * (ny + 1)
-  const totalVerts = anchors.length * planesPerAnchor * perPlane
+  const totalVerts = anchors.length * perPlane
 
   const positions = new Float32Array(totalVerts * 3)
   const normals = new Float32Array(totalVerts * 3)
@@ -767,8 +828,7 @@ function buildDrapeCurtains(
   const inner = new Color(p.tintInner), outer = new Color(p.tintOuter), col = new Color()
   const envN = new Vector3(), tangentXZ = new Vector3(), right = new Vector3(), faceN = new Vector3(), nVec = new Vector3()
   const world = new Vector3()
-  const archBase = .12 + Math.max(0, -p.leafCurl) * .22
-  const planeAngles = planesPerAnchor === 1 ? [0] : [-.62, .62] // ~71 deg crossed V-curtains for 360-deg fullness
+  const archBase = .22 + Math.max(0, -p.leafCurl) * .24
   const DOWN = new Vector3(0, -1, 0)
 
   let v = 0
@@ -793,80 +853,77 @@ function buildDrapeCurtains(
       spin: 0,
     })
 
-    for (const relAngle of planeAngles) {
-      const ang = relAngle + anc.yawJitter
-      const ca = Math.cos(ang), sa = Math.sin(ang)
-      // Horizontal ribbon width axis & outward face normal (strictly vertical curtain!)
-      right.set(
-        tangentXZ.x * ca + anc.radialXZ.x * sa,
-        0,
-        tangentXZ.z * ca + anc.radialXZ.z * sa,
-      ).normalize()
-      faceN.set(
-        anc.radialXZ.x * ca - tangentXZ.x * sa,
-        .12,
-        anc.radialXZ.z * ca - tangentXZ.z * sa,
-      ).normalize()
+    const ang = anc.yawJitter
+    const ca = Math.cos(ang), sa = Math.sin(ang)
+    // Vary the spray orientation around the branch for coverage from different views.
+    right.set(
+      tangentXZ.x * ca + anc.radialXZ.x * sa,
+      0,
+      tangentXZ.z * ca + anc.radialXZ.z * sa,
+    ).normalize()
+    faceN.set(
+      anc.radialXZ.x * ca - tangentXZ.x * sa,
+      .12,
+      anc.radialXZ.z * ca - tangentXZ.z * sa,
+    ).normalize()
 
-      const base = v
-      for (let j = 0; j <= ny; j++) {
-        const s = j / ny // 0 = branch anchor (top), 1 = trailing tip (bottom)
-        // Graceful fountain arch: starts gently curved over the dome shoulder then drops vertically
-        const outPush = anc.dropLen * (archBase * Math.sin(s * Math.PI * .75) + Math.max(0, -p.leafCurl) * .08 * s * s)
-        const sway = anc.dropLen * .045 * Math.sin(s * Math.PI * 1.15) * anc.swayDir
-        const cx = anc.pos.x + anc.radialXZ.x * outPush + tangentXZ.x * sway
-        // Soft fountain shoulder curve: gentle easing near top s=0..0.25 so dome top is velvety & rounded
-        const dropCurve = s < .25 ? s * (.72 + 1.12 * s) : s
-        const cy = Math.max(.08, anc.pos.y - anc.dropLen * dropCurve)
-        const cz = anc.pos.z + anc.radialXZ.z * outPush + tangentXZ.z * sway
-        // Narrower at branch root (s=0) widening into full curtain then tapering softly at tip
-        const wScale = .68 + .38 * Math.sin(Math.min(1, s * 1.08 + .08) * Math.PI)
-        const hw = halfW * wScale
-        const foldOffset = p.leafFold * hw * .35
+    const base = v
+    for (let j = 0; j <= ny; j++) {
+      const s = j / ny // 0 = branch anchor (top), 1 = trailing tip (bottom)
+      // Start with a gentle outward arc, then steepen the fall toward the tip.
+      const outPush = anc.dropLen * (archBase * Math.sin(s * Math.PI * .56) + Math.max(0, -p.leafCurl) * .08 * s * s)
+      const sway = anc.dropLen * .14 * Math.sin(s * Math.PI * .86) * anc.swayDir
+      const cx = anc.pos.x + anc.radialXZ.x * outPush + tangentXZ.x * sway
+      const dropCurve = s * (.48 + .52 * s)
+      const cy = anc.pos.y - anc.dropLen * dropCurve
+      const cz = anc.pos.z + anc.radialXZ.z * outPush + tangentXZ.z * sway
+      // Narrow the spray at the attachment and the tip.
+      const wScale = .68 + .38 * Math.sin(Math.min(1, s * 1.08 + .08) * Math.PI)
+      const hw = halfW * wScale
+      const foldOffset = p.leafFold * hw * .35 * s
 
-        for (let i = 0; i <= 1; i++) {
-          const side = i === 0 ? -1 : 1
-          world.set(
-            cx + right.x * side * hw + faceN.x * foldOffset,
-            cy,
-            cz + right.z * side * hw + faceN.z * foldOffset,
-          )
-          envelopeNormal(env, world, p.normalSource, envN)
-          nVec.copy(faceN).lerp(envN, p.normalSpherize)
-          if (nVec.lengthSq() < 1e-8) nVec.copy(envN)
-          nVec.normalize()
+      for (let i = 0; i <= 1; i++) {
+        const side = i === 0 ? -1 : 1
+        world.set(
+          cx + right.x * side * hw + faceN.x * foldOffset,
+          cy,
+          cz + right.z * side * hw + faceN.z * foldOffset,
+        )
+        envelopeNormal(env, world, p.normalSource, envN)
+        nVec.copy(faceN).lerp(envN, p.normalSpherize)
+        if (nVec.lengthSq() < 1e-8) nVec.copy(envN)
+        nVec.normalize()
 
-          positions[v * 3] = world.x
-          positions[v * 3 + 1] = world.y
-          positions[v * 3 + 2] = world.z
-          normals[v * 3] = nVec.x
-          normals[v * 3 + 1] = nVec.y
-          normals[v * 3 + 2] = nVec.z
-          centers[v * 3] = world.x
-          centers[v * 3 + 1] = world.y
-          centers[v * 3 + 2] = world.z
-          corners[v * 2] = 0
-          corners[v * 2 + 1] = 0
-          // UV: s=0 (top anchor) -> v=1 (top of texture); s=1 (trailing tip) -> v=0 (bottom of texture)
-          uvs[v * 2] = (atlasCol + i) / p.atlasCols
-          uvs[v * 2 + 1] = 1 - (atlasRow + s) / p.atlasRows
+        positions[v * 3] = world.x
+        positions[v * 3 + 1] = world.y
+        positions[v * 3 + 2] = world.z
+        normals[v * 3] = nVec.x
+        normals[v * 3 + 1] = nVec.y
+        normals[v * 3 + 2] = nVec.z
+        centers[v * 3] = world.x
+        centers[v * 3 + 1] = world.y
+        centers[v * 3 + 2] = world.z
+        corners[v * 2] = 0
+        corners[v * 2 + 1] = 0
+        // UV: s=0 (top anchor) -> v=1 (top of texture); s=1 (trailing tip) -> v=0 (bottom of texture)
+        uvs[v * 2] = (atlasCol + (anc.swayDir < 0 ? 1 - i : i)) / p.atlasCols
+        uvs[v * 2 + 1] = 1 - (atlasRow + s) / p.atlasRows
 
-          const rho = radiusOf(world)
-          const outMix = clamp((rho - .28) / .78)
-          // Slightly deeper green inside upper boughs, brighter translucent sunlit green along hanging tips
-          const tipLift = .84 + .22 * s
-          const occlusion = (1 - p.aoStrength * (1 - outMix) * .72 - p.aoStrength * clamp(-envN.y) * .16) * tipLift
-          col.copy(inner).lerp(outer, clamp(outMix * .78 + s * .24)).multiplyScalar(occlusion * shade)
-          colors[v * 3] = col.r
-          colors[v * 3 + 1] = col.g
-          colors[v * 3 + 2] = col.b
-          v++
-        }
+        const rho = radiusOf(world)
+        const outMix = clamp((rho - .28) / .78)
+        // Slightly deeper green inside upper boughs, brighter translucent sunlit green along hanging tips
+        const tipLift = .84 + .22 * s
+        const occlusion = (1 - p.aoStrength * (1 - outMix) * .72 - p.aoStrength * clamp(-envN.y) * .16) * tipLift
+        col.copy(inner).lerp(outer, clamp(outMix * .78 + s * .24)).multiplyScalar(occlusion * shade)
+        colors[v * 3] = col.r
+        colors[v * 3 + 1] = col.g
+        colors[v * 3 + 2] = col.b
+        v++
       }
-      for (let j = 0; j < ny; j++) {
-        const a = base + j * 2, b = a + 1, c0 = a + 2, d = a + 3
-        indices.push(a, b, d, a, d, c0)
-      }
+    }
+    for (let j = 0; j < ny; j++) {
+      const a = base + j * 2, b = a + 1, c0 = a + 2, d = a + 3
+      indices.push(a, b, d, a, d, c0)
     }
   }
 

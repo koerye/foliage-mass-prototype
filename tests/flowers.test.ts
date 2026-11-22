@@ -1,14 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { Box3, Texture, Vector3 } from 'three'
+import { Box3, DataTexture, Mesh, MeshStandardMaterial, RGBAFormat, Texture, Vector3 } from 'three'
 import { buildTree } from '../src/tree/assemble'
+import { analyzeTextureColor } from '../src/tree/color-recolor'
 import { buildFlowers, sitesFromLeafCards } from '../src/tree/flowers'
 import { generateLeafCards } from '../src/broadleaf/leaves'
 import { optimizeAt } from '../src/tree/optimize'
-import { defaultOptimize, parseTreeSpec, presetSpec } from '../src/tree/spec'
+import { defaultOptimize, flowerBedLayouts, parseTreeSpec, presetSpec } from '../src/tree/spec'
 
 const textures = {
   leaf: new Texture(), needle: new Texture(), drape: new Texture(),
-  palm: new Texture(), grass: new Texture(), fern: new Texture(), flower: new Texture(), blossom: new Texture(),
+  palm: new Texture(), grass: new Texture(), fern: new Texture(), flower: new Texture(), blossom: new Texture(), stemLeaf: new Texture(),
 }
 
 describe('outer-surface flower decoration', () => {
@@ -91,31 +92,112 @@ describe('outer-surface flower decoration', () => {
 })
 
 describe('standalone flowerbed template (stemmed & pure)', () => {
-  it('flowerbed-stemmed builds curved green stems+leaves and blossom heads sitting on y >= 0', () => {
+  it('flowerbed-stemmed builds curved green stems, alpha-textured stem leaves, and blossom heads sitting on y >= 0', () => {
     const spec = presetSpec('flowerbed-stemmed')
     expect(spec.kind).toBe('flowerbed')
     expect(spec.flowerbed.withStems).toBe(true)
     const asset = buildTree(spec, textures)
-    const stems = asset.group.children.find(m => m.name === 'Flower stems and leaves') as unknown as { geometry: import('three').BufferGeometry } | undefined
-    const blossoms = asset.group.children.find(m => m.name === 'Flower blossoms') as unknown as { geometry: import('three').BufferGeometry } | undefined
+    const stems = asset.group.children.find(m => m.name === 'Flower stems') as Mesh | undefined
+    const stemLeaves = asset.group.children.find(m => m.name === 'Flower stem leaves') as Mesh | undefined
+    const blossoms = asset.group.children.find(m => m.name === 'Flower blossoms') as Mesh | undefined
     expect(stems).toBeTruthy()
+    expect(stemLeaves).toBeTruthy()
     expect(blossoms).toBeTruthy()
-    expect(asset.group.children).toHaveLength(2)
+    expect(asset.group.children).toHaveLength(3)
     expect(asset.stats.branches).toBeGreaterThan(20)
     expect(asset.stats.flowers).toBe(asset.stats.branches)
+    // Stem leaves use alpha-cutout material with valid [0,1] UVs
+    const slMat = stemLeaves!.material as MeshStandardMaterial
+    expect(slMat.alphaTest).toBeGreaterThan(0)
+    expect(slMat.map).toBeTruthy()
     // grounded stems & valid unit normals / UVs
-    const stemBox = new Box3().setFromObject(asset.group.children.find(m => m.name === 'Flower stems and leaves')!)
+    const stemBox = new Box3().setFromObject(stems!)
     expect(stemBox.min.y).toBeGreaterThanOrEqual(-1e-5)
-    for (const geo of [stems!.geometry, blossoms!.geometry]) {
+    for (const geo of [stems!.geometry, stemLeaves!.geometry, blossoms!.geometry]) {
       const n = geo.getAttribute('normal').array
       for (let i = 0; i < n.length; i += 9) expect(Math.hypot(n[i], n[i + 1], n[i + 2])).toBeCloseTo(1, 3)
       for (const v of geo.getAttribute('position').array) expect(Number.isFinite(v)).toBe(true)
     }
-    for (const v of blossoms!.geometry.getAttribute('uv').array) {
-      expect(v).toBeGreaterThanOrEqual(0)
-      expect(v).toBeLessThanOrEqual(1)
+    for (const geo of [stemLeaves!.geometry, blossoms!.geometry]) {
+      for (const v of geo.getAttribute('uv').array) {
+        expect(v).toBeGreaterThanOrEqual(0)
+        expect(v).toBeLessThanOrEqual(1)
+      }
     }
     asset.dispose()
+  })
+
+  it('supports all 6 flowerbed spatial layouts (dome, square, rect, ring, cluster, row) and JSON compat', () => {
+    const base = presetSpec('flowerbed-pure')
+    for (const layout of flowerBedLayouts) {
+      const spec = { ...base, flowerbed: { ...base.flowerbed, count: 48, spread: 1.0, layout } }
+      const asset = buildTree(spec, textures)
+      expect(asset.stats.flowers).toBeGreaterThan(24)
+      const blossoms = asset.group.children.find(m => m.name === 'Flower blossoms') as Mesh
+      const box = new Box3().setFromObject(blossoms)
+      const spanX = box.max.x - box.min.x
+      const spanZ = box.max.z - box.min.z
+      if (layout === 'rect') {
+        expect(spanX).toBeGreaterThan(spanZ * 1.8)
+      } else if (layout === 'square') {
+        expect(Math.abs(spanX - spanZ)).toBeLessThan(0.45)
+      } else if (layout === 'ring') {
+        // Center of ring (radius < 0.30) must be clear of flower centers
+        const cen = blossoms.geometry.getAttribute('leafCenter')
+        let centerCount = 0
+        for (let i = 0; i < cen.count; i++) {
+          if (Math.hypot(cen.getX(i), cen.getZ(i)) < 0.25) centerCount++
+        }
+        expect(centerCount).toBe(0)
+      }
+      asset.dispose()
+    }
+    // Legacy JSON without flowerbed.layout defaults safely to 'dome'
+    const legacy = JSON.parse(JSON.stringify(base))
+    delete legacy.flowerbed.layout
+    expect(parseTreeSpec(legacy).flowerbed.layout).toBe('dome')
+    const squareParsed = parseTreeSpec({ ...base, flowerbed: { ...base.flowerbed, layout: 'square' } })
+    expect(squareParsed.flowerbed.layout).toBe('square')
+  })
+
+  it('analyzes texture chroma accurately for perceptual HSL recoloring (colored vs neutral textures)', () => {
+    const makeSolidTex = (r: number, g: number, b: number) => {
+      const data = new Uint8Array(16 * 16 * 4)
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = 255
+      }
+      return new DataTexture(data, 16, 16, RGBAFormat)
+    }
+    const whiteTex = makeSolidTex(245, 245, 242)
+    const greenLeafTex = makeSolidTex(42, 188, 36)
+    const brownBarkTex = makeSolidTex(124, 90, 58)
+    // Mostly white daisy petals (82%) + bright orange stamen disc (18%) must stay in classic multiply (strength = 0)
+    const daisyData = new Uint8Array(16 * 16 * 4)
+    for (let i = 0; i < 16 * 16; i++) {
+      const o = i * 4
+      const isCore = i < 45
+      daisyData[o] = isCore ? 245 : 248
+      daisyData[o + 1] = isCore ? 168 : 246
+      daisyData[o + 2] = isCore ? 28 : 240
+      daisyData[o + 3] = 255
+    }
+    const daisyTex = new DataTexture(daisyData, 16, 16, RGBAFormat)
+
+    const whiteStats = analyzeTextureColor(whiteTex, 'foliage')
+    expect(whiteStats.strength).toBe(0)
+    expect(analyzeTextureColor(daisyTex, 'foliage').strength).toBe(0)
+
+    const greenStats = analyzeTextureColor(greenLeafTex, 'foliage')
+    expect(greenStats.strength).toBe(1)
+    expect(greenStats.meanH).toBeGreaterThan(0.25)
+    expect(greenStats.meanH).toBeLessThan(0.42)
+
+    const barkStats = analyzeTextureColor(brownBarkTex, 'bark')
+    expect(barkStats.strength).toBe(1)
+    expect(barkStats.meanL).toBeGreaterThan(0.2)
+    expect(barkStats.meanL).toBeLessThan(0.55)
+
+    whiteTex.dispose(); greenLeafTex.dispose(); brownBarkTex.dispose(); daisyTex.dispose()
   })
 
   it('flowerbed-pure builds blossoms only with zero stems (single draw call)', () => {

@@ -12,17 +12,62 @@ import type { CrownHandle, TreeSpec, XYZ } from './spec'
 const v3 = (a: XYZ) => new Vector3(a[0], a[1], a[2])
 export const falloff = (d: number) => d >= 1 ? 0 : (1 - d * d) ** 2
 
+/** Evaluates a smooth monotone vertical radial-scale curve `[u, scale][]` at normalized crown height `u ∈ [0, 1]`.
+ *  Returns `1.0` when undefined or fewer than 2 control points (preserving 100% baseline envelope behavior). */
+export function evalProfileCurve(curve: [number, number][] | undefined, u: number): number {
+  if (!curve || curve.length < 2) return 1
+  const t = Math.min(1, Math.max(0, u))
+  const n = curve.length
+  if (t <= curve[0][0]) return Math.min(1.85, Math.max(0.15, curve[0][1]))
+  if (t >= curve[n - 1][0]) return Math.min(1.85, Math.max(0.15, curve[n - 1][1]))
+
+  // Find bracketing segment
+  let i = 0
+  while (i < n - 2 && t > curve[i + 1][0]) i++
+  const x0 = curve[i][0], y0 = curve[i][1]
+  const x1 = curve[i + 1][0], y1 = curve[i + 1][1]
+  const dx = x1 - x0
+  if (dx < 1e-6) return Math.min(1.85, Math.max(0.15, y0))
+
+  // Smooth monotone Hermite tangents (Fritsch-Carlson clamping avoids overshoot spikes)
+  const secant = (idx: number) => {
+    const d = curve[idx + 1][0] - curve[idx][0]
+    return d > 1e-6 ? (curve[idx + 1][1] - curve[idx][1]) / d : 0
+  }
+  const dCur = secant(i)
+  const tangentAt = (idx: number) => {
+    if (idx === 0) return secant(0)
+    if (idx === n - 1) return secant(n - 2)
+    const dL = secant(idx - 1), dR = secant(idx)
+    if (dL * dR <= 0) return 0
+    return (2 * dL * dR) / (dL + dR)
+  }
+  const m0 = tangentAt(i)
+  const m1 = tangentAt(i + 1)
+  const s = (t - x0) / dx
+  const s2 = s * s, s3 = s2 * s
+  const val = (2 * s3 - 3 * s2 + 1) * y0
+    + (s3 - 2 * s2 + s) * dx * m0
+    + (-2 * s3 + 3 * s2) * y1
+    + (s3 - s2) * dx * m1
+  // Gentle clamp against any numerical edge noise
+  const lo = Math.min(y0, y1) - Math.abs(dCur * dx) * 0.08
+  const hi = Math.max(y0, y1) + Math.abs(dCur * dx) * 0.08
+  return Math.min(1.85, Math.max(0.15, Math.min(hi, Math.max(lo, val))))
+}
+
 export class CrownEnvelope {
   readonly kind: TreeSpec['kind']
   readonly y0: number
   readonly y1: number
   readonly width: number
   readonly axis: Vector3
-  private readonly depth: number
+  readonly depth: number
   private readonly n: number
   private readonly topBias: number
   private readonly cone: number
   private readonly irregularity: number
+  private readonly profileCurve?: [number, number][]
   private readonly phases: number[]
   private readonly shapes: { anchor: Vector3; offset: Vector3; radius: number }[]
   private readonly bares: { center: Vector3; radius: number }[]
@@ -39,6 +84,9 @@ export class CrownEnvelope {
     this.topBias = crown.topBias
     this.cone = crown.coneShape
     this.irregularity = crown.irregularity
+    this.profileCurve = crown.profileCurve && crown.profileCurve.length >= 2
+      ? [...crown.profileCurve].sort((a, b) => a[0] - b[0])
+      : undefined
     const random = rng(seedFor(spec.seed, 77))
     this.phases = [random(), random(), random()].map(x => x * Math.PI * 2)
     this.shapes = spec.handles.filter(h => h.kind === 'shape')
@@ -61,12 +109,13 @@ export class CrownEnvelope {
     return u <= 0 ? u : u >= 1 ? u : u ** (1 / this.topBias)
   }
 
-  /** normalized profile radius (0..1) at crown height fraction u */
+  /** normalized profile radius at crown height fraction u (modulated by optional vertical profileCurve) */
   profile(u: number) {
     const t = Math.min(1, Math.max(0, u))
-    if (this.kind === 'conifer') return Math.max(0, 1 - t) ** this.cone
+    const curveScale = evalProfileCurve(this.profileCurve, t)
+    if (this.kind === 'conifer') return (Math.max(0, 1 - t) ** this.cone) * curveScale
     const v = Math.abs(2 * this.remap(t) - 1)
-    return Math.max(0, 1 - v ** this.n) ** (1 / this.n)
+    return (Math.max(0, 1 - v ** this.n) ** (1 / this.n)) * curveScale
   }
 
   baseRadius(u: number, theta: number) { return this.width * this.profile(u) * this.angular(theta) }
@@ -89,8 +138,9 @@ export class CrownEnvelope {
       const radial = h / r
       return u < 0 ? Math.max(radial, 1 - u * 4) : radial
     }
+    const curveScale = evalProfileCurve(this.profileCurve, u)
     const v = Math.abs(2 * this.remap(u) - 1)
-    return ((h / ring) ** this.n + v ** this.n) ** (1 / this.n)
+    return ((h / Math.max(0.05, ring * curveScale)) ** this.n + v ** this.n) ** (1 / this.n)
   }
 
   displacement(p: Vector3, target = new Vector3()) {

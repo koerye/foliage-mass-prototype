@@ -253,4 +253,210 @@ describe('SpeedTree-style per-branch node editing (branchEdits)', () => {
     expect(minLum).toBeGreaterThan(.04)
     built.dispose()
   })
+
+  it('slides a primary limb and child branch along parent spline via socketDelta with welded sculpted wood', () => {
+    const base = presetSpec('broadleaf-driftwood')
+    const sk0 = buildSkeleton(base)
+    const limb = sk0.branches.find(b => b.role === 'limb')!
+    const child = sk0.branches.find(b => b.parentId === limb.id)!
+    const origLimbSock = limb.baseSocket!
+    const origChildSock = child.baseSocket!
+
+    const sk1 = buildSkeleton({
+      ...base,
+      branchEdits: [
+        { id: limb.id, socketDelta: -.28 },
+        { id: child.id, socketDelta: .22 },
+      ],
+    })
+    const limb1 = sk1.branches.find(b => b.id === limb.id)!
+    const child1 = sk1.branches.find(b => b.id === child.id)!
+
+    expect(limb1.baseSocket).toBeCloseTo(origLimbSock, 5)
+    expect(limb1.socket).toBeCloseTo(Math.max(.04, origLimbSock - .28), 3)
+    expect(limb1.points[0].distanceTo(sk1.trunk.curve.getPoint(limb1.socket!))).toBeLessThan(1e-3)
+    expect(limb1.points[0].y).toBeLessThan(limb.points[0].y - .3)
+
+    expect(child1.baseSocket).toBeCloseTo(origChildSock, 5)
+    expect(child1.socket).toBeCloseTo(Math.min(.98, origChildSock + .22), 3)
+    expect(child1.points[0].distanceTo(limb1.curve.getPoint(child1.socket!))).toBeLessThan(1e-3)
+
+    // Sculpted trunk collar welding rebuilds cleanly at the new slid socket without NaN vertices
+    const wood = buildWood(sk1.branches, base.trunk, base.seed, { detail: 1 })
+    const pos = wood.getAttribute('position')
+    expect(pos.count).toBeGreaterThan(200)
+    for (let i = 0; i < pos.count; i++) {
+      expect(Number.isFinite(pos.getX(i))).toBe(true)
+      expect(Number.isFinite(pos.getY(i))).toBe(true)
+      expect(Number.isFinite(pos.getZ(i))).toBe(true)
+    }
+    wood.dispose()
+  })
+
+  it('translates single limbs and trunk freely via BranchEdit.offset with child propagation & clean detached wood', () => {
+    const base = presetSpec('broadleaf-driftwood')
+    const sk0 = buildSkeleton(base)
+    const limb = sk0.branches.find(b => b.role === 'limb')!
+    const children0 = sk0.branches.filter(b => b.parentId === limb.id)
+    expect(children0.length).toBeGreaterThan(0)
+
+    const skOff = buildSkeleton({
+      ...base,
+      branchEdits: [{ id: limb.id, offset: [.9, .35, -.45] }],
+    })
+    const limbOff = skOff.branches.find(b => b.id === limb.id)!
+    expect(limbOff.points[0].distanceTo(limb.points[0].clone().add(new Vector3(.9, .35, -.45)))).toBeLessThan(1e-3)
+
+    // Children follow the detached limb rigidly and stay anchored on it
+    for (const c0 of children0) {
+      const c1 = skOff.branches.find(b => b.id === c0.id)!
+      expect(c1.points[0].distanceTo(limbOff.curve.getPoint(c1.socket!))).toBeLessThan(1e-3)
+      expect(c1.points[0].distanceTo(c0.points[0].clone().add(new Vector3(.9, .35, -.45)))).toBeLessThan(.02)
+    }
+
+    // Detached limb builds clean finite wood on sculpted welded trunk without stretched weld bridges
+    const wood = buildWood(skOff.branches, base.trunk, base.seed, { detail: 1 })
+    const pos = wood.getAttribute('position')
+    for (let i = 0; i < pos.count; i++) {
+      expect(Number.isFinite(pos.getX(i))).toBe(true)
+      expect(Number.isFinite(pos.getY(i))).toBe(true)
+      expect(Number.isFinite(pos.getZ(i))).toBe(true)
+    }
+    wood.dispose()
+
+    // Trunk free root offset carries trunk and all primary limbs together
+    const skTrunkOff = buildSkeleton({
+      ...base,
+      branchEdits: [{ id: 0, offset: [.6, .2, -.3] }],
+    })
+    expect(skTrunkOff.trunk.points[0].distanceTo(new Vector3(.6, .2, -.3))).toBeLessThan(1e-4)
+    const limbTrunkOff = skTrunkOff.branches.find(b => b.id === limb.id)!
+    expect(limbTrunkOff.points[0].distanceTo(skTrunkOff.trunk.curve.getPoint(limbTrunkOff.socket!))).toBeLessThan(1e-3)
+  })
+
+  it('applies global branch placement (startHeight/heightSpan/azimuthOffset/childStart) and X/Y/Z assembly offset', () => {
+    const base = presetSpec('broadleaf-round')
+    const sk0 = buildSkeleton(base)
+    const limbs0 = sk0.branches.filter(b => b.role === 'limb')
+
+    // 1. Lower startHeight + tighter heightSpan moves primary limbs down along trunk
+    const skLow = buildSkeleton({
+      ...base,
+      branches: { ...base.branches, startHeight: .20, heightSpan: .32 },
+    })
+    const limbsLow = skLow.branches.filter(b => b.role === 'limb')
+    expect(Math.min(...limbsLow.map(b => b.socket!))).toBeLessThan(.35)
+    expect(Math.max(...limbsLow.map(b => b.socket!))).toBeCloseTo(.52, 2)
+
+    // 2. azimuthOffset rotates primary limbs around trunk horizontally
+    const skRot = buildSkeleton({
+      ...base,
+      branches: { ...base.branches, azimuthOffset: 90 },
+    })
+    const tip0 = limbs0[0].points.at(-1)!
+    const tipRot = skRot.branches.find(b => b.id === limbs0[0].id)!.points.at(-1)!
+    expect(Math.hypot(tipRot.x - tip0.x, tipRot.z - tip0.z)).toBeGreaterThan(1.0)
+
+    // 3. childStart pushes secondary branches outward along parent limbs (broadleaf & conifer)
+    const skChildOut = buildSkeleton({
+      ...base,
+      branches: { ...base.branches, childStart: .62 },
+    })
+    const childSocks = skChildOut.branches.filter(b => b.role === 'child').map(b => b.socket!)
+    expect(Math.min(...childSocks)).toBeGreaterThanOrEqual(.60)
+
+    const con = presetSpec('conifer-standard')
+    const conChildOut = buildSkeleton({
+      ...con,
+      branches: { ...con.branches, childCount: 3, childStart: .55, azimuthOffset: 45 },
+    })
+    const conChildSocks = conChildOut.branches.filter(b => b.role === 'child').map(b => b.socket!)
+    expect(conChildSocks.length).toBeGreaterThan(0)
+    expect(Math.min(...conChildSocks)).toBeGreaterThanOrEqual(.53)
+
+    // 4. Global offsetX/Y/Z shifts all non-trunk branches + envelope + full tree assembly cleanly
+    const shiftedSpec = {
+      ...base,
+      branches: { ...base.branches, offsetX: 1.2, offsetY: .5, offsetZ: -.6 },
+    }
+    const skShift = buildSkeleton(shiftedSpec)
+    // Trunk stays rooted at origin while limbs and envelope shift
+    expect(skShift.trunk.points[0].length()).toBeLessThan(1e-6)
+    expect(skShift.branches[1].points[0].distanceTo(
+      sk0.branches[1].points[0].clone().add(new Vector3(1.2, .5, -.6)),
+    )).toBeLessThan(1e-4)
+    expect(skShift.envelope.axis.x - sk0.envelope.axis.x).toBeGreaterThan(.8)
+
+    const built = buildTree(shiftedSpec, dummyTextures)
+    expect(built.stats.leaves).toBeGreaterThan(50)
+    expect(built.stats.triangles).toBeGreaterThan(200)
+    built.dispose()
+  })
+
+  it('keeps backward compatibility in parseTreeSpec for legacy branches and round-trips socketDelta & offset', () => {
+    const legacyBroad = JSON.parse(JSON.stringify(presetSpec('broadleaf-round')))
+    delete legacyBroad.branches.startHeight
+    delete legacyBroad.branches.heightSpan
+    delete legacyBroad.branches.azimuthOffset
+    delete legacyBroad.branches.childStart
+    delete legacyBroad.branches.offsetX
+    delete legacyBroad.branches.offsetY
+    delete legacyBroad.branches.offsetZ
+    const parsedBroad = parseTreeSpec(legacyBroad)
+    expect(parsedBroad.branches.startHeight).toBeCloseTo(.58, 5)
+    expect(parsedBroad.branches.heightSpan).toBeCloseTo(.38, 5)
+    expect(parsedBroad.branches.azimuthOffset).toBe(0)
+    expect(parsedBroad.branches.childStart).toBeCloseTo(.26, 5)
+    expect(parsedBroad.branches.offsetX).toBe(0)
+
+    const legacyCon = JSON.parse(JSON.stringify(presetSpec('conifer-standard')))
+    delete legacyCon.branches.childStart
+    const parsedCon = parseTreeSpec(legacyCon)
+    expect(parsedCon.branches.childStart).toBeCloseTo(.06, 5)
+
+    const withEdits = parseTreeSpec({
+      ...presetSpec('broadleaf-open'),
+      branchEdits: [
+        { id: 0, socketDelta: .4, offset: [5.5, -1.2, .3] },
+        { id: 2, socketDelta: -1.5, offset: [.4, -.5, .25] },
+      ],
+    })
+    expect(withEdits.branchEdits).toHaveLength(2)
+    // Trunk ignores socketDelta but keeps clamped offset
+    expect(withEdits.branchEdits![0].socketDelta).toBeUndefined()
+    expect(withEdits.branchEdits![0].offset).toEqual([4, -1.2, .3])
+    // Limb clamps socketDelta to -0.95 and preserves offset
+    expect(withEdits.branchEdits![1].socketDelta).toBe(-.95)
+    expect(withEdits.branchEdits![1].offset).toEqual([.4, -.5, .25])
+  })
+
+  it('prevents outer-cap craters on protruding sculpted limbs (broadleaf-wishing regression)', () => {
+    const base = presetSpec('broadleaf-wishing')
+    const sculpted = {
+      ...base,
+      branches: { ...base.branches, childCount: 0 },
+      branchEdits: [
+        { id: 2, lengthScale: 1.76, socketDelta: -.206, spineOffsets: [[.09, -.22, .09], [0, 0, 0], [0, 0, 0], [0, 0, 0]] as [number, number, number][] },
+      ],
+    }
+    const built = buildTree(sculpted, dummyTextures)
+    // Find the protruding limb #2 tip cluster and verify outer front cap has dense leaf cards (no hollow crater!)
+    const limb2 = built.skeleton.branches.find(b => b.id === 2)!
+    const tip = limb2.curve.getPoint(.84)
+    let leafMesh: Mesh | undefined
+    built.group.traverse(o => { if (o instanceof Mesh && o.name === 'Leaf cards') leafMesh = o })
+    expect(leafMesh).toBeDefined()
+    const cen = leafMesh!.geometry.getAttribute('leafCenter')
+    let outerCapHits = 0
+    const outDir = new Vector3(tip.x, 0, tip.z).normalize()
+    for (let i = 0; i < cen.count; i += 4) {
+      const dx = cen.getX(i) - tip.x
+      const dy = cen.getY(i) - tip.y
+      const dz = cen.getZ(i) - tip.z
+      const dist = Math.hypot(dx, dy, dz)
+      if (dist < 2.8 && (dx * outDir.x + dz * outDir.z) > 0.65) outerCapHits++
+    }
+    expect(outerCapHits).toBeGreaterThan(25)
+    built.dispose()
+  })
 })

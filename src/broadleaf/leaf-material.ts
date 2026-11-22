@@ -1,9 +1,10 @@
 // Browser-side leaf card material and a procedural placeholder leaf texture.
 // The user is expected to replace the texture with their own alpha leaf image.
 import {
-  CanvasTexture, Color, DoubleSide, MeshStandardMaterial, SRGBColorSpace, ShaderChunk, Texture,
+  CanvasTexture, Color, DoubleSide, MeshStandardMaterial, SRGBColorSpace, ShaderChunk, Texture, Vector2,
 } from 'three'
 import { rng } from '../shape'
+import { analyzeTextureColor, RECOLOR_GLSL_HELPERS } from '../tree/color-recolor'
 
 /** Frontier-BFS alpha dilation directly on an RGBA buffer (bit-exact with full-image
  *  multi-pass 8-neighbor dilation, but visits only the narrow transparent border band). */
@@ -209,6 +210,11 @@ export const foliageWind = {
   uWindStrength: { value: 0 },
 }
 
+/** Shared global RGB Normal Debug View toggle (0 = normal shaded foliage, 1 = live RGB world normal visualization). */
+export const foliageNormalView = {
+  uNormalDebug: { value: 0 },
+}
+
 export interface LeafStyleOptions {
   translucency?: number
   rimLight?: number
@@ -216,6 +222,8 @@ export interface LeafStyleOptions {
   topWarmth?: number
   /** Base hex color from which a harmonious cool shadow tint is derived */
   shadowFrom?: string
+  /** Force double-sided faces to keep custom sculpted vertex normals instead of flipping backfaces */
+  keepNormal?: boolean
 }
 
 /** Derive a luminance-preserving cool shadow tint from the foliage's inner color so
@@ -246,26 +254,35 @@ export function makeLeafMaterial(
   facing = 0,
   style: LeafStyleOptions = {},
 ) {
+  const customNormal = map?.userData?.normalMap as Texture | undefined
+  const customRoughness = map?.userData?.roughnessMap as Texture | undefined
   const material = new MeshStandardMaterial({
     name: map ? 'LeafCards' : 'GrassBlades',
     ...(map ? { map, alphaTest: alphaCutoff } : {}),
+    ...(customNormal ? { normalMap: customNormal, normalScale: new Vector2(0.48, 0.48) } : {}),
+    ...(customRoughness ? { roughnessMap: customRoughness } : {}),
     side: DoubleSide, vertexColors: true,
-    roughness: map ? .8 : .76, metalness: 0, alphaToCoverage: false,
+    roughness: customRoughness ? 0.96 : (map ? .8 : .76), metalness: 0, alphaToCoverage: false,
   })
+  const texStats = analyzeTextureColor(map, 'foliage')
   const uniforms = {
-    uLeafKeepNormal: { value: spherize >= .5 ? 1 : 0 },
+    uLeafKeepNormal: { value: (style.keepNormal ?? spherize >= .5) ? 1 : 0 },
     uLeafFacing: { value: facing },
     uLeafSSS: { value: style.translucency ?? .45 },
     uLeafRim: { value: style.rimLight ?? .32 },
     uShadowShift: { value: style.shadowShift ?? .34 },
     uTopWarmth: { value: style.topWarmth ?? .36 },
     uShadowTint: { value: deriveShadowTint(style.shadowFrom) },
+    uTexMeanH: { value: texStats.meanH },
+    uTexMeanS: { value: texStats.meanS },
+    uTexMeanL: { value: texStats.meanL },
+    uTexRecolor: { value: texStats.strength },
   }
   material.userData.leafUniforms = uniforms
-  material.customProgramCacheKey = () => map ? 'stylized-foliage-v4' : 'stylized-blade-v4'
+  material.customProgramCacheKey = () => map ? 'stylized-foliage-v6' : 'stylized-blade-v6'
   const isBladeMode = !map
   material.onBeforeCompile = shader => {
-    Object.assign(shader.uniforms, uniforms, foliageWind)
+    Object.assign(shader.uniforms, uniforms, foliageWind, foliageNormalView)
     const chunk = ShaderChunk.normal_fragment_begin
     if (!chunk.includes(flip)) console.warn('normal_fragment_begin layout changed; back faces will flip normals')
     shader.fragmentShader =
@@ -274,9 +291,15 @@ uniform float uLeafSSS;
 uniform float uLeafRim;
 uniform float uShadowShift;
 uniform float uTopWarmth;
+uniform float uNormalDebug;
 uniform vec3 uShadowTint;
+uniform float uTexMeanH;
+uniform float uTexMeanS;
+uniform float uTexMeanL;
+uniform float uTexRecolor;
 varying vec3 vLeafWorldNormal;
 varying vec3 vLeafObjPos;
+${RECOLOR_GLSL_HELPERS}
 float leafProcHash(vec3 p) {
   p = fract(p * vec3(0.1031, 0.1030, 0.0973));
   p += dot(p, p.yxz + 33.33);
@@ -292,7 +315,29 @@ float leafProcNoise(vec3 x) {
   );
 }\n` +
       shader.fragmentShader
-        .replace('#include <color_fragment>', `#include <color_fragment>
+        .replace('#include <map_fragment>', `
+          vec4 leafMapTexel = vec4( 1.0 );
+          #ifdef USE_MAP
+            leafMapTexel = texture2D( map, vMapUv );
+            diffuseColor.a *= leafMapTexel.a;
+          #endif`)
+        .replace('#include <color_fragment>', `
+          vec3 leafTgtCol = vec3( 1.0 );
+          #if defined( USE_COLOR ) || defined( USE_COLOR_ALPHA )
+            leafTgtCol = vColor.rgb;
+            diffuseColor.a *= vColor.a;
+          #endif
+          #ifdef USE_MAP
+            if ( uTexRecolor > 0.001 ) {
+              vec3 mulCol = leafMapTexel.rgb * leafTgtCol;
+              vec3 recCol = recTransferColor( leafMapTexel.rgb, leafTgtCol, uTexMeanH, uTexMeanS, uTexMeanL, 0.78 );
+              diffuseColor.rgb *= mix( mulCol, recCol, uTexRecolor );
+            } else {
+              diffuseColor.rgb *= leafMapTexel.rgb * leafTgtCol;
+            }
+          #else
+            diffuseColor.rgb *= leafTgtCol;
+          #endif
           {
             // 3D object-space procedural tonal & micro-grain variation (zero UV tiling repetition)
             float macroN = leafProcNoise(vLeafObjPos * 1.45) * 0.65 + leafProcNoise(vLeafObjPos * 3.8 + vec3(4.1, 2.3, 6.7)) * 0.35;
@@ -334,6 +379,11 @@ float leafProcNoise(vec3 x) {
           reflectedLight.directDiffuse *= mix( vec3( 1.0 ), leafTintBias, uTopWarmth );
           reflectedLight.indirectDiffuse *= mix( vec3( 1.0 ), leafTintBias, uTopWarmth * 0.6 );
         `)
+        .replace('#include <dithering_fragment>', `#include <dithering_fragment>
+          if ( uNormalDebug > 0.5 ) {
+            vec3 dbgN = normalize( vLeafWorldNormal ) * 0.5 + 0.5;
+            gl_FragColor = vec4( dbgN, diffuseColor.a );
+          }`)
     // Camera-facing blend + gentle live breeze sway + world normal & object-pos pass-through.
     shader.vertexShader = 'uniform float uLeafFacing;\nuniform float uWindTime;\nuniform float uWindStrength;\nattribute vec3 leafCenter;\nattribute vec2 leafCorner;\nvarying vec3 vLeafWorldNormal;\nvarying vec3 vLeafObjPos;\n' +
       shader.vertexShader

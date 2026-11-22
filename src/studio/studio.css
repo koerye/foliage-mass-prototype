@@ -24,15 +24,15 @@
 .s-texture output { display: block; font-size: 11px; color: #5b7260; margin: 2px 0 4px; word-break: break-all; }
 .s-texture-buttons { display: flex; gap: 6px; }
 .s-texture-buttons button { font-size: 11px; padding: 3px 8px; }
-.edit-tools { position: absolute; left: 12px; top: 12px; display: flex; flex-direction: column; gap: 6px; max-width: 266px; z-index: 4; }
-.edit-tools button { font-size: 11.5px; min-height: 27px; padding: 4px 8px; background: rgba(250, 250, 244, .95); border: 1px solid #d4dacb; border-radius: 6px; cursor: pointer; }
+.edit-tools { position: absolute; left: 12px; top: 12px; display: flex; flex-direction: column; gap: 6px; max-width: 292px; z-index: 4; }
+.edit-tools button { font-size: 11.5px; min-height: 27px; padding: 4px 7px; background: rgba(250, 250, 244, .95); border: 1px solid #d4dacb; border-radius: 6px; cursor: pointer; }
 .edit-tools button:disabled { opacity: .45; cursor: not-allowed; }
 #edit-toggle { align-self: flex-start; font-size: 12px; font-weight: 600; padding: 5px 11px; min-height: 31px; box-shadow: 0 3px 10px rgba(32, 48, 36, .08); }
 #edit-toggle[aria-pressed=true] { background: #264d36; color: #fff; border-color: #264d36; }
-.edit-group { display: flex; flex-direction: column; gap: 7px; padding: 8px; background: rgba(250, 250, 244, .94); backdrop-filter: blur(8px); border: 1px solid #d4dacb; border-radius: 10px; box-shadow: 0 8px 24px rgba(24, 38, 28, .12); }
+.edit-group { display: flex; flex-direction: column; gap: 7px; padding: 8px; max-height: calc(100dvh - 140px); overflow-y: auto; background: rgba(250, 250, 244, .94); backdrop-filter: blur(8px); border: 1px solid #d4dacb; border-radius: 10px; box-shadow: 0 8px 24px rgba(24, 38, 28, .12); }
 .edit-group[hidden] { display: none; }
-.st-mode-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: #e8ece0; padding: 3px; border-radius: 7px; }
-.st-mode-tabs button { border: 0; background: transparent; color: #465e4c; font-weight: 600; padding: 4px 6px; min-height: 25px; border-radius: 5px; }
+.st-mode-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; background: #e8ece0; padding: 3px; border-radius: 7px; }
+.st-mode-tabs button { border: 0; background: transparent; color: #465e4c; font-weight: 600; font-size: 11px; padding: 4px 4px; min-height: 25px; border-radius: 5px; white-space: nowrap; }
 .st-mode-tabs button[aria-pressed=true] { background: #fffef8; color: #1f4c32; box-shadow: 0 1px 4px rgba(24, 38, 28, .1); }
 .st-pane { display: flex; flex-direction: column; gap: 6px; }
 .st-pane[hidden] { display: none; }
@@ -60,7 +60,7 @@
 
 .st-sliders { display: grid; gap: 3px; padding: 5px 6px; background: #f2f4eb; border: 1px solid #dfe4d7; border-radius: 7px; }
 .st-sliders[hidden] { display: none; }
-.st-slider { display: grid; grid-template-columns: 32px 1fr 44px; gap: 5px; align-items: center; font-size: 11px; color: #36523d; }
+.st-slider { display: grid; grid-template-columns: 38px 1fr 48px; gap: 5px; align-items: center; font-size: 11px; color: #36523d; }
 .st-slider input[type=range] { -webkit-appearance: auto; appearance: auto; width: 100%; height: 15px; margin: 0; accent-color: #d99b18; cursor: ew-resize; }
 .st-slider output { text-align: right; font: 500 10.5px Consolas, monospace; color: #2a4232; font-variant-numeric: tabular-nums; }
 .st-guides-check { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #465f4d; cursor: pointer; user-select: none; }
@@ -79,7 +79,16 @@ path.st-handle:hover, path.st-handle.is-active, .st-handle:hover path, .st-handl
 .st-length-arrow { fill: #d63348; pointer-events: none; }
 .st-length-dot { fill: #141715; pointer-events: none; }
 
-.st-root-pin { fill: #a7b8ad; stroke: #181c19; stroke-width: 1.5; pointer-events: none; }
+.st-root-pin {
+  fill: #22c55e;
+  stroke: #0d2417;
+  stroke-width: 1.8;
+  pointer-events: all;
+  cursor: grab;
+  transition: fill 0.1s ease;
+}
+.st-root-pin.is-edited { fill: #10b981; stroke: #fbbf24; stroke-width: 2.4; }
+.st-root-pin:hover, .st-root-pin.is-active { fill: #4ade80; stroke: #07130d; cursor: grabbing; }
 .st-spline-pin {
   pointer-events: auto;
   cursor: move;
@@ -128,3 +137,12 @@ path.st-handle:hover, path.st-handle.is-active, .st-handle:hover path, .st-handl
 .opt-budget label { display: grid; grid-template-columns: 56px 1fr; gap: 5px; align-items: center; font-size: 11.5px; color: #405c45; }
 .opt-budget input { width: 100%; min-width: 0; border: 1px solid #e0e4d8; background: #f5f6ed; border-radius: 5px; padding: 4px 5px; font: 11px Consolas, monospace; }
 .opt-budget button { font-size: 11.5px; padding: 4px 10px; white-space: nowrap; }
+
+/* Built-in default preset override action bar (shared by Rock Studio & Classic Tree Studio) */
+.dp-bar { display: flex; gap: 5px; margin: 4px 0 8px; }
+.dp-bar[hidden] { display: none; }
+.dp-bar button { min-height: 28px; font-size: 11px; padding: 4px 8px; border-radius: 6px; }
+.dp-save-btn { flex: 1 1 auto; font-weight: 600; background: #e8f1e4; border-color: #bfd4b8; color: #264d36; }
+.dp-save-btn:hover { background: #dbead5; border-color: #9ec094; }
+.dp-factory-btn { flex: 0 0 auto; background: #faf5ea; border-color: #e2d1b2; color: #7a5528; }
+.dp-factory-btn:hover { background: #f5ead4; border-color: #cfb78a; }

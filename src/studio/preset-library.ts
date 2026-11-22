@@ -33,6 +33,12 @@ export interface PresetLibraryHost<T extends TreeSpec | AiSceneSpec, S> {
   store: PresetStore
   /** Optional built-in curated showcases displayed in a dedicated tab with live 3D hover preview. */
   showcases?: ShowcaseOption<T>[]
+  /** Optional set of user-deleted/hidden built-in showcase IDs. */
+  getHiddenShowcaseIds?(): ReadonlySet<string>
+  /** Optional hook to delete a built-in showcase from the case library. */
+  deleteShowcase?(showcase: ShowcaseOption<T>): void | Promise<void>
+  /** Optional hook to restore all deleted built-in showcases. */
+  restoreShowcases?(): void | Promise<void>
   /** Capture the live scene/tree state + fresh 3D thumbnail for saving. */
   capture(): CurrentCapture<T>
   /** Snapshot current working state before entering hover live-preview. */
@@ -78,6 +84,7 @@ export interface PresetLibraryController {
   setActiveId(id: string | undefined): void
   setActiveShowcaseId(id: string | undefined): void
   refreshCapture(syncName?: boolean): void
+  refreshShowcases(): void
   dispose(): void
 }
 
@@ -86,6 +93,16 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
 ): PresetLibraryController {
   const showcases = host.showcases ?? []
   const hasShowcases = showcases.length > 0
+  const canDeleteShowcase = Boolean(host.deleteShowcase)
+  const getVisibleShowcases = () => {
+    const hidden = host.getHiddenShowcaseIds?.()
+    return hidden && hidden.size ? showcases.filter(s => !hidden.has(s.id)) : showcases
+  }
+  const getHiddenShowcaseCount = () => {
+    const hidden = host.getHiddenShowcaseIds?.()
+    if (!hidden || !hidden.size) return 0
+    return showcases.filter(s => hidden.has(s.id)).length
+  }
   const drawer = document.createElement('aside')
   drawer.className = 'pl-drawer'
   drawer.id = 'preset-library-drawer'
@@ -95,7 +112,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     <header class="pl-head">
       ${hasShowcases
         ? `<div class="pl-tabs" role="tablist">
-            <button type="button" data-pl-tab="showcases" aria-pressed="false">✿ 案例库 <span class="pl-badge" id="pl-showcase-count">${showcases.length}</span></button>
+            <button type="button" data-pl-tab="showcases" aria-pressed="false">✿ 案例库 <span class="pl-badge" id="pl-showcase-count">${getVisibleShowcases().length}</span></button>
             <button type="button" data-pl-tab="mine" aria-pressed="true">★ 我的预设 <span class="pl-badge" id="pl-count">0</span></button>
           </div>`
         : `<h3>★ 我的预设库 <span class="pl-badge" id="pl-count">0</span></h3>`}
@@ -131,6 +148,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
       <div class="pl-empty" id="pl-empty" hidden>
         还没有保存的预设。<br>在左侧调好植物后，填个名字点上方「★ 保存为新预设」，即可带 3D 缩略图永久收藏并随时悬停预览。
       </div>
+      <div class="pl-restore-bar" id="pl-restore-bar" hidden></div>
     </div>
     <footer class="pl-foot">
       <div class="pl-foot-storage" id="pl-storage-info"><span class="pl-foot-dot"></span><span>本地预设库</span></div>
@@ -144,6 +162,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
 
   const q = <E extends HTMLElement = HTMLElement>(sel: string) => drawer.querySelector(sel) as E
   const countEl = q('#pl-count')
+  const showcaseCountEl = drawer.querySelector<HTMLElement>('#pl-showcase-count')
   const previewBar = q('#pl-preview-bar')
   const previewText = q('#pl-preview-text')
   const captureBox = q('#pl-capture-box')
@@ -157,6 +176,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
   const gridWrap = q('#pl-grid-wrap')
   const gridEl = q('#pl-grid')
   const emptyEl = q('#pl-empty')
+  const restoreBar = q('#pl-restore-bar')
   const storageInfo = q('#pl-storage-info')
   const importFile = q<HTMLInputElement>('#pl-import-file')
   const tabBtns = [...drawer.querySelectorAll<HTMLButtonElement>('[data-pl-tab]')]
@@ -181,9 +201,26 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     payload: s.build(),
   })
 
+  let hoverTimer: ReturnType<typeof setTimeout> | undefined
+  let renamingId: string | undefined
+  let confirmDeleteId: string | undefined
+  let confirmTimer: ReturnType<typeof setTimeout> | undefined
+  let confirmDeleteCaseId: string | undefined
+  let confirmCaseTimer: ReturnType<typeof setTimeout> | undefined
+
+  const clearConfirmTimers = () => {
+    if (confirmTimer !== undefined) { clearTimeout(confirmTimer); confirmTimer = undefined }
+    if (confirmCaseTimer !== undefined) { clearTimeout(confirmCaseTimer); confirmCaseTimer = undefined }
+    confirmDeleteId = undefined
+    confirmDeleteCaseId = undefined
+  }
+
   const setTab = (tab: PresetLibraryTab) => {
     const next: PresetLibraryTab = hasShowcases && tab === 'showcases' ? 'showcases' : 'mine'
-    if (next !== currentTab && (previewSnapshot || hoverTimer !== undefined)) endHoverPreview(true)
+    if (next !== currentTab) {
+      if (previewSnapshot || hoverTimer !== undefined) endHoverPreview(true)
+      clearConfirmTimers()
+    }
     currentTab = next
     for (const b of tabBtns) b.setAttribute('aria-pressed', String(b.dataset.plTab === currentTab))
     captureBox.hidden = currentTab === 'showcases'
@@ -192,10 +229,6 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     renderGrid()
   }
   for (const b of tabBtns) b.onclick = () => setTab(b.dataset.plTab as PresetLibraryTab)
-  let hoverTimer: ReturnType<typeof setTimeout> | undefined
-  let renamingId: string | undefined
-  let confirmDeleteId: string | undefined
-  let confirmTimer: ReturnType<typeof setTimeout> | undefined
 
   const clearHoverTimer = () => {
     if (hoverTimer !== undefined) { clearTimeout(hoverTimer); hoverTimer = undefined }
@@ -273,16 +306,32 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
   const renderGrid = () => {
     const all = host.store.list<T>(host.scope)
     countEl.textContent = String(all.length)
+    const visibleCases = getVisibleShowcases()
+    const hiddenCaseCount = getHiddenShowcaseCount()
+    if (showcaseCountEl) showcaseCountEl.textContent = String(visibleCases.length)
+    restoreBar.hidden = true
     updateStorageBadge()
     const kw = searchInput.value.trim().toLowerCase()
 
     if (currentTab === 'showcases' && hasShowcases) {
       const filteredCases = kw
-        ? showcases.filter(s => s.name.toLowerCase().includes(kw) || s.subtitle.toLowerCase().includes(kw) || s.tag.toLowerCase().includes(kw))
-        : showcases
+        ? visibleCases.filter(s => s.name.toLowerCase().includes(kw) || s.subtitle.toLowerCase().includes(kw) || s.tag.toLowerCase().includes(kw))
+        : visibleCases
       emptyEl.hidden = filteredCases.length > 0
       if (!filteredCases.length) {
-        emptyEl.innerHTML = '没有匹配的内置案例，试试清空搜索词。'
+        if (visibleCases.length === 0 && hiddenCaseCount > 0) {
+          emptyEl.innerHTML = `案例库中的素材已全部删除。${
+            host.restoreShowcases
+              ? `<div class="pl-empty-actions"><button type="button" class="pl-restore-btn" data-act="restore-cases">↺ 恢复全部内置案例（${hiddenCaseCount}）</button></div>`
+              : ''
+          }`
+        } else {
+          emptyEl.innerHTML = '没有匹配的内置案例，试试清空搜索词。'
+          if (hiddenCaseCount > 0 && host.restoreShowcases) {
+            restoreBar.hidden = false
+            restoreBar.innerHTML = `<span>已删除 ${hiddenCaseCount} 个内置案例</span><button type="button" class="pl-restore-btn" data-act="restore-cases">↺ 恢复已删案例</button>`
+          }
+        }
         gridEl.innerHTML = ''
         return
       }
@@ -293,6 +342,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         const tag = esc(s.tag)
         const activeCls = s.id === activeShowcaseId ? 'is-active' : ''
         const prevCls = 'showcase:' + s.id === previewingId ? 'is-previewing' : ''
+        const isConfirmDel = confirmDeleteCaseId === s.id
         return `<article class="pl-card ${activeCls} ${prevCls}" data-showcase-id="${sid}" title="单击加载全参数案例；悬停实时 3D 预览">
           <div class="pl-card-thumb">
             <div class="pl-card-noimg">✿</div>
@@ -302,13 +352,18 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
           <div class="pl-card-body">
             <div class="pl-card-title">${name}</div>
             <div class="pl-card-sub is-multi">${sub}</div>
-            <div class="pl-card-actions">
+            <div class="pl-card-actions${canDeleteShowcase ? ' is-case-3' : ''}">
               <button type="button" data-act="load-case" data-id="${sid}" title="载入此案例并可任意调参">载入编辑</button>
               <button type="button" data-act="fork-case" data-id="${sid}" title="载入并收藏一份到我的预设库">★ 收藏</button>
+              ${canDeleteShowcase ? `<button type="button" class="is-danger ${isConfirmDel ? 'is-confirm' : ''}" data-act="delete-case" data-id="${sid}" title="从案例库删除此素材">${isConfirmDel ? '确认删' : '删除'}</button>` : ''}
             </div>
           </div>
         </article>`
       }).join('')
+      if (hiddenCaseCount > 0 && host.restoreShowcases) {
+        restoreBar.hidden = false
+        restoreBar.innerHTML = `<span>已删除 ${hiddenCaseCount} 个内置案例</span><button type="button" class="pl-restore-btn" data-act="restore-cases">↺ 恢复已删案例</button>`
+      }
       return
     }
 
@@ -465,7 +520,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     if (target.closest('button, input')) return
     const card = target.closest<HTMLElement>('.pl-card')
     if (card?.dataset.showcaseId) {
-      const sc = showcases.find(s => s.id === card.dataset.showcaseId)
+      const sc = getVisibleShowcases().find(s => s.id === card.dataset.showcaseId)
       if (sc) startHoverPreview(showcaseToPreset(sc))
       return
     }
@@ -475,6 +530,16 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
   })
   gridWrap.addEventListener('pointerleave', () => {
     if (previewSnapshot || hoverTimer !== undefined) endHoverPreview(true)
+  })
+  gridWrap.addEventListener('click', async e => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-act="restore-cases"]')
+    if (!btn || !host.restoreShowcases) return
+    e.stopPropagation()
+    const count = getHiddenShowcaseCount()
+    clearConfirmTimers()
+    await host.restoreShowcases()
+    renderGrid()
+    host.message(count > 0 ? `已恢复全部 ${count} 个内置案例` : '案例库已为完整状态')
   })
 
   const applyShowcaseCard = (sc: ShowcaseOption<T>) => {
@@ -498,15 +563,33 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
       const act = btn.dataset.act
       const id = btn.dataset.id!
       if (act === 'load-case') {
-        const sc = showcases.find(s => s.id === id)
+        const sc = getVisibleShowcases().find(s => s.id === id)
         if (sc) applyShowcaseCard(sc)
       } else if (act === 'fork-case') {
-        const sc = showcases.find(s => s.id === id)
+        const sc = getVisibleShowcases().find(s => s.id === id)
         if (sc) {
           applyShowcaseCard(sc)
           capName.value = sc.name
           await saveNew()
           setTab('mine')
+        }
+      } else if (act === 'delete-case' && host.deleteShowcase) {
+        if (confirmDeleteCaseId !== id) {
+          confirmDeleteCaseId = id
+          if (confirmCaseTimer !== undefined) clearTimeout(confirmCaseTimer)
+          confirmCaseTimer = setTimeout(() => { confirmDeleteCaseId = undefined; confirmCaseTimer = undefined; renderGrid() }, 3200)
+          renderGrid()
+        } else {
+          if (confirmCaseTimer !== undefined) { clearTimeout(confirmCaseTimer); confirmCaseTimer = undefined }
+          confirmDeleteCaseId = undefined
+          if (previewingId === 'showcase:' + id) endHoverPreview(true)
+          const sc = showcases.find(s => s.id === id)
+          if (sc) {
+            await host.deleteShowcase(sc)
+            if (activeShowcaseId === id) activeShowcaseId = undefined
+            renderGrid()
+            host.message(`已从案例库删除「${sc.name}」`)
+          }
         }
       } else if (act === 'overwrite') {
         await overwritePreset(id)
@@ -544,7 +627,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     }
     const card = target.closest<HTMLElement>('.pl-card')
     if (card?.dataset.showcaseId) {
-      const sc = showcases.find(s => s.id === card.dataset.showcaseId)
+      const sc = getVisibleShowcases().find(s => s.id === card.dataset.showcaseId)
       if (sc) applyShowcaseCard(sc)
       return
     }
@@ -619,7 +702,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     close() {
       if (previewSnapshot || hoverTimer !== undefined) endHoverPreview(true)
       renamingId = undefined
-      confirmDeleteId = undefined
+      clearConfirmTimers()
       drawer.hidden = true
       document.body.classList.remove('pl-open')
     },
@@ -645,8 +728,15 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
       if (!drawer.hidden) renderGrid()
     },
     refreshCapture: (syncName = false) => { if (!drawer.hidden && !previewSnapshot && currentTab === 'mine') refreshCapture(syncName) },
+    refreshShowcases() {
+      if (activeShowcaseId && host.getHiddenShowcaseIds?.().has(activeShowcaseId)) {
+        activeShowcaseId = undefined
+      }
+      renderGrid()
+    },
     dispose() {
       endHoverPreview(false)
+      clearConfirmTimers()
       unsub()
       window.removeEventListener('keydown', onKeyDown)
       document.body.classList.remove('pl-open')

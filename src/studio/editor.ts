@@ -22,14 +22,20 @@ import {
   LineSegments, Matrix4, Mesh, MeshBasicMaterial, Object3D, Plane, Raycaster, SphereGeometry,
   TubeGeometry, Vector2, Vector3,
 } from 'three'
+import { foliageNormalView } from '../broadleaf/leaf-material'
 import type { Viewer } from '../viewport'
 import { CrownEnvelope } from '../tree/envelope'
-import { buildSkeleton, type Branch, type BranchRole, type Skeleton } from '../tree/skeleton'
+import {
+  buildNormalVectorsGeometry, cloneLeafNormalEdit, customNormalCenter, defaultLeafNormalEdit,
+  type LeafNormalEditSpec, type LeafNormalMode, type NormalBrushKind, type NormalBrushStroke,
+} from '../tree/leaf-normals'
+import { buildSkeleton, hasGlobalBranchOffset, type Branch, type BranchRole, type Skeleton } from '../tree/skeleton'
 import type { BranchEdit, CrownHandle, TreeSpec, XYZ } from '../tree/spec'
 import { estimateBranchTriangles } from '../tree/wood'
 
 export type EditMode = 'select' | 'add-shape' | 'add-bare'
-export type EditSubMode = 'nodes' | 'crown'
+export type EditSubMode = 'nodes' | 'crown' | 'normals'
+export type NormalTool = 'center' | NormalBrushKind | 'erase'
 export type GizmoKind = 'length' | 'pitch' | 'yaw' | 'gravity' | 'radius'
 
 export interface SelectedBranchInfo {
@@ -40,11 +46,14 @@ export interface SelectedBranchInfo {
   partLabel?: string
   length: number
   rootRadius: number
+  socket: number
+  baseSocket: number
   triangles: number
   descendants: number
   totalBones: number
   bare: boolean
-  edit: Required<Pick<BranchEdit, 'id' | 'lengthScale' | 'radiusScale' | 'pitchDelta' | 'yawDelta' | 'gravityDelta' | 'bare' | 'pruned'>> & {
+  edit: Required<Pick<BranchEdit, 'id' | 'lengthScale' | 'radiusScale' | 'pitchDelta' | 'yawDelta' | 'gravityDelta' | 'socketDelta' | 'bare' | 'pruned'>> & {
+    offset: XYZ
     spineOffsets: XYZ[]
   }
 }
@@ -61,9 +70,11 @@ export interface EditorHost {
   spec(): TreeSpec
   axis(): Vector3
   skeleton?(): Skeleton | undefined
+  foliageObject?(): Object3D | undefined
   partLabel?(): string | undefined
   setHandles(handles: CrownHandle[], final: boolean): void
   setBranchEdits?(edits: BranchEdit[], final: boolean): void
+  setNormalEdit?(next: LeafNormalEditSpec, final: boolean): void
   selected(handle: CrownHandle | undefined): void
   selectedBranch?(info: SelectedBranchInfo | undefined): void
   onStateChange?(): void
@@ -74,6 +85,7 @@ export interface EditorHost {
 interface UndoEntry {
   branchEdits: BranchEdit[]
   handles: CrownHandle[]
+  normalEdit: LeafNormalEditSpec
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg'
@@ -82,7 +94,11 @@ const v3 = (a: XYZ) => new Vector3(...a)
 const xyz = (v: Vector3): XYZ => [v.x, v.y, v.z]
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 const cloneEdits = (edits: BranchEdit[] | undefined): BranchEdit[] =>
-  (edits ?? []).map(e => ({ ...e, ...(e.spineOffsets ? { spineOffsets: e.spineOffsets.map(p => [...p] as XYZ) } : {}) }))
+  (edits ?? []).map(e => ({
+    ...e,
+    ...(e.offset ? { offset: [...e.offset] as XYZ } : {}),
+    ...(e.spineOffsets ? { spineOffsets: e.spineOffsets.map(p => [...p] as XYZ) } : {}),
+  }))
 const cloneHandles = (handles: CrownHandle[]): CrownHandle[] =>
   handles.map(h => ({ ...h, anchor: [...h.anchor] as XYZ, offset: [...h.offset] as XYZ }))
 
@@ -123,6 +139,7 @@ function normalizeEdit(id: number, raw?: BranchEdit) {
     const p = raw?.spineOffsets?.[i]
     return p ? [p[0], p[1], p[2]] : [0, 0, 0]
   })
+  const ro = raw?.offset
   return {
     id,
     lengthScale: raw?.lengthScale ?? 1,
@@ -130,6 +147,8 @@ function normalizeEdit(id: number, raw?: BranchEdit) {
     pitchDelta: raw?.pitchDelta ?? 0,
     yawDelta: raw?.yawDelta ?? 0,
     gravityDelta: raw?.gravityDelta ?? 0,
+    socketDelta: raw?.socketDelta ?? 0,
+    offset: (ro ? [ro[0], ro[1], ro[2]] : [0, 0, 0]) as XYZ,
     bare: Boolean(raw?.bare),
     pruned: Boolean(raw?.pruned),
     spineOffsets: offs,
@@ -143,6 +162,10 @@ function compactEdit(e: ReturnType<typeof normalizeEdit>): BranchEdit | undefine
   if (Math.abs(e.pitchDelta) > 1e-3) out.pitchDelta = Number(e.pitchDelta.toFixed(2))
   if (Math.abs(e.yawDelta) > 1e-3) out.yawDelta = Number(e.yawDelta.toFixed(2))
   if (Math.abs(e.gravityDelta) > 1e-4) out.gravityDelta = Number(e.gravityDelta.toFixed(3))
+  if (e.id !== 0 && Math.abs(e.socketDelta) > 1e-4) out.socketDelta = Number(e.socketDelta.toFixed(3))
+  if (e.offset[0] * e.offset[0] + e.offset[1] * e.offset[1] + e.offset[2] * e.offset[2] > 1e-7) {
+    out.offset = [Number(e.offset[0].toFixed(3)), Number(e.offset[1].toFixed(3)), Number(e.offset[2].toFixed(3))]
+  }
   if (e.spineOffsets.some(o => o[0] * o[0] + o[1] * o[1] + o[2] * o[2] > 1e-7)) {
     out.spineOffsets = e.spineOffsets.map(([x, y, z]) => [Number(x.toFixed(3)), Number(y.toFixed(3)), Number(z.toFixed(3))] as XYZ)
   }
@@ -159,6 +182,23 @@ const GIZMO_LABELS: Record<GizmoKind, string> = {
   radius: '粗细 (半径)',
 }
 
+function makeOrthoRingsGeo(segs = 36): BufferGeometry {
+  const pos: number[] = []
+  for (let i = 0; i < segs; i++) {
+    const a0 = (i / segs) * Math.PI * 2
+    const a1 = ((i + 1) / segs) * Math.PI * 2
+    const c0 = Math.cos(a0), s0 = Math.sin(a0)
+    const c1 = Math.cos(a1), s1 = Math.sin(a1)
+    // XY, XZ, YZ great-circle rings
+    pos.push(c0, s0, 0, c1, s1, 0)
+    pos.push(c0, 0, s0, c1, 0, s1)
+    pos.push(0, c0, s0, 0, c1, s1)
+  }
+  const g = new BufferGeometry()
+  g.setAttribute('position', new Float32BufferAttribute(pos, 3))
+  return g
+}
+
 export class CrownEditor {
   readonly group = new Group()
   enabled = false
@@ -166,6 +206,7 @@ export class CrownEditor {
   mode: EditMode = 'select'
   showGuides = true
   selectedId: number | undefined
+  hoveredHandleId: number | undefined
   selectedBranchId: number | undefined
   hoveredBranchId: number | undefined
 
@@ -180,11 +221,14 @@ export class CrownEditor {
   private readonly knobGeo = new SphereGeometry(1, 16, 12)
   private readonly zoneGeo = new SphereGeometry(1, 20, 14)
   private readonly matShape = new MeshBasicMaterial({ color: '#ff9038', depthTest: false })
+  private readonly matBackShape = new MeshBasicMaterial({ color: '#c46c2b', transparent: true, opacity: .62, depthTest: false })
+  private readonly matHover = new MeshBasicMaterial({ color: '#fff482', depthTest: false })
   private readonly matSelected = new MeshBasicMaterial({ color: '#ffe033', depthTest: false })
   private readonly matBare = new MeshBasicMaterial({ color: '#e0564f', depthTest: false })
   private readonly matLine = new LineBasicMaterial({ color: '#d47c34', depthTest: false })
   private readonly matZoneShape = new MeshBasicMaterial({ color: '#ffb347', wireframe: true, transparent: true, opacity: .10, depthTest: false })
   private readonly matZoneBare = new MeshBasicMaterial({ color: '#e0564f', wireframe: true, transparent: true, opacity: .34, depthTest: false })
+  private lastHandleCycle?: { x: number; y: number; ids: number[]; idx: number }
 
   // Node edit 3D guides & selection highlight
   private readonly nodeGroup = new Group()
@@ -193,6 +237,25 @@ export class CrownEditor {
   private readonly selectLine = new Line(new BufferGeometry(), new LineBasicMaterial({ color: '#ffca28', transparent: true, opacity: 1, depthTest: false }))
   private readonly selectTubeMat = new MeshBasicMaterial({ color: '#ffd23d', transparent: true, opacity: .24, depthTest: false, depthWrite: false })
   private selectTube?: Mesh
+
+  // Custom Leaf Normal Editor 3D visuals (RGB vector needles + draggable projection center + brush zones)
+  normalTool: NormalTool = 'center'
+  normalBrushRadius = 1.15
+  normalBrushStrength = 0.72
+  showNormalVectors = true
+  normalDebugColor = false
+  private readonly normalGroup = new Group()
+  private readonly normalVectors = new LineSegments(new BufferGeometry(), new LineBasicMaterial({ vertexColors: true, transparent: true, opacity: .92, depthTest: false }))
+  private readonly normalCenterMat = new MeshBasicMaterial({ color: '#22e3d4', depthTest: false })
+  private readonly normalCenterKnob: Mesh
+  private readonly normalCenterCross = new LineSegments(new BufferGeometry(), new LineBasicMaterial({ vertexColors: true, depthTest: false }))
+  private readonly normalBrushZones = new Group()
+  private readonly normalRingGeo = makeOrthoRingsGeo(36)
+  private readonly normalBrushMat = new LineBasicMaterial({ color: '#38bdf8', transparent: true, opacity: .40, depthTest: false })
+  private readonly normalCursorMesh: LineSegments
+  private readonly normalCursorMat = new LineBasicMaterial({ color: '#22e3d4', transparent: true, opacity: .78, depthTest: false })
+  private dragNormalCenter?: { plane: Plane; grab: Vector3; baseCenter: Vector3; startEdit: LeafNormalEditSpec; snapshot: UndoEntry; moved: boolean }
+  private dragNormalBrush?: { strokeId: number; anchorLocal: Vector3; lastLocal: Vector3; snapshot: UndoEntry; isErase: boolean }
 
   // SpeedTree Crisp Vector Gizmo Overlay (SVG + Tooltip locked to 3D branch pivot)
   private readonly overlay: HTMLDivElement
@@ -204,10 +267,10 @@ export class CrownEditor {
   private readonly gizmoEls = new Map<GizmoKind, SVGElement>()
   private readonly splineEls: SVGCircleElement[] = []
   private readonly rootDot: SVGCircleElement
-  private hoveredGizmo?: GizmoKind | `spline-${number}`
+  private hoveredGizmo?: GizmoKind | 'root' | `spline-${number}`
 
   // Interaction state
-  private dragCrown?: { id: number; plane: Plane; grab: Vector3 }
+  private dragCrown?: { id: number; plane: Plane; grab: Vector3; startX: number; startY: number; snapshot: UndoEntry; moved: boolean }
   private dragHandles?: CrownHandle[]
   private dragGizmo?: {
     kind: GizmoKind
@@ -230,10 +293,23 @@ export class CrownEditor {
     snapshot: UndoEntry
     moved: boolean
   }
+  private dragRoot?: {
+    branchId: number
+    mode: 'slide' | 'offset'
+    parentBranchId?: number
+    baseSocket: number
+    plane: Plane
+    grab: Vector3
+    startLocal: Vector3
+    startEdit: ReturnType<typeof normalizeEdit>
+    snapshot: UndoEntry
+    moved: boolean
+  }
   private clickCandidate?: { x: number; y: number }
   private cachedSkeleton?: Skeleton
   private lastCamSig = ''
   private pivotScreen = { x: 0, y: 0, angleDeg: 0, dir2: [0, -1] as [number, number], perp2: [1, 0] as [number, number], visible: false }
+  private rootScreen = { x: -100, y: -100 }
   private splineScreens: { x: number; y: number }[] = []
   private readonly undoStack: UndoEntry[] = []
   private readonly removeRenderListener: () => void
@@ -248,7 +324,17 @@ export class CrownEditor {
     this.hoverLine.visible = false
     this.selectLine.visible = false
     this.nodeGroup.add(this.guideLines, this.hoverLine, this.selectLine)
-    this.group.add(this.crownGroup, this.nodeGroup)
+    this.normalCenterKnob = new Mesh(this.knobGeo, this.normalCenterMat)
+    this.normalCenterKnob.renderOrder = 1002
+    this.normalCenterKnob.userData.isNormalCenter = true
+    this.normalVectors.renderOrder = 995
+    this.normalCenterCross.renderOrder = 1001
+    this.normalCursorMesh = new LineSegments(this.normalRingGeo, this.normalCursorMat)
+    this.normalCursorMesh.renderOrder = 1000
+    this.normalCursorMesh.visible = false
+    this.normalGroup.add(this.normalVectors, this.normalBrushZones, this.normalCenterCross, this.normalCenterKnob, this.normalCursorMesh)
+    this.normalGroup.visible = false
+    this.group.add(this.crownGroup, this.nodeGroup, this.normalGroup)
     this.group.visible = false
     viewer.scene.add(this.group)
 
@@ -260,7 +346,20 @@ export class CrownEditor {
 
     this.svg = svgEl('svg', { class: 'st-gizmo-svg' })
     this.splineG = svgEl('g', { class: 'st-spline-group' })
-    this.rootDot = svgEl('circle', { class: 'st-root-pin', r: 4, cx: -100, cy: -100 })
+    this.rootDot = svgEl('circle', { class: 'st-root-pin', r: 6.5, cx: -100, cy: -100, 'data-gizmo': 'root' })
+    this.rootDot.addEventListener('pointerenter', () => {
+      this.hoveredGizmo = 'root'
+      this.syncOverlayGeometry(false)
+      this.updateTooltip()
+    })
+    this.rootDot.addEventListener('pointerleave', () => {
+      if (this.hoveredGizmo === 'root') {
+        this.hoveredGizmo = undefined
+        this.syncOverlayGeometry(false)
+        this.updateTooltip()
+      }
+    })
+    this.rootDot.addEventListener('pointerdown', e => this.onRootDown(e))
     this.splineG.append(this.rootDot)
     for (let i = 0; i < SPLINE_TS.length; i++) {
       const c = svgEl('circle', { class: 'st-spline-pin', r: 6, cx: -100, cy: -100, 'data-spline': i })
@@ -356,7 +455,11 @@ export class CrownEditor {
 
   private snapshot(): UndoEntry {
     const s = this.host.spec()
-    return { branchEdits: cloneEdits(s.branchEdits), handles: cloneHandles(s.handles) }
+    return {
+      branchEdits: cloneEdits(s.branchEdits),
+      handles: cloneHandles(s.handles),
+      normalEdit: cloneLeafNormalEdit(s.normalEdit),
+    }
   }
 
   private pushUndo(entry: UndoEntry) {
@@ -371,6 +474,7 @@ export class CrownEditor {
     const prev = this.undoStack.pop()
     if (!prev) return false
     if (this.host.setBranchEdits) this.host.setBranchEdits(prev.branchEdits, true)
+    if (this.host.setNormalEdit) this.host.setNormalEdit(prev.normalEdit, true)
     this.host.setHandles(prev.handles, true)
     this.host.onStateChange?.()
     this.refresh()
@@ -380,20 +484,26 @@ export class CrownEditor {
   setEnabled(on: boolean) {
     this.enabled = on
     this.group.visible = on
-    this.overlay.hidden = !on || this.subMode !== 'nodes'
+    this.overlay.hidden = !on || (this.subMode !== 'nodes' && this.subMode !== 'crown')
+    this.svg.style.display = this.subMode === 'nodes' ? '' : 'none'
     if (!on) {
       this.setMode('select')
       this.hoveredBranchId = undefined
+      this.hoveredHandleId = undefined
+      this.lastHandleCycle = undefined
       this.hoverBadge.hidden = true
       this.tooltip.hidden = true
+      this.normalCursorMesh.visible = false
+      foliageNormalView.uNormalDebug.value = 0
     } else {
-      // Auto-select crown sculpt on ground plants; SpeedTree node mode on trees (auto-selecting trunk for instant gizmo!)
-      if (this.isGroundKind) {
+      // Auto-select crown sculpt on ground plants when in nodes mode; keep 'normals' allowed for ALL plant kinds!
+      if (this.isGroundKind && this.subMode === 'nodes') {
         this.subMode = 'crown'
       } else if (this.subMode === 'nodes' && this.selectedBranchId === undefined) {
         const sk = this.currentSkeleton()
         if (sk.branches.length > 0) this.selectedBranchId = sk.branches[0].id
       }
+      foliageNormalView.uNormalDebug.value = this.subMode === 'normals' && this.normalDebugColor ? 1 : 0
     }
     this.refresh()
     this.host.onStateChange?.()
@@ -403,13 +513,67 @@ export class CrownEditor {
     if (sub === 'nodes' && this.isGroundKind) sub = 'crown'
     this.subMode = sub
     this.setMode('select')
-    this.overlay.hidden = !this.enabled || sub !== 'nodes'
+    this.hoveredHandleId = undefined
+    this.lastHandleCycle = undefined
+    this.hoverBadge.hidden = true
+    this.tooltip.hidden = true
+    this.overlay.hidden = !this.enabled || (sub !== 'nodes' && sub !== 'crown')
+    this.svg.style.display = sub === 'nodes' ? '' : 'none'
+    this.normalCursorMesh.visible = false
+    foliageNormalView.uNormalDebug.value = this.enabled && sub === 'normals' && this.normalDebugColor ? 1 : 0
     if (sub === 'nodes' && this.enabled && this.selectedBranchId === undefined) {
       const sk = this.currentSkeleton()
       if (sk.branches.length > 0) this.selectedBranchId = sk.branches[0].id
     }
+    this.viewer.renderer.domElement.style.cursor = sub === 'normals' && this.normalTool !== 'center' ? 'crosshair' : ''
     this.refresh()
     this.host.onStateChange?.()
+  }
+
+  setNormalTool(tool: NormalTool) {
+    this.normalTool = tool
+    this.normalCursorMesh.visible = false
+    if (this.enabled && this.subMode === 'normals') {
+      this.viewer.renderer.domElement.style.cursor = tool === 'center' ? '' : 'crosshair'
+    }
+    this.host.onStateChange?.()
+  }
+
+  setShowNormalVectors(on: boolean) {
+    this.showNormalVectors = on
+    this.normalVectors.visible = on && this.enabled && this.subMode === 'normals'
+    this.host.onStateChange?.()
+  }
+
+  setNormalDebugColor(on: boolean) {
+    this.normalDebugColor = on
+    foliageNormalView.uNormalDebug.value = this.enabled && this.subMode === 'normals' && on ? 1 : 0
+    this.host.onStateChange?.()
+  }
+
+  applyNormalPreset(mode: LeafNormalMode, patch: Partial<LeafNormalEditSpec> = {}) {
+    if (!this.host.setNormalEdit) return
+    this.pushUndo(this.snapshot())
+    const cur = cloneLeafNormalEdit(this.host.spec().normalEdit)
+    this.host.setNormalEdit({ ...cur, ...patch, mode }, true)
+    this.refresh()
+  }
+
+  clearNormalBrushes() {
+    if (!this.host.setNormalEdit) return
+    const cur = cloneLeafNormalEdit(this.host.spec().normalEdit)
+    if (!cur.brushes.length) return
+    this.pushUndo(this.snapshot())
+    cur.brushes = []
+    this.host.setNormalEdit(cur, true)
+    this.refresh()
+  }
+
+  resetNormalEdit() {
+    if (!this.host.setNormalEdit) return
+    this.pushUndo(this.snapshot())
+    this.host.setNormalEdit(defaultLeafNormalEdit(), true)
+    this.refresh()
   }
 
   setShowGuides(on: boolean) {
@@ -465,7 +629,9 @@ export class CrownEditor {
       partLabel: this.host.partLabel?.(),
       length: branch.length,
       rootRadius: branch.rootRadius,
-      triangles: estimateBranchTriangles(branch, spec.optimize.woodDetail, spec.kind === 'palm', spec.palm.ringCount),
+      socket: branch.socket ?? 0,
+      baseSocket: branch.baseSocket ?? branch.socket ?? 0,
+      triangles: estimateBranchTriangles(branch, spec.optimize.woodDetail, spec.kind === 'palm', spec.palm.ringCount, spec.trunk.sculpt),
       descendants: desc.size,
       totalBones: 1 + desc.size,
       bare: Boolean(branch.bare || edit.bare),
@@ -483,6 +649,7 @@ export class CrownEditor {
     const merged = {
       ...cur,
       ...patch,
+      offset: patch.offset ? ([patch.offset[0], patch.offset[1], patch.offset[2]] as XYZ) : cur.offset,
       spineOffsets: patch.spineOffsets ? patch.spineOffsets.map(p => [...p] as XYZ) : cur.spineOffsets,
     }
     this.commitBranchEdit(merged, final)
@@ -550,7 +717,7 @@ export class CrownEditor {
 
   private envelope(spec = this.host.spec()) {
     const skEnv = this.host.skeleton?.()?.envelope
-    if (skEnv && spec.branchEdits?.length) {
+    if (skEnv && (spec.branchEdits?.length || hasGlobalBranchOffset(spec.branches))) {
       return new CrownEnvelope(spec, skEnv.axis, { y0: skEnv.y0, y1: skEnv.y1, width: skEnv.width })
     }
     return new CrownEnvelope(spec, this.host.axis())
@@ -572,7 +739,15 @@ export class CrownEditor {
     }
   }
 
-  /** Rebuild 3D guides, crown handles, and SpeedTree SVG gizmos from current spec & skeleton. */
+  private clearNormalZones() {
+    for (const child of [...this.normalBrushZones.children]) {
+      this.normalBrushZones.remove(child)
+      const geo = (child as Mesh | LineSegments).geometry
+      if (geo && geo !== this.knobGeo && geo !== this.zoneGeo) geo.dispose()
+    }
+  }
+
+  /** Rebuild 3D guides, crown handles, normal vectors/gizmos, and SpeedTree SVG gizmos from current spec & skeleton. */
   refresh(handles = this.dragHandles ?? this.host.spec().handles) {
     this.cachedSkeleton = this.host.skeleton?.()
     if (!this.enabled) return
@@ -581,16 +756,69 @@ export class CrownEditor {
 
     this.crownGroup.visible = this.subMode === 'crown'
     this.nodeGroup.visible = this.subMode === 'nodes'
-    this.overlay.hidden = this.subMode !== 'nodes'
+    this.normalGroup.visible = this.subMode === 'normals'
+    this.overlay.hidden = this.subMode !== 'nodes' && this.subMode !== 'crown'
+    this.svg.style.display = this.subMode === 'nodes' ? '' : 'none'
 
     if (this.subMode === 'crown') {
       this.refreshCrown(spec, handles)
+      this.host.selectedBranch?.(undefined)
+    } else if (this.subMode === 'normals') {
+      this.refreshNormals(spec)
       this.host.selectedBranch?.(undefined)
     } else {
       this.refreshNodes()
     }
     this.group.updateMatrixWorld(true)
     this.syncOverlayGeometry(true)
+  }
+
+  private refreshNormals(spec: TreeSpec) {
+    const env = this.envelope(spec)
+    const ne = spec.normalEdit ?? defaultLeafNormalEdit()
+    const center = customNormalCenter(env, ne)
+    const size = Math.max(.09, spec.trunk.height * .022)
+    this.normalCenterKnob.position.copy(center)
+    this.normalCenterKnob.scale.setScalar(size)
+
+    // 3-axis RGB crosshair around the draggable projection center
+    const ax = size * 2.8
+    const cPos = [
+      center.x - ax, center.y, center.z, center.x + ax, center.y, center.z,
+      center.x, center.y - ax, center.z, center.x, center.y + ax, center.z,
+      center.x, center.y, center.z - ax, center.x, center.y, center.z + ax,
+    ]
+    const cCol = [
+      1, .3, .3, 1, .3, .3,
+      .3, 1, .3, .3, 1, .3,
+      .3, .6, 1, .3, .6, 1,
+    ]
+    this.normalCenterCross.geometry.dispose()
+    this.normalCenterCross.geometry = new BufferGeometry()
+    this.normalCenterCross.geometry.setAttribute('position', new Float32BufferAttribute(cPos, 3))
+    this.normalCenterCross.geometry.setAttribute('color', new Float32BufferAttribute(cCol, 3))
+
+    // Render sleek 3-axis orthogonal rings for painted local normal brush zones
+    this.clearNormalZones()
+    for (const b of ne.brushes ?? []) {
+      const zRing = new LineSegments(this.normalRingGeo, this.normalBrushMat)
+      zRing.position.set(b.center[0], b.center[1], b.center[2])
+      zRing.scale.setScalar(b.radius)
+      zRing.renderOrder = 994
+      this.normalBrushZones.add(zRing)
+    }
+    this.normalBrushZones.visible = this.showNormalVectors || this.normalTool !== 'center'
+
+    // Rebuild 3D RGB normal-vector needles directly from live foliage geometry!
+    this.normalVectors.geometry.dispose()
+    const foliageRoot = this.host.foliageObject?.()
+    if (foliageRoot) {
+      const needleLen = Math.max(.14, Math.min(.38, spec.trunk.height * .042))
+      this.normalVectors.geometry = buildNormalVectorsGeometry(foliageRoot, 680, needleLen)
+    } else {
+      this.normalVectors.geometry = new BufferGeometry()
+    }
+    this.normalVectors.visible = this.showNormalVectors
   }
 
   private refreshCrown(spec: TreeSpec, handles: CrownHandle[]) {
@@ -619,14 +847,50 @@ export class CrownEditor {
     this.shell.geometry.computeBoundingSphere()
 
     this.clearHandleMeshes()
+    this.group.updateMatrixWorld(true)
     const size = Math.max(.05, spec.trunk.height * .017)
-    for (const h of handles) {
-      const selected = h.id === this.selectedId
+    const camPos = this.viewer.camera.position
+
+    // Compute camera-ray depth & screen projection for every handle so overlapping front/back handles
+    // draw strictly back-to-front with distinct front vs occluded styling.
+    const meta = handles.map(h => {
       const at = h.kind === 'shape' ? v3(h.anchor).add(v3(h.offset)) : v3(h.anchor)
-      const knob = new Mesh(this.knobGeo, h.kind === 'bare' ? this.matBare : selected ? this.matSelected : this.matShape)
+      const worldAt = this.group.localToWorld(at.clone())
+      const camDist = worldAt.distanceTo(camPos)
+      const scr = this.projectLocalToStage(at)
+      return { h, at, camDist, sx: scr.x, sy: scr.y, sz: scr.z }
+    })
+    const occludedIds = new Set<number>()
+    for (let i = 0; i < meta.length; i++) {
+      if (meta[i].sz < -1 || meta[i].sz > 1) continue
+      for (let j = 0; j < meta.length; j++) {
+        if (i === j || meta[j].sz < -1 || meta[j].sz > 1) continue
+        if (meta[j].camDist < meta[i].camDist - 0.08 && Math.hypot(meta[i].sx - meta[j].sx, meta[i].sy - meta[j].sy) < 22) {
+          occludedIds.add(meta[i].h.id)
+          break
+        }
+      }
+    }
+    // Sort back-to-front so closer handles always receive higher renderOrder
+    meta.sort((a, b) => b.camDist - a.camDist)
+
+    meta.forEach(({ h, at }, rank) => {
+      const selected = h.id === this.selectedId
+      const hovered = h.id === this.hoveredHandleId
+      const occluded = occludedIds.has(h.id)
+      const mat = h.kind === 'bare'
+        ? this.matBare
+        : selected
+          ? this.matSelected
+          : hovered
+            ? this.matHover
+            : occluded
+              ? this.matBackShape
+              : this.matShape
+      const knob = new Mesh(this.knobGeo, mat)
       knob.position.copy(at)
-      knob.scale.setScalar(size * (selected ? 1.38 : 1))
-      knob.renderOrder = 1000
+      knob.scale.setScalar(size * (selected ? 1.42 : hovered ? 1.24 : occluded ? 0.90 : 1))
+      knob.renderOrder = 1000 + rank + (selected ? 40 : hovered ? 25 : 0)
       knob.userData.handleId = h.id
       this.handleMeshes.add(knob)
       if (h.kind === 'shape') {
@@ -638,14 +902,14 @@ export class CrownEditor {
           this.handleMeshes.add(line)
         }
       }
-      if (h.kind === 'bare' || selected) {
+      if (h.kind === 'bare' || selected || hovered) {
         const zone = new Mesh(this.zoneGeo, h.kind === 'bare' ? this.matZoneBare : this.matZoneShape)
         zone.position.copy(at)
         zone.scale.setScalar(h.radius)
         zone.renderOrder = 997
         this.handleMeshes.add(zone)
       }
-    }
+    })
   }
 
   private refreshNodes() {
@@ -720,13 +984,55 @@ export class CrownEditor {
     }
   }
 
+  /** Lightweight zero-alloc depth sort & occluded styling sync for crown handles when camera orbits. */
+  private updateCrownHandleDepths() {
+    const handles = this.dragHandles ?? this.host.spec().handles
+    if (!handles.length) return
+    const knobs = this.handleMeshes.children.filter((c): c is Mesh => c instanceof Mesh && c.userData.handleId !== undefined)
+    if (!knobs.length) return
+    this.group.updateMatrixWorld(true)
+    const spec = this.host.spec()
+    const size = Math.max(.05, spec.trunk.height * .017)
+    const camPos = this.viewer.camera.position
+    const byId = new Map(handles.map(h => [h.id, h]))
+    const meta = knobs.map(knob => {
+      const id = knob.userData.handleId as number
+      const worldAt = knob.getWorldPosition(new Vector3())
+      const scr = this.projectLocalToStage(knob.position)
+      return { knob, id, h: byId.get(id), camDist: worldAt.distanceTo(camPos), sx: scr.x, sy: scr.y, sz: scr.z }
+    })
+    const occludedIds = new Set<number>()
+    for (let i = 0; i < meta.length; i++) {
+      if (meta[i].sz < -1 || meta[i].sz > 1) continue
+      for (let j = 0; j < meta.length; j++) {
+        if (i === j || meta[j].sz < -1 || meta[j].sz > 1) continue
+        if (meta[j].camDist < meta[i].camDist - 0.08 && Math.hypot(meta[i].sx - meta[j].sx, meta[i].sy - meta[j].sy) < 22) {
+          occludedIds.add(meta[i].id)
+          break
+        }
+      }
+    }
+    meta.sort((a, b) => b.camDist - a.camDist)
+    meta.forEach(({ knob, id, h }, rank) => {
+      const selected = id === this.selectedId
+      const hovered = id === this.hoveredHandleId
+      const occluded = occludedIds.has(id)
+      knob.material = h?.kind === 'bare'
+        ? this.matBare
+        : selected ? this.matSelected : hovered ? this.matHover : occluded ? this.matBackShape : this.matShape
+      knob.scale.setScalar(size * (selected ? 1.42 : hovered ? 1.24 : occluded ? 0.90 : 1))
+      knob.renderOrder = 1000 + rank + (selected ? 40 : hovered ? 25 : 0)
+    })
+  }
+
   private onFrameSync = () => {
-    if (!this.enabled || this.subMode !== 'nodes') return
+    if (!this.enabled || (this.subMode !== 'nodes' && this.subMode !== 'crown')) return
     const cam = this.viewer.camera
     const sig = `${cam.position.x.toFixed(4)},${cam.position.y.toFixed(4)},${cam.position.z.toFixed(4)},${cam.zoom.toFixed(4)},${this.viewer.host.clientWidth}x${this.viewer.host.clientHeight}`
     if (sig !== this.lastCamSig) {
       this.lastCamSig = sig
-      this.syncOverlayGeometry(false)
+      if (this.subMode === 'nodes') this.syncOverlayGeometry(false)
+      else this.updateCrownHandleDepths()
     }
   }
 
@@ -771,11 +1077,19 @@ export class CrownEditor {
     // Project root anchor & 4 draggable spline nodes along selected branch
     this.splineG.style.display = ''
     const r0 = this.projectLocalToStage(sel.curve.getPoint(0))
+    this.rootScreen = { x: r0.x, y: r0.y }
     this.rootDot.setAttribute('cx', r0.x.toFixed(1))
     this.rootDot.setAttribute('cy', r0.y.toFixed(1))
 
     const spec = this.host.spec()
     const raw = spec.branchEdits?.find(e => e.id === sel.id)
+    const rootEdited = Boolean(
+      (raw?.socketDelta && Math.abs(raw.socketDelta) > 1e-4) ||
+      (raw?.offset && (raw.offset[0] * raw.offset[0] + raw.offset[1] * raw.offset[1] + raw.offset[2] * raw.offset[2] > 1e-6)),
+    )
+    this.rootDot.classList.toggle('is-edited', rootEdited)
+    this.rootDot.classList.toggle('is-active', Boolean(this.dragRoot) || this.hoveredGizmo === 'root')
+
     this.splineScreens = []
     for (let i = 0; i < SPLINE_TS.length; i++) {
       const sp = this.projectLocalToStage(sel.curve.getPoint(SPLINE_TS[i]))
@@ -794,7 +1108,8 @@ export class CrownEditor {
   }
 
   private syncGizmoActiveClasses() {
-    const activeKind = this.dragGizmo?.kind ?? (this.hoveredGizmo && !this.hoveredGizmo.startsWith('spline-') ? this.hoveredGizmo as GizmoKind : undefined)
+    const activeKind = this.dragGizmo?.kind
+      ?? (this.hoveredGizmo && this.hoveredGizmo !== 'root' && !this.hoveredGizmo.startsWith('spline-') ? this.hoveredGizmo as GizmoKind : undefined)
     for (const [k, el] of this.gizmoEls) {
       el.classList.toggle('is-active', activeKind === k)
     }
@@ -808,16 +1123,38 @@ export class CrownEditor {
     }
     const { x, y, dir2, perp2 } = this.pivotScreen
     const e = info.edit
+    const fmtSign = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}`
+    const maxW = Math.max(200, this.viewer.host.clientWidth - 220)
+    const maxH = Math.max(120, this.viewer.host.clientHeight - 36)
+
+    // Active root-anchor drag/hover tooltip
+    if (this.dragRoot || this.hoveredGizmo === 'root') {
+      const off = e.offset
+      const sockPct = Math.round(info.socket * 100)
+      const deltaPct = Math.round(e.socketDelta * 100)
+      if (this.dragRoot?.mode === 'slide') {
+        this.tooltip.textContent = `枝根滑动 · 挂点 ${sockPct}% (${deltaPct >= 0 ? '+' : ''}${deltaPct}%)`
+      } else if (this.dragRoot?.mode === 'offset') {
+        this.tooltip.textContent = `枝根位移 · Δ(${fmtSign(off[0])}, ${fmtSign(off[1])}, ${fmtSign(off[2])}) m`
+      } else if (info.role === 'trunk') {
+        this.tooltip.textContent = `树干根点 · 拖动自由平移 · Δ(${fmtSign(off[0])}, ${fmtSign(off[1])}, ${fmtSign(off[2])}) m`
+      } else {
+        this.tooltip.textContent = `枝根锚点 · 拖动沿父干滑动 (${sockPct}%) · Shift+拖自由平移`
+      }
+      this.tooltip.style.left = `${clamp(this.rootScreen.x + 14, 12, maxW).toFixed(1)}px`
+      this.tooltip.style.top = `${clamp(this.rootScreen.y - 12, 12, maxH).toFixed(1)}px`
+      this.tooltip.hidden = false
+      return
+    }
 
     // Active spline drag/hover tooltip
     const splineIdx = this.dragSpline ? this.dragSpline.index
       : this.hoveredGizmo?.startsWith('spline-') ? Number(this.hoveredGizmo.slice(7)) : -1
     if (splineIdx >= 0 && this.splineScreens[splineIdx]) {
       const off = e.spineOffsets[splineIdx]
-      const fmtSign = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}`
       this.tooltip.textContent = `样条节点 #${splineIdx + 1} · Δ(${fmtSign(off[0])}, ${fmtSign(off[1])}, ${fmtSign(off[2])}) m`
-      this.tooltip.style.left = `${(this.splineScreens[splineIdx].x + 14).toFixed(1)}px`
-      this.tooltip.style.top = `${(this.splineScreens[splineIdx].y - 12).toFixed(1)}px`
+      this.tooltip.style.left = `${clamp(this.splineScreens[splineIdx].x + 14, 12, maxW).toFixed(1)}px`
+      this.tooltip.style.top = `${clamp(this.splineScreens[splineIdx].y - 12, 12, maxH).toFixed(1)}px`
       this.tooltip.hidden = false
       return
     }
@@ -838,8 +1175,6 @@ export class CrownEditor {
     // Anchor tooltip neatly to the right of the gold length grip (just like SpeedTree!)
     const tipX = x + dir2[0] * 48 + perp2[0] * 18 + 8
     const tipY = y + dir2[1] * 48 + perp2[1] * 18 - 10
-    const maxW = Math.max(200, this.viewer.host.clientWidth - 190)
-    const maxH = Math.max(120, this.viewer.host.clientHeight - 36)
     this.tooltip.style.left = `${clamp(tipX, 12, maxW).toFixed(1)}px`
     this.tooltip.style.top = `${clamp(tipY, 12, maxH).toFixed(1)}px`
     this.tooltip.hidden = false
@@ -927,6 +1262,40 @@ export class CrownEditor {
     this.updateTooltip()
   }
 
+  private onRootDown(e: PointerEvent) {
+    if (!this.enabled || this.subMode !== 'nodes' || e.button !== 0) return
+    const info = this.getSelectedBranchInfo()
+    const sk = this.currentSkeleton()
+    const branch = info ? sk.branches.find(b => b.id === info.id) : undefined
+    if (!info || !branch) return
+    e.stopImmediatePropagation()
+    e.preventDefault()
+    this.group.updateMatrixWorld(true)
+    const startLocal = branch.curve.getPoint(0).clone()
+    const startWorld = this.group.localToWorld(startLocal.clone())
+    const normal = new Vector3()
+    this.viewer.camera.getWorldDirection(normal)
+    const plane = new Plane().setFromNormalAndCoplanarPoint(normal, startWorld)
+    const onPlane = new Vector3()
+    this.ray(e).ray.intersectPlane(plane, onPlane)
+    const mode: 'slide' | 'offset' =
+      branch.role === 'trunk' || branch.parentId === undefined || e.shiftKey ? 'offset' : 'slide'
+    this.dragRoot = {
+      branchId: info.id,
+      mode,
+      parentBranchId: branch.parentId,
+      baseSocket: branch.baseSocket ?? branch.socket ?? 0,
+      plane,
+      grab: startWorld.clone().sub(onPlane),
+      startLocal,
+      startEdit: normalizeEdit(info.id, info.edit),
+      snapshot: this.snapshot(),
+      moved: false,
+    }
+    this.viewer.controls.enabled = false
+    this.syncOverlayGeometry(true)
+  }
+
   private onSplineDown(e: PointerEvent, index: number) {
     if (!this.enabled || this.subMode !== 'nodes' || e.button !== 0) return
     const info = this.getSelectedBranchInfo()
@@ -964,8 +1333,99 @@ export class CrownEditor {
     return this.raycaster
   }
 
+  private raycastFoliagePoint(e: PointerEvent): Vector3 | undefined {
+    const foliageRoot = this.host.foliageObject?.()
+    if (!foliageRoot) return undefined
+    const meshes: Mesh[] = []
+    foliageRoot.traverse(o => {
+      if (o instanceof Mesh && o.visible && o.userData?.role === 'foliage' && o.name !== 'Ambient petals') meshes.push(o)
+    })
+    if (!meshes.length) return undefined
+    const hits = this.ray(e).intersectObjects(meshes, false)
+    if (!hits.length) return undefined
+    this.group.updateMatrixWorld(true)
+    return this.group.worldToLocal(hits[0].point.clone())
+  }
+
+  /** Depth-sorted front-to-back CrownHandle picking (supports ray hit + 16px screen radius for overlapping handles). */
+  pickHandlesAtClient(clientX: number, clientY: number): { id: number; knob: Mesh; camDist: number; screenDist: number }[] {
+    this.group.updateMatrixWorld(true)
+    const rect = this.viewer.renderer.domElement.getBoundingClientRect()
+    this.pointer.set((clientX - rect.left) / rect.width * 2 - 1, -(clientY - rect.top) / rect.height * 2 + 1)
+    this.raycaster.setFromCamera(this.pointer, this.viewer.camera)
+
+    const knobs = this.handleMeshes.children.filter((c): c is Mesh => c instanceof Mesh && c.userData.handleId !== undefined)
+    const rayHitIds = new Set(this.raycaster.intersectObjects(knobs, false).map(h => h.object.userData.handleId as number))
+    const sx = clientX - rect.left
+    const sy = clientY - rect.top
+    const camPos = this.viewer.camera.position
+    const hits: { id: number; knob: Mesh; camDist: number; screenDist: number }[] = []
+
+    for (const knob of knobs) {
+      const id = knob.userData.handleId as number
+      const scr = this.projectLocalToStage(knob.position)
+      if (scr.z < -1 || scr.z > 1) continue // ignore handles behind camera or beyond frustum
+      const screenDist = Math.hypot(scr.x - sx, scr.y - sy)
+      if (rayHitIds.has(id) || screenDist <= 16) {
+        const worldPos = knob.getWorldPosition(new Vector3())
+        hits.push({ id, knob, camDist: worldPos.distanceTo(camPos), screenDist })
+      }
+    }
+    // Primary sort: front-to-back camera distance (closest first); tie-break by screen distance
+    hits.sort((a, b) => (a.camDist - b.camDist) || (a.screenDist - b.screenDist))
+    return hits
+  }
+
   private onCanvasHover = (e: PointerEvent) => {
-    if (!this.enabled || this.subMode !== 'nodes' || this.dragGizmo || this.dragSpline) return
+    if (!this.enabled || this.dragGizmo || this.dragSpline || this.dragRoot || this.dragNormalCenter || this.dragNormalBrush || this.dragCrown) return
+    if (this.subMode === 'normals') {
+      if (this.normalTool !== 'center') {
+        const pt = this.raycastFoliagePoint(e)
+        if (pt) {
+          this.normalCursorMesh.position.copy(pt)
+          this.normalCursorMesh.scale.setScalar(this.normalBrushRadius)
+          this.normalCursorMesh.visible = true
+          this.viewer.renderer.domElement.style.cursor = 'crosshair'
+        } else {
+          this.normalCursorMesh.visible = false
+          this.viewer.renderer.domElement.style.cursor = ''
+        }
+      } else {
+        this.normalCursorMesh.visible = false
+        const hitC = this.ray(e).intersectObject(this.normalCenterKnob, false)[0]
+        this.viewer.renderer.domElement.style.cursor = hitC ? 'grab' : ''
+      }
+      return
+    }
+    if (this.subMode === 'crown') {
+      if (this.mode !== 'select') {
+        this.hoverBadge.hidden = true
+        return
+      }
+      const hits = this.pickHandlesAtClient(e.clientX, e.clientY)
+      const top = hits[0]
+      const nextHov = top?.id
+      if (nextHov !== this.hoveredHandleId) {
+        this.hoveredHandleId = nextHov
+        this.refreshCrown(this.host.spec(), this.dragHandles ?? this.host.spec().handles)
+      }
+      if (top) {
+        const rect = this.viewer.renderer.domElement.getBoundingClientRect()
+        const h = this.host.spec().handles.find(x => x.id === top.id)
+        const kindTxt = h?.kind === 'bare' ? '裸枝区' : '树冠控制点'
+        const stackTxt = hits.length > 1 ? ` · 前方 (共${hits.length}个重叠，再次点击切换后方)` : ' · 拖动塑形'
+        this.hoverBadge.textContent = `${kindTxt} #${top.id}${stackTxt}`
+        this.hoverBadge.style.left = `${(e.clientX - rect.left + 14).toFixed(0)}px`
+        this.hoverBadge.style.top = `${(e.clientY - rect.top - 10).toFixed(0)}px`
+        this.hoverBadge.hidden = false
+        this.viewer.renderer.domElement.style.cursor = 'grab'
+      } else {
+        this.hoverBadge.hidden = true
+        this.viewer.renderer.domElement.style.cursor = ''
+      }
+      return
+    }
+    if (this.subMode !== 'nodes') return
     const hit = this.pickBranchAt(e.clientX, e.clientY, true)
     const nextHover = hit && !hit.partId ? hit.branch.id : undefined
     if (nextHover !== this.hoveredBranchId) {
@@ -989,8 +1449,15 @@ export class CrownEditor {
 
   private onCanvasLeave = () => {
     this.hoveredBranchId = undefined
+    if (this.hoveredHandleId !== undefined) {
+      this.hoveredHandleId = undefined
+      if (this.enabled && this.subMode === 'crown') {
+        this.refreshCrown(this.host.spec(), this.dragHandles ?? this.host.spec().handles)
+      }
+    }
     this.hoverLine.visible = false
     this.hoverBadge.hidden = true
+    this.normalCursorMesh.visible = false
   }
 
   private onCanvasDown = (e: PointerEvent) => {
@@ -1000,6 +1467,73 @@ export class CrownEditor {
     if (this.subMode === 'nodes') {
       // Allow free camera orbiting on drag; short click selects a branch in 3D!
       this.clickCandidate = { x: e.clientX, y: e.clientY }
+      return
+    }
+
+    if (this.subMode === 'normals') {
+      const spec = this.host.spec()
+      // 1. Check draggable 3D Normal Projection Center Sphere first (works in center tool or direct click)
+      const hitCenter = this.ray(e).intersectObject(this.normalCenterKnob, false)[0]
+      if (hitCenter && this.host.setNormalEdit) {
+        e.stopImmediatePropagation()
+        e.preventDefault()
+        const normal = new Vector3()
+        this.viewer.camera.getWorldDirection(normal)
+        const worldPos = this.normalCenterKnob.getWorldPosition(new Vector3())
+        const plane = new Plane().setFromNormalAndCoplanarPoint(normal, worldPos)
+        const onPlane = new Vector3()
+        this.ray(e).ray.intersectPlane(plane, onPlane)
+        const env = this.envelope(spec)
+        const baseCenter = new Vector3(env.axis.x, env.y0 + env.height * 0.5, env.axis.z)
+        this.dragNormalCenter = {
+          plane,
+          grab: worldPos.clone().sub(onPlane),
+          baseCenter,
+          startEdit: cloneLeafNormalEdit(spec.normalEdit),
+          snapshot: this.snapshot(),
+          moved: false,
+        }
+        this.viewer.controls.enabled = false
+        return
+      }
+
+      // 2. Direct 3D Canopy Normal Brush painting (up / comb / puff / smooth / erase)
+      if (this.normalTool !== 'center' && this.host.setNormalEdit) {
+        const localHit = this.raycastFoliagePoint(e)
+        if (localHit) {
+          e.stopImmediatePropagation()
+          e.preventDefault()
+          const snap = this.snapshot()
+          const cur = cloneLeafNormalEdit(spec.normalEdit)
+          if (this.normalTool === 'erase') {
+            const before = cur.brushes.length
+            cur.brushes = cur.brushes.filter(b => Math.hypot(b.center[0] - localHit.x, b.center[1] - localHit.y, b.center[2] - localHit.z) > this.normalBrushRadius * 1.1)
+            if (cur.brushes.length !== before) {
+              this.pushUndo(snap)
+              this.host.setNormalEdit(cur, false)
+            }
+            this.dragNormalBrush = { strokeId: -1, anchorLocal: localHit.clone(), lastLocal: localHit.clone(), snapshot: snap, isErase: true }
+          } else {
+            const nextId = Math.max(0, ...cur.brushes.map(b => b.id)) + 1
+            const stroke: NormalBrushStroke = {
+              id: nextId,
+              kind: this.normalTool,
+              center: xyz(localHit),
+              radius: this.normalBrushRadius,
+              strength: this.normalBrushStrength,
+              direction: [0, 1, 0],
+            }
+            cur.brushes.push(stroke)
+            if (cur.brushes.length > 64) cur.brushes.shift()
+            this.host.setNormalEdit(cur, false)
+            this.dragNormalBrush = { strokeId: nextId, anchorLocal: localHit.clone(), lastLocal: localHit.clone(), snapshot: snap, isErase: false }
+          }
+          this.viewer.controls.enabled = false
+          return
+        }
+      }
+      // Clicking elsewhere allows free camera orbiting (or switching active part in AI mode)
+      if (this.host.otherParts && this.host.focusPart) this.clickCandidate = { x: e.clientX, y: e.clientY }
       return
     }
 
@@ -1022,25 +1556,43 @@ export class CrownEditor {
       this.host.selected(handle)
       return
     }
-    const knobs = this.handleMeshes.children.filter(c => c.userData.handleId !== undefined)
-    const hit = ray.intersectObjects(knobs, false)[0]
-    if (!hit) {
+    const hits = this.pickHandlesAtClient(e.clientX, e.clientY)
+    if (!hits.length) {
+      this.lastHandleCycle = undefined
       // Allow short click on another part's mesh in Crown sub-mode to switch single-part focus
       if (this.host.otherParts && this.host.focusPart) this.clickCandidate = { x: e.clientX, y: e.clientY }
       return
     }
     e.stopImmediatePropagation()
     e.preventDefault()
-    this.pushUndo(this.snapshot())
-    const id = hit.object.userData.handleId as number
+    const ids = hits.map(h => h.id)
+    let pickIdx = 0
+    if (hits.length > 1) {
+      const prev = this.lastHandleCycle
+      const sameStack = prev
+        && Math.hypot(prev.x - e.clientX, prev.y - e.clientY) <= 14
+        && prev.ids.length === ids.length
+        && prev.ids.every((v, k) => v === ids[k])
+      if (sameStack || (e.shiftKey && prev?.ids[0] === ids[0])) {
+        pickIdx = ((prev?.idx ?? 0) + 1) % hits.length
+      }
+      this.lastHandleCycle = { x: e.clientX, y: e.clientY, ids, idx: pickIdx }
+    } else {
+      this.lastHandleCycle = undefined
+    }
+    const chosen = hits[pickIdx]
+    const id = chosen.id
     this.selectedId = id
     const normal = new Vector3()
     this.viewer.camera.getWorldDirection(normal)
-    const worldPos = hit.object.getWorldPosition(new Vector3())
+    const worldPos = chosen.knob.getWorldPosition(new Vector3())
     const plane = new Plane().setFromNormalAndCoplanarPoint(normal, worldPos)
     const onPlane = new Vector3()
     ray.ray.intersectPlane(plane, onPlane)
-    this.dragCrown = { id, plane, grab: worldPos.clone().sub(onPlane) }
+    this.dragCrown = {
+      id, plane, grab: worldPos.clone().sub(onPlane),
+      startX: e.clientX, startY: e.clientY, snapshot: this.snapshot(), moved: false,
+    }
     this.dragHandles = cloneHandles(spec.handles)
     this.viewer.controls.enabled = false
     this.host.selected(spec.handles.find(h => h.id === id))
@@ -1083,6 +1635,67 @@ export class CrownEditor {
       return
     }
 
+    if (this.dragRoot) {
+      const dr = this.dragRoot
+      const next = normalizeEdit(dr.branchId, dr.startEdit)
+      if (dr.mode === 'slide' && dr.parentBranchId !== undefined) {
+        const sk = this.currentSkeleton()
+        const parent = sk.branches.find(b => b.id === dr.parentBranchId)
+        if (!parent) return
+        const rect = this.viewer.renderer.domElement.getBoundingClientRect()
+        const sx = e.clientX - rect.left
+        const sy = e.clientY - rect.top
+        const spec = this.host.spec()
+        // If global branch offset shifted limbs off trunk, align parent projection track with the shifted branch!
+        const shiftX = parent.role === 'trunk' ? (spec.branches.offsetX ?? 0) : 0
+        const shiftY = parent.role === 'trunk' ? (spec.branches.offsetY ?? 0) : 0
+        const shiftZ = parent.role === 'trunk' ? (spec.branches.offsetZ ?? 0) : 0
+        this.group.updateMatrixWorld(true)
+        const N = 48
+        const tMin = .04, tMax = .98
+        const sampleScreen = (t: number) => {
+          const p = parent.curve.getPoint(t)
+          if (shiftX || shiftY || shiftZ) p.set(p.x + shiftX, Math.max(0, p.y + shiftY), p.z + shiftZ)
+          return this.projectLocalToStage(p)
+        }
+        let bestDist = Infinity
+        let bestT = clamp(dr.baseSocket + dr.startEdit.socketDelta, tMin, tMax)
+        let prev = sampleScreen(tMin)
+        for (let i = 1; i <= N; i++) {
+          const t0 = tMin + ((i - 1) / N) * (tMax - tMin)
+          const t1 = tMin + (i / N) * (tMax - tMin)
+          const cur = sampleScreen(t1)
+          const { dist, t } = distToSegment2D(sx, sy, prev.x, prev.y, cur.x, cur.y)
+          if (dist < bestDist) {
+            bestDist = dist
+            bestT = t0 + (t1 - t0) * t
+          }
+          prev = cur
+        }
+        const rawDelta = clamp(bestT - dr.baseSocket, -.95, .95)
+        const nextDelta = Math.abs(rawDelta) < .004 ? 0 : rawDelta
+        if (Math.abs(nextDelta - dr.startEdit.socketDelta) > 1e-4) dr.moved = true
+        next.socketDelta = nextDelta
+      } else {
+        const worldPt = new Vector3()
+        if (!this.ray(e).ray.intersectPlane(dr.plane, worldPt)) return
+        worldPt.add(dr.grab)
+        this.group.updateMatrixWorld(true)
+        const curLocal = this.group.worldToLocal(worldPt)
+        const delta = curLocal.sub(dr.startLocal)
+        if (delta.lengthSq() > 1e-6) dr.moved = true
+        const baseOff = dr.startEdit.offset
+        next.offset = [
+          clamp(baseOff[0] + delta.x, -4, 4),
+          clamp(baseOff[1] + delta.y, -4, 4),
+          clamp(baseOff[2] + delta.z, -4, 4),
+        ]
+      }
+      this.commitBranchEdit(next, false)
+      this.updateTooltip()
+      return
+    }
+
     if (this.dragSpline) {
       const ds = this.dragSpline
       const worldPt = new Vector3()
@@ -1100,7 +1713,66 @@ export class CrownEditor {
       return
     }
 
+    if (this.dragNormalCenter && this.host.setNormalEdit) {
+      const dc = this.dragNormalCenter
+      const worldPt = new Vector3()
+      if (!this.ray(e).ray.intersectPlane(dc.plane, worldPt)) return
+      worldPt.add(dc.grab)
+      this.group.updateMatrixWorld(true)
+      const localPt = this.group.worldToLocal(worldPt)
+      const ox = clamp(localPt.x - dc.baseCenter.x, -4, 4)
+      const oy = clamp(localPt.y - dc.baseCenter.y, -4, 4)
+      const oz = clamp(localPt.z - dc.baseCenter.z, -4, 4)
+      dc.moved = true
+      const next = cloneLeafNormalEdit(dc.startEdit)
+      if (next.mode === 'auto') next.mode = 'radial'
+      next.centerOffsetX = Number(ox.toFixed(2))
+      next.centerOffsetY = Number(oy.toFixed(2))
+      next.centerOffsetZ = Number(oz.toFixed(2))
+      this.host.setNormalEdit(next, false)
+      return
+    }
+
+    if (this.dragNormalBrush && this.host.setNormalEdit) {
+      const db = this.dragNormalBrush
+      const localHit = this.raycastFoliagePoint(e)
+      if (!localHit) return
+      const cur = cloneLeafNormalEdit(this.host.spec().normalEdit)
+      if (db.isErase) {
+        cur.brushes = cur.brushes.filter(b => Math.hypot(b.center[0] - localHit.x, b.center[1] - localHit.y, b.center[2] - localHit.z) > this.normalBrushRadius * 1.1)
+        this.host.setNormalEdit(cur, false)
+      } else if (this.normalTool === 'comb') {
+        // Update stroke direction live from 3D drag vector across canopy surface!
+        const dir = localHit.clone().sub(db.anchorLocal)
+        if (dir.lengthSq() > 0.0025) {
+          dir.normalize()
+          const target = cur.brushes.find(b => b.id === db.strokeId)
+          if (target) {
+            target.direction = [Number(dir.x.toFixed(3)), Number(dir.y.toFixed(3)), Number(dir.z.toFixed(3))]
+            this.host.setNormalEdit(cur, false)
+          }
+        }
+      } else if (localHit.distanceTo(db.lastLocal) >= Math.max(0.22, this.normalBrushRadius * 0.45)) {
+        // Continuous painting along drag path for 'up' / 'puff' / 'smooth'
+        const nextId = Math.max(0, ...cur.brushes.map(b => b.id)) + 1
+        cur.brushes.push({
+          id: nextId,
+          kind: this.normalTool as NormalBrushKind,
+          center: xyz(localHit),
+          radius: this.normalBrushRadius,
+          strength: this.normalBrushStrength,
+          direction: [0, 1, 0],
+        })
+        if (cur.brushes.length > 64) cur.brushes.shift()
+        db.lastLocal.copy(localHit)
+        this.host.setNormalEdit(cur, false)
+      }
+      return
+    }
+
     if (this.dragCrown && this.dragHandles) {
+      if (!this.dragCrown.moved && Math.hypot(e.clientX - this.dragCrown.startX, e.clientY - this.dragCrown.startY) <= 2) return
+      this.dragCrown.moved = true
       const worldPoint = new Vector3()
       if (!this.ray(e).ray.intersectPlane(this.dragCrown.plane, worldPoint)) return
       worldPoint.add(this.dragCrown.grab)
@@ -1130,6 +1802,20 @@ export class CrownEditor {
       return
     }
 
+    if (this.dragRoot) {
+      const dr = this.dragRoot
+      this.dragRoot = undefined
+      this.viewer.controls.enabled = true
+      if (dr.moved) {
+        this.pushUndo(dr.snapshot)
+        const spec = this.host.spec()
+        const cur = normalizeEdit(dr.branchId, spec.branchEdits?.find(x => x.id === dr.branchId))
+        this.commitBranchEdit(cur, true)
+      }
+      this.syncOverlayGeometry(true)
+      return
+    }
+
     if (this.dragSpline) {
       const ds = this.dragSpline
       this.dragSpline = undefined
@@ -1141,6 +1827,28 @@ export class CrownEditor {
         this.commitBranchEdit(cur, true)
       }
       this.syncOverlayGeometry(true)
+      return
+    }
+
+    if (this.dragNormalCenter) {
+      const dc = this.dragNormalCenter
+      this.dragNormalCenter = undefined
+      this.viewer.controls.enabled = true
+      if (dc.moved && this.host.setNormalEdit) {
+        this.pushUndo(dc.snapshot)
+        this.host.setNormalEdit(cloneLeafNormalEdit(this.host.spec().normalEdit), true)
+      }
+      return
+    }
+
+    if (this.dragNormalBrush) {
+      const db = this.dragNormalBrush
+      this.dragNormalBrush = undefined
+      this.viewer.controls.enabled = true
+      if (this.host.setNormalEdit) {
+        if (!db.isErase) this.pushUndo(db.snapshot)
+        this.host.setNormalEdit(cloneLeafNormalEdit(this.host.spec().normalEdit), true)
+      }
       return
     }
 
@@ -1166,11 +1874,15 @@ export class CrownEditor {
     }
 
     if (!this.dragCrown || !this.dragHandles) return
+    const dc = this.dragCrown
     const handles = this.dragHandles
     this.dragCrown = undefined
     this.dragHandles = undefined
     this.viewer.controls.enabled = true
-    this.host.setHandles(handles, true)
+    if (dc.moved) {
+      this.pushUndo(dc.snapshot)
+      this.host.setHandles(handles, true)
+    }
   }
 
   removeSelected() {
@@ -1180,6 +1892,14 @@ export class CrownEditor {
     this.host.setHandles(spec.handles.filter(h => h.id !== this.selectedId), true)
     this.selectedId = undefined
     this.host.selected(undefined)
+  }
+
+  /** Client-space position of the 3D Normal Projection Center sphere (for automated UI checks). */
+  normalCenterScreen() {
+    if (!this.enabled || this.subMode !== 'normals') return undefined
+    this.group.updateMatrixWorld(true)
+    const pt = this.projectLocalToStage(this.normalCenterKnob.position)
+    return { x: pt.clientX, y: pt.clientY }
   }
 
   /** Client-space position of a crown handle (used by automated UI checks). */
@@ -1203,11 +1923,14 @@ export class CrownEditor {
     return { x: pt.clientX, y: pt.clientY }
   }
 
-  /** Client-space center point directly on an active SpeedTree gizmo handle or spline node pin (for E2E tests). */
-  gizmoScreen(target: GizmoKind | `spline-${number}`) {
+  /** Client-space center point directly on an active SpeedTree gizmo handle, root anchor, or spline node pin (for E2E tests). */
+  gizmoScreen(target: GizmoKind | 'root' | `spline-${number}`) {
     if (!this.enabled || this.subMode !== 'nodes' || !this.pivotScreen.visible) return undefined
     this.syncOverlayGeometry(false)
     const rect = this.viewer.renderer.domElement.getBoundingClientRect()
+    if (target === 'root') {
+      return { x: rect.left + this.rootScreen.x, y: rect.top + this.rootScreen.y }
+    }
     if (target.startsWith('spline-')) {
       const sp = this.splineScreens[Number(target.slice(7))]
       return sp ? { x: rect.left + sp.x, y: rect.top + sp.y } : undefined
@@ -1240,14 +1963,20 @@ export class CrownEditor {
     window.removeEventListener('keydown', this.onKeyDown)
     this.clearHandleMeshes()
     this.clearSelectTube()
+    this.clearNormalZones()
+    foliageNormalView.uNormalDebug.value = 0
     this.wire.geometry.dispose(); this.wire.material.dispose()
     this.shell.geometry.dispose(); this.shell.material.dispose()
     this.guideLines.geometry.dispose(); this.guideLines.material.dispose()
     this.hoverLine.geometry.dispose(); this.hoverLine.material.dispose()
     this.selectLine.geometry.dispose(); this.selectLine.material.dispose()
     this.selectTubeMat.dispose()
+    this.normalVectors.geometry.dispose(); this.normalVectors.material.dispose()
+    this.normalCenterCross.geometry.dispose(); this.normalCenterCross.material.dispose()
+    this.normalCenterMat.dispose(); this.normalBrushMat.dispose(); this.normalCursorMat.dispose(); this.normalRingGeo.dispose()
     this.knobGeo.dispose(); this.zoneGeo.dispose()
-    this.matShape.dispose(); this.matSelected.dispose(); this.matBare.dispose()
+    this.matShape.dispose(); this.matBackShape.dispose(); this.matHover.dispose()
+    this.matSelected.dispose(); this.matBare.dispose()
     this.matLine.dispose(); this.matZoneShape.dispose(); this.matZoneBare.dispose()
     this.overlay.remove()
     this.viewer.scene.remove(this.group)

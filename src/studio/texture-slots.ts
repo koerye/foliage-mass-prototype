@@ -4,18 +4,19 @@ import type { Texture } from 'three'
 import { loadLeafTexture, makePlaceholderLeafTexture } from '../broadleaf/leaf-material'
 import type { TreeTextures } from '../tree/assemble'
 import { loadBarkTexture, makeProceduralBarkPreview } from '../tree/bark-material'
+import { makeOakLeafAtlasTexture, makeOakLeafCardTexture } from '../texgraph/templates'
 import {
   makeBushSprigTexture, makeCloudLeafTexture, makeDrapeTexture, makeFernTexture, makeFlowerTexture, makeGrassTexture,
   makeMapleTexture, makeNeedleTexture, makeNeutralGrassTexture, makePalmTexture,
-  makeSakuraTexture, makeSingleFlowerTexture, makeWildRoseTexture, makeWillowTexture,
+  makeSakuraTexture, makeSingleFlowerTexture, makeStemLeafTexture, makeWildRoseTexture, makeWillowTexture,
 } from '../tree/textures'
 
-export const editableTextureSlots = ['bark', 'leaf', 'needle', 'drape', 'palm', 'grass', 'fern', 'flower', 'blossom'] as const
+export const editableTextureSlots = ['bark', 'leaf', 'needle', 'drape', 'palm', 'grass', 'fern', 'flower', 'blossom', 'stemLeaf'] as const
 export type EditableTextureSlot = typeof editableTextureSlots[number]
 
 export const allTextureSlots = [
   ...editableTextureSlots,
-  'grassTint', 'sakura', 'cloud', 'maple', 'willow', 'bush', 'wildrose',
+  'grassTint', 'sakura', 'cloud', 'oak', 'oakAtlas', 'maple', 'willow', 'bush', 'wildrose',
 ] as const
 export type AllTextureSlot = typeof allTextureSlots[number]
 
@@ -32,8 +33,11 @@ const defaultFactories: TextureFactories = {
   fern: () => makeFernTexture(),
   flower: () => makeFlowerTexture(),
   blossom: () => makeSingleFlowerTexture(),
+  stemLeaf: () => makeStemLeafTexture(),
   sakura: () => makeSakuraTexture(),
   cloud: () => makeCloudLeafTexture(),
+  oak: () => makeOakLeafCardTexture(),
+  oakAtlas: () => makeOakLeafAtlasTexture(),
   maple: () => makeMapleTexture(),
   willow: () => makeWillowTexture(),
   bush: () => makeBushSprigTexture(),
@@ -44,11 +48,12 @@ export interface TextureRegistry {
   /** TreeTextures-compatible object backed by lazy getters (avoid `{ ...textures }` spreads). */
   readonly textures: TreeTextures
   get(slot: AllTextureSlot): Texture
+  getCustom(slot: EditableTextureSlot): Texture | undefined
   isLoaded(slot: AllTextureSlot): boolean
   loadedSlots(): AllTextureSlot[]
   isCustom(slot: EditableTextureSlot): boolean
-  setCustom(slot: EditableTextureSlot, texture: Texture): void
-  resetDefault(slot: EditableTextureSlot): void
+  setCustom(slot: EditableTextureSlot, texture: Texture, disposePrev?: boolean): Texture | undefined
+  resetDefault(slot: EditableTextureSlot, disposePrev?: boolean): Texture | undefined
   dispose(): void
 }
 
@@ -84,18 +89,21 @@ export function createTextureRegistry(factories: TextureFactories = defaultFacto
   return {
     textures,
     get,
+    getCustom: slot => overrides[slot],
     isLoaded: slot => Boolean(defaults[slot] || overrides[slot as EditableTextureSlot]),
     loadedSlots: () => allTextureSlots.filter(s => Boolean(defaults[s] || overrides[s as EditableTextureSlot])),
     isCustom: slot => Boolean(overrides[slot]),
-    setCustom(slot, texture) {
+    setCustom(slot, texture, disposePrev = true) {
       const prev = overrides[slot]
-      if (prev && prev !== texture) prev.dispose()
+      if (disposePrev && prev && prev !== texture) prev.dispose()
       overrides[slot] = texture
+      return prev
     },
-    resetDefault(slot) {
+    resetDefault(slot, disposePrev = true) {
       const prev = overrides[slot]
-      if (prev) prev.dispose()
+      if (disposePrev && prev) prev.dispose()
       delete overrides[slot]
+      return prev
     },
     dispose() {
       for (const tex of Object.values(overrides)) tex?.dispose()
@@ -116,6 +124,10 @@ export interface BindTextureSlotsOptions {
   onResetTexture?: (slot: EditableTextureSlot) => boolean | void
   /** Optional active slot inspector override (used to display per-part custom thumbnails & labels). */
   resolveSlot?: (slot: EditableTextureSlot) => { texture?: Texture; label?: string } | undefined
+  /** Optional shortcut to open the Substance-style node editor for a slot. */
+  onOpenEditor?: (slot: EditableTextureSlot) => void
+  /** Optional shortcut to open the real-time texture library filtered to a slot. */
+  onOpenLibrary?: (slot: EditableTextureSlot) => void
   /** Called after a slot switches to a custom or default texture. */
   onChange: (slot: EditableTextureSlot) => void
   /** Status / error notification callback. */
@@ -195,6 +207,14 @@ export function bindTextureSlots(registry: TextureRegistry, opts: BindTextureSlo
         drawSlot(slot, true)
         opts.onChange(slot)
       }
+    }
+    const editBtn = document.getElementById(slot + '-edit') as HTMLButtonElement | null
+    if (editBtn && opts.onOpenEditor) {
+      editBtn.onclick = () => opts.onOpenEditor!(slot)
+    }
+    const libBtn = document.getElementById(slot + '-lib') as HTMLButtonElement | null
+    if (libBtn && opts.onOpenLibrary) {
+      libBtn.onclick = () => opts.onOpenLibrary!(slot)
     }
   }
 

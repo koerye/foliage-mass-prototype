@@ -4,6 +4,8 @@ import {
 } from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { foliageWind } from './broadleaf/leaf-material'
+import type { TreeMassConfig } from './config'
+import { assembleStylizedTree, type TreeAsset, type View } from './tree'
 
 export const cameraMap = {
   front: [0, .07, 1],
@@ -42,6 +44,13 @@ export const lightingPresets = {
     hemiSky: '#dff0f7', hemiGround: '#889c92', hemiIntensity: 1.28,
     shadowColor: '#364d4b', shadowOpacity: .19, exposure: 1.03,
   },
+  celestial: {
+    label: '仙韵青岚', bg: '#d7e7e0',
+    keyColor: '#fff5cf', keyIntensity: 2.38, keyDir: [.78, 1.75, 1.02] as const,
+    fillColor: '#bfe5db', fillIntensity: .78,
+    hemiSky: '#f0fbf5', hemiGround: '#98b9a6', hemiIntensity: 1.46,
+    shadowColor: '#3c5d58', shadowOpacity: .15, exposure: 1.12,
+  },
 } as const
 export type LightingPreset = keyof typeof lightingPresets
 export const background = lightingPresets.neutral.bg
@@ -51,6 +60,7 @@ export class Viewer {
   readonly scene = new Scene()
   readonly camera = new OrthographicCamera(-6, 6, 6, -6, .025, 140)
   readonly controls: OrbitControls
+  asset?: TreeAsset
   reference?: Object3D
   private readonly floorMat = new ShadowMaterial({ color: lightingPresets.neutral.shadowColor, opacity: lightingPresets.neutral.shadowOpacity })
   private readonly floor = new Mesh(new PlaneGeometry(200, 200), this.floorMat)
@@ -64,8 +74,10 @@ export class Viewer {
   private frameHeight = 7.2
   private shownHeight = 6
   private fixedView: Camera = 'angle'
+  private view: View = 'final'
   private frames = 0
   private stamp = performance.now()
+  private config?: TreeMassConfig
   private readonly renderListeners = new Set<() => void>()
 
   constructor(readonly host: HTMLElement, private readonly onStats = (_fps: number, _calls: number) => {}) {
@@ -115,6 +127,33 @@ export class Viewer {
     this.camera.updateProjectionMatrix()
   }
 
+  setTree(config: TreeMassConfig, frame = false) {
+    this.config = config
+    const prior = this.asset
+    if (prior) {
+      this.scene.remove(prior.group)
+      prior.dispose()
+    }
+    this.asset = assembleStylizedTree(config)
+    if (this.reference) this.scene.remove(this.reference)
+    this.reference = undefined
+    this.scene.add(this.asset.group)
+    this.shownHeight = config.totalHeight
+    this.animLighting()
+    this.setView(this.view, config)
+    if (frame || !prior) this.frame(this.fixedView)
+    return this.asset.stats()
+  }
+
+  setView(view: View, config = this.config) {
+    if (!config) return
+    this.view = view
+    this.config = config
+    this.asset?.display(view, config)
+    this.floor.visible = view !== 'silhouette' && view !== 'wireframe' && view !== 'flat'
+    this.renderer.shadowMap.needsUpdate = true
+  }
+
   setReference(model: Object3D, height: number) {
     const box = new Box3().setFromObject(model)
     const size = box.getSize(new Vector3()), center = box.getCenter(new Vector3())
@@ -127,6 +166,7 @@ export class Viewer {
 
   showModel(model: Object3D, height: number, reframe = true) {
     if (this.reference) this.scene.remove(this.reference)
+    if (this.asset) this.scene.remove(this.asset.group)
     this.scene.add(model)
     this.reference = model
     this.shownHeight = height
@@ -168,10 +208,10 @@ export class Viewer {
     this.renderer.shadowMap.needsUpdate = true
   }
 
-  frame(view: Camera) {
+  frame(view: Camera, center?: Vector3) {
     this.fixedView = view
     const h = this.shownHeight
-    const focus = new Vector3(0, h * .495, 0)
+    const focus = center ?? new Vector3(0, h * .495, 0)
     this.frameHeight = h * 1.19
     this.controls.enableDamping = false
     this.controls.update()
@@ -217,6 +257,7 @@ export class Viewer {
     cancelAnimationFrame(this.frameId)
     this.observer.disconnect()
     this.controls.dispose()
+    this.asset?.dispose()
     this.floor.geometry.dispose()
     this.floor.material.dispose()
     this.key.dispose()

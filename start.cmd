@@ -28,6 +28,7 @@ set "MODE_NAME=经典工作台 · Vegetation Studio v2"
 if /i "%~1"=="" goto mode_ok
 if /i "%~1"=="broadleaf" goto mode_ok
 if /i "%~1"=="ai" set "ENTRY=/ai.html" & set "MODE_NAME=AI 模式 · 空白丢图工程" & goto mode_ok
+if /i "%~1"=="rock" set "ENTRY=/rock.html" & set "MODE_NAME=石头工作台 · Rock Studio" & goto mode_ok
 if /i "%~1"=="sakura" set "ENTRY=/ai.html?showcase=sakura" & set "MODE_NAME=AI 模式 · 三干樱花盆景案例" & goto mode_ok
 if /i "%~1"=="legacy" set "ENTRY=/legacy.html" & set "MODE_NAME=旧版工作台 · Legacy" & goto mode_ok
 if /i "%~1"=="v1" set "ENTRY=/index.html" & set "MODE_NAME=初代体块原型 · v1" & goto mode_ok
@@ -48,6 +49,7 @@ echo   Vegetation Studio 启动中...
 echo   当前入口 : %MODE_NAME%
 echo ------------------------------------------------------------
 echo   经典工作台 : http://127.0.0.1:%STUDIO_PORT%/broadleaf.html
+echo   石头工作台 : http://127.0.0.1:%STUDIO_PORT%/rock.html
 echo   AI 模式    : http://127.0.0.1:%STUDIO_PORT%/ai.html
 echo   樱花案例   : http://127.0.0.1:%STUDIO_PORT%/ai.html?showcase=sakura
 echo ============================================================
@@ -70,6 +72,7 @@ echo 用法: start.cmd [模式] [端口]
 echo.
 echo   [双击/无参]  启动经典工作台 /broadleaf.html
 echo   broadleaf    启动经典工作台 /broadleaf.html
+echo   rock         启动风格化石头工作台 /rock.html
 echo   ai           启动 AI 空白丢图模式 /ai.html
 echo   sakura       启动 AI 模式并加载樱花盆景案例
 echo   legacy       启动旧版薄片工作台 /legacy.html
@@ -84,7 +87,7 @@ exit /b 0
 
 :usage_err
 echo.
-echo 可选模式: broadleaf ^| ai ^| sakura ^| legacy ^| v1
+echo 可选模式: broadleaf ^| rock ^| ai ^| sakura ^| legacy ^| v1
 popd
 pause
 exit /b 1

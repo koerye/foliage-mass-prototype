@@ -7,7 +7,8 @@ import {
   type StorageLike,
 } from '../src/studio/preset-store'
 import { presetSpec, type TreeSpec } from '../src/tree/spec'
-import { sakuraBonsaiShowcase } from '../src/ai/showcase'
+import { aiShowcases, sakuraBonsaiShowcase } from '../src/ai/showcase'
+import { createHiddenShowcaseStore } from '../src/ai/showcase-store'
 import type { AiSceneSpec } from '../src/ai/scene'
 
 function memoryStorage(): StorageLike & { data: Map<string, string> } {
@@ -262,5 +263,88 @@ describe('preset-store', () => {
     // mergePresetLists keeps newest timestamp
     const merged = mergePresetLists(storeB.list('tree'), storeA.list('tree'))
     expect(merged.length).toBe(1)
+  })
+})
+
+describe('ai hidden-showcase store', () => {
+  const validIds = aiShowcases.map(s => s.id)
+
+  it('hides, persists to localStorage, ignores unknown IDs, and restores built-in showcases', async () => {
+    const storage = memoryStorage()
+    const store = createHiddenShowcaseStore({ validIds, storage, apiUrl: null })
+    await store.ready()
+
+    let notifications = 0
+    const unsub = store.subscribe(() => { notifications++ })
+
+    expect(store.hiddenCount()).toBe(0)
+    expect(await store.hide('non-existent-case')).toBe(false)
+    expect(await store.hide('sakura')).toBe(true)
+    expect(await store.hide('sakura')).toBe(false) // already hidden
+    expect(store.isHidden('sakura')).toBe(true)
+    expect(store.hiddenCount()).toBe(1)
+    expect(notifications).toBe(1)
+
+    // Fresh store recovers deleted showcase IDs synchronously from localStorage
+    const reloaded = createHiddenShowcaseStore({ validIds, storage, apiUrl: null })
+    expect(reloaded.isHidden('sakura')).toBe(true)
+    expect(reloaded.listHiddenIds()).toEqual(['sakura'])
+
+    expect(await store.hide('flowering-bush')).toBe(true)
+    expect(store.hiddenCount()).toBe(2)
+
+    expect(await store.restore('sakura')).toBe(true)
+    expect(store.isHidden('sakura')).toBe(false)
+    expect(store.isHidden('flowering-bush')).toBe(true)
+
+    expect(await store.restoreAll()).toBe(1)
+    expect(store.hiddenCount()).toBe(0)
+    expect(await store.restoreAll()).toBe(0)
+    unsub()
+  })
+
+  it('syncs authoritatively with /api/hidden-showcases and falls back gracefully offline', async () => {
+    let remote = { schemaVersion: 1, persisted: true, hiddenIds: ['sakura-twist'] }
+    let putCount = 0
+    const mockFetch: typeof fetch = (async (_url, init) => {
+      if (init?.method === 'PUT') {
+        putCount++
+        const body = JSON.parse(String(init.body))
+        remote = { schemaVersion: 1, persisted: true, hiddenIds: body.hiddenIds }
+        return new Response(JSON.stringify({ ok: true, count: remote.hiddenIds.length }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify(remote), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    const storage = memoryStorage()
+    const store = createHiddenShowcaseStore({ validIds, storage, apiUrl: '/api/hidden-showcases', fetcher: mockFetch })
+    await store.ready()
+
+    expect(store.storageMode).toBe('file')
+    expect(store.listHiddenIds()).toEqual(['sakura-twist'])
+    expect(putCount).toBe(0)
+
+    await store.hide('wishing-tree')
+    expect(putCount).toBe(1)
+    expect(remote.hiddenIds).toEqual(['sakura-twist', 'wishing-tree'])
+
+    await store.restoreAll()
+    expect(putCount).toBe(2)
+    expect(remote.hiddenIds).toEqual([])
+
+    const offline = createHiddenShowcaseStore({
+      validIds,
+      storage,
+      apiUrl: '/api/hidden-showcases',
+      fetcher: (async () => new Response('Not Found', { status: 404 })) as typeof fetch,
+    })
+    await offline.ready()
+    expect(offline.storageMode).toBe('local')
   })
 })

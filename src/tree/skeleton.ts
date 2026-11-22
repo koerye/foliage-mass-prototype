@@ -6,7 +6,7 @@ import { rng, seedFor } from '../shape'
 import type { CrownCluster, Limb } from '../broadleaf/leaves'
 import { CrownEnvelope } from './envelope'
 import { buildPalmSpine } from './palm'
-import type { BranchEdit, TreeSpec } from './spec'
+import type { BranchEdit, BranchSpec, TreeSpec } from './spec'
 
 export type BranchRole = 'trunk' | 'limb' | 'child' | 'dead'
 export interface Branch extends Limb {
@@ -14,6 +14,7 @@ export interface Branch extends Limb {
   role: BranchRole
   parentId?: number
   socket?: number
+  baseSocket?: number
   bare?: boolean
   points: Vector3[]
   radii: number[]
@@ -70,15 +71,23 @@ export function radiusAt(branch: Branch, t: number) {
   return MathUtils.lerp(branch.radii[i], branch.radii[i + 1], f - i)
 }
 
-function hasGeometricEdit(e: BranchEdit | undefined): boolean {
+export function hasGeometricEdit(e: BranchEdit | undefined): boolean {
   if (!e) return false
   if (e.lengthScale !== undefined && Math.abs(e.lengthScale - 1) > 1e-4) return true
   if (e.radiusScale !== undefined && Math.abs(e.radiusScale - 1) > 1e-4) return true
   if (e.pitchDelta !== undefined && Math.abs(e.pitchDelta) > 1e-4) return true
   if (e.yawDelta !== undefined && Math.abs(e.yawDelta) > 1e-4) return true
   if (e.gravityDelta !== undefined && Math.abs(e.gravityDelta) > 1e-4) return true
+  if (e.socketDelta !== undefined && Math.abs(e.socketDelta) > 1e-4) return true
+  if (e.offset && e.offset[0] * e.offset[0] + e.offset[1] * e.offset[1] + e.offset[2] * e.offset[2] > 1e-8) return true
   if (e.spineOffsets?.some(o => o[0] * o[0] + o[1] * o[1] + o[2] * o[2] > 1e-8)) return true
   return false
+}
+
+export function hasGlobalBranchOffset(b: Partial<BranchSpec> | undefined): boolean {
+  if (!b) return false
+  const ox = b.offsetX ?? 0, oy = b.offsetY ?? 0, oz = b.offsetZ ?? 0
+  return ox * ox + oy * oy + oz * oz > 1e-8
 }
 
 /** Apply SpeedTree-style per-branch node overrides in topological parent -> child order. */
@@ -118,25 +127,31 @@ function applyBranchEdits(branches: Branch[], edits: BranchEdit[] | undefined): 
   }
 
   for (const b of alive) {
+    if (b.socket !== undefined && b.baseSocket === undefined) b.baseSocket = b.socket
     origCurves.set(b.id, b.curve)
     aliveById.set(b.id, b)
     const edit = editMap.get(b.id)
     const parentMod = b.parentId !== undefined && modified.has(b.parentId)
+    const sockDelta = b.role !== 'trunk' && b.parentId !== undefined ? MathUtils.clamp(edit?.socketDelta ?? 0, -.95, .95) : 0
+    const hasSocketSlide = Math.abs(sockDelta) > 1e-4
     const selfGeom = hasGeometricEdit(edit)
     if (!parentMod && !selfGeom) continue
     modified.add(b.id)
 
-    // Step A: carry branch rigidly along its edited parent's socket position & tangent
-    if (parentMod) {
-      const parent = aliveById.get(b.parentId!)!
+    // Step A: carry branch rigidly along its parent's socket position & tangent
+    // (handles both edited parent carry-along and per-branch socket sliding along parent spline)
+    if ((parentMod || hasSocketSlide) && b.parentId !== undefined) {
+      const parent = aliveById.get(b.parentId)!
       const origParent = origCurves.get(b.parentId!)!
-      const sock = MathUtils.clamp(b.socket ?? 0, 0, 1)
-      const pOld = origParent.getPoint(sock)
-      const tOld = origParent.getTangent(sock).normalize()
-      const pNew = parent.curve.getPoint(sock)
-      const tNew = parent.curve.getTangent(sock).normalize()
+      const origSock = MathUtils.clamp(b.baseSocket ?? b.socket ?? 0, 0, 1)
+      const newSock = hasSocketSlide ? MathUtils.clamp(origSock + sockDelta, .04, .98) : origSock
+      const pOld = origParent.getPoint(origSock)
+      const tOld = origParent.getTangent(origSock).normalize()
+      const pNew = parent.curve.getPoint(newSock)
+      const tNew = parent.curve.getTangent(newSock).normalize()
       const qCarry = new Quaternion().setFromUnitVectors(tOld, tNew)
       b.points = b.points.map(p => p.clone().sub(pOld).applyQuaternion(qCarry).add(pNew))
+      b.socket = newSock
     }
 
     // Step B: apply branch's own SpeedTree node overrides
@@ -150,6 +165,14 @@ function applyBranchEdits(branches: Branch[], edits: BranchEdit[] | undefined): 
       const pitchRad = MathUtils.degToRad(MathUtils.clamp(edit.pitchDelta ?? 0, -65, 65))
       const yawRad = MathUtils.degToRad(MathUtils.clamp(edit.yawDelta ?? 0, -180, 180))
       const gravity = MathUtils.clamp(edit.gravityDelta ?? 0, -1.5, 1.5)
+      const rootOff = edit.offset
+        ? new Vector3(
+            MathUtils.clamp(edit.offset[0], -4, 4),
+            MathUtils.clamp(edit.offset[1], -4, 4),
+            MathUtils.clamp(edit.offset[2], -4, 4),
+          )
+        : undefined
+      const hasRootOff = Boolean(rootOff && rootOff.lengthSq() > 1e-8)
 
       const horiz = new Vector3(chord.x, 0, chord.z)
       if (horiz.lengthSq() < 1e-4) {
@@ -189,7 +212,8 @@ function applyBranchEdits(branches: Branch[], edits: BranchEdit[] | undefined): 
           else p.y -= gravity * chordLen * lengthScale * .42 * (s ** 1.75)
         }
         if (offCurve && i > 0) p.add(offCurve.getPoint(s))
-        if (isTrunk && i === 0) p.set(0, 0, 0)
+        if (hasRootOff) p.add(rootOff!)
+        if (isTrunk && i === 0 && !hasRootOff) p.set(0, 0, 0)
         else if (p.y < 0) p.y = 0
         nextPts.push(p)
       }
@@ -230,7 +254,7 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
   const H = T.height
   const branches: Branch[] = []
   const add = (b: Omit<Branch, 'id' | 'curve' | 'length'>) => {
-    const branch = { ...b, id: branches.length, curve: makeCurve(b.points), length: 0 } as Branch
+    const branch = { ...b, baseSocket: b.socket, id: branches.length, curve: makeCurve(b.points), length: 0 } as Branch
     branches.push(branch)
     return branch
   }
@@ -364,15 +388,20 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
     }
   }
 
+  const azOff = MathUtils.degToRad(B.azimuthOffset ?? 0)
   if (!conifer) {
     const n = B.count
-    const phase = random() * Math.PI * 2
+    const phase = random() * Math.PI * 2 + azOff
+    const startSock = MathUtils.clamp(B.startHeight ?? .58, .05, .92)
+    const spanSock = MathUtils.clamp(B.heightSpan ?? .38, .05, .95)
+    const topSock = MathUtils.clamp(startSock + spanSock, Math.min(.96, startSock + .05), .96)
+    const effSpan = Math.max(.02, topSock - startSock)
     const limbs: Branch[] = []
     for (let i = 0; i < n; i++) {
       const f = (i + .5) / n
       const crownTop = i === n - 1
       const theta = phase + i * golden * 1.0 + (random() - .5) * .45
-      const socket = crownTop ? .96 : Math.min(.94, .58 + .38 * f ** .8 + (random() - .5) * .04)
+      const socket = crownTop ? topSock : MathUtils.clamp(startSock + effSpan * f ** .8 + (random() - .5) * .04, .05, Math.min(.94, topSock))
       const S = trunkCurve.getPoint(socket)
       const trunkTan = trunkCurve.getTangent(socket).normalize()
       const u = crownTop ? .9 : MathUtils.lerp(.22, .82, f) + (random() - .5) * .1
@@ -401,9 +430,11 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
       limb.length = makeCurve(pts).getLength()
       limbs.push(limb)
     }
+    const cStart = MathUtils.clamp(B.childStart ?? .26, .04, .88)
+    const cSpan = Math.max(.08, .92 - cStart)
     for (const limb of limbs) {
       const n = B.childCount > 0 ? Math.max(1, Math.round(B.childCount * (.75 + random() * .5))) : 0
-      childrenOf(limb, n, { start: .26, span: .66, spread: 1 })
+      childrenOf(limb, n, { start: cStart, span: cSpan, spread: 1 })
     }
   } else {
     // ---- conifer: staggered whorls along the leader, branches sweep down & out ---
@@ -411,6 +442,8 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
     const drop0 = Math.max(0, -Math.sin(MathUtils.degToRad(B.angle)) * env.width * .78)
     const crownStartY = Math.min(H * .68, env.y0 + drop0)
     const crownTopY = H * .955
+    const cStartCon = MathUtils.clamp(B.childStart ?? .06, .04, .88)
+    const cSpanCon = Math.max(.08, .90 - cStartCon)
     for (let w = 0; w < n; w++) {
       // tiers: wider gaps low, tighter toward the top
       const u = Math.min(.97, 1 - (1 - (w + .25 + random() * .2) / n) ** (1 + B.tierGradient))
@@ -418,7 +451,7 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
       // more branches around the wide base, fewer near the narrow apex (上疏下密)
       const density = MathUtils.lerp(1.25, .58, u)
       const k = Math.max(3, Math.round(B.perWhorl * density) + (random() < .25 ? (random() < .5 ? -1 : 1) : 0))
-      const phase = w * golden * 1.7 + random() * .6
+      const phase = w * golden * 1.7 + random() * .6 + azOff
       for (let j = 0; j < k; j++) {
         const y = Math.min(H * .975, Math.max(env.y0 + .15, baseY + (random() - .5) * (crownTopY - crownStartY) / n * .22))
         const S = trunkAtY(y)
@@ -444,7 +477,7 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
         const limb = add({ kind: 'primary', role: 'limb', level: 1, parentId: trunk.id, socket: y / topY, points: pts,
           radii: pts.map((_, i) => MathUtils.lerp(r0, .005, (i / 8) ** .8)), rootRadius: r0, tipRadius: .005 })
         limb.length = makeCurve(pts).getLength()
-        childrenOf(limb, B.childCount > 0 ? Math.max(2, Math.round(B.childCount * Math.min(1, .45 + rProfile / env.width))) : 0, { start: .06, span: .84, spread: 1 })
+        childrenOf(limb, B.childCount > 0 ? Math.max(2, Math.round(B.childCount * Math.min(1, .45 + rProfile / env.width))) : 0, { start: cStartCon, span: cSpanCon, spread: 1 })
       }
     }
   }
@@ -502,9 +535,24 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
     b.length = b.curve.getLength()
   }
 
-  // ---- apply SpeedTree-style per-branch node overrides (prune/bare/bend/scale) ---
+  // ---- apply SpeedTree-style per-branch node overrides (prune/bare/bend/scale/slide/offset) ---
   const finalBranches = applyBranchEdits(branches, spec.branchEdits)
-  const hasGeomNodeEdit = Boolean(spec.branchEdits?.some(hasGeometricEdit))
+
+  // ---- apply optional global branch assembly X/Y/Z displacement ---------------------------
+  const gOffX = MathUtils.clamp(B.offsetX ?? 0, -4, 4)
+  const gOffY = MathUtils.clamp(B.offsetY ?? 0, -4, 4)
+  const gOffZ = MathUtils.clamp(B.offsetZ ?? 0, -4, 4)
+  const hasGlobalOff = hasGlobalBranchOffset(B)
+  if (hasGlobalOff) {
+    for (const b of finalBranches) {
+      if (b.role === 'trunk') continue
+      b.points = b.points.map(p => new Vector3(p.x + gOffX, Math.max(0, p.y + gOffY), p.z + gOffZ))
+      b.curve = makeCurve(b.points)
+      b.length = b.curve.getLength()
+    }
+  }
+
+  const hasGeomNodeEdit = hasGlobalOff || Boolean(spec.branchEdits?.some(hasGeometricEdit))
 
   // Re-fit the crown envelope when node edits moved/bent/scaled the trunk or branches
   // so downstream foliage AO, conifer fronds, outer flowers, petals, canopyLift & editor cage

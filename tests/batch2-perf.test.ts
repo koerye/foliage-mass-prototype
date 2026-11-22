@@ -106,10 +106,10 @@ describe('Batch 2 optimizations (P1-1, P1-3, P2-1)', () => {
     expect(calls.palm).toBe(0)
     tree.dispose()
 
-    // Multi-part Sakura Bonsai Showcase only touches sakura, grassTint, blossom (not all 13!)
+    // Multi-part Sakura Bonsai Showcase only touches sakura, grassTint, blossom, stemLeaf (not all 19!)
     const { registry: aiReg, calls: aiCalls } = makeSpyRegistry()
     const showcase = buildAiScene(sakuraBonsaiShowcase(), aiReg.textures)
-    expect(aiReg.loadedSlots().sort()).toEqual(['blossom', 'grassTint', 'sakura'] as AllTextureSlot[])
+    expect(aiReg.loadedSlots().sort()).toEqual(['blossom', 'grassTint', 'sakura', 'stemLeaf'] as AllTextureSlot[])
     expect(aiCalls.leaf).toBe(0)
     expect(aiCalls.needle).toBe(0)
     expect(aiCalls.palm).toBe(0)

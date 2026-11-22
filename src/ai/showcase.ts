@@ -1,7 +1,7 @@
 // Built-in finished AI Mode showcase library — every crafted AI template tree
 // is permanently registered here using 100% exposed Vegetation Studio procedural
 // algorithms, traced spines, cloud pads, modeled grass blades, and stylized shading.
-import { presetSpec } from '../tree/spec'
+import { defaultAccents, presetSpec } from '../tree/spec'
 import type { LightingPreset } from '../viewport'
 import type { AiSceneSpec } from './scene'
 
@@ -12,6 +12,8 @@ export interface AiShowcaseEntry {
   tag: string
   lighting: LightingPreset
   thumbnail: string
+  /** Optional Substance procedural bark template applied automatically when loading this showcase. */
+  barkTemplate?: string
   build: () => AiSceneSpec
 }
 
@@ -175,6 +177,7 @@ export function twistedSakuraShowcase(): AiSceneSpec {
     coneShape: 1, irregularity: .42, canopyLift: .42, padFlatten: .54,
   }
   mainSpec.branches = {
+    ...mainSpec.branches,
     count: 7, perWhorl: 1, angle: 18, angleTop: 52, reach: .96, lengthVariance: .24,
     curvature: .48, droop: .16, tipCurl: .08, radiusRatio: .72,
     childCount: 3, childAngle: 48, childLength: .44, childDroop: .14, deadCount: 0, tierGradient: .45,
@@ -396,6 +399,7 @@ export function floweringBushShowcase(): AiSceneSpec {
       coneShape: 1, irregularity: .24, canopyLift: 0, padFlatten: .12,
     }
     spec.branches = {
+      ...spec.branches,
       count: 9, perWhorl: 1, angle: 12, angleTop: 58, reach: .94, lengthVariance: .18,
       curvature: .35, droop: .20, tipCurl: 0, radiusRatio: .18,
       childCount: 2, childAngle: 52, childLength: .35, childDroop: .20, deadCount: 0, tierGradient: .45,
@@ -444,8 +448,299 @@ export function floweringBushShowcase(): AiSceneSpec {
   }
 }
 
+/** Celestial Stylized Ancient Wishing Tree (6 editable procedural parts):
+ *  - Massive sweeping dragon-S ancient trunk with flared buttresses, 7 crawling roots,
+ *    hand-painted broad-brushstroke mossy bark (`bark-painterly-moss`), sculpted mossy
+ *    root boulders, draped crimson wishing ribbons, hanging cedar plaques & golden sparkles
+ *  - Lower-left graceful horizontal bough holding wide sunlit lemon-gold/jade cloud pads
+ *  - Mid-right sweeping bough balancing the right trunk arch with open breathing space
+ *  - Upper-left sweeping cloud shelf & mid-center floating foliage bridge
+ *  - Modeled 3D lush spring-green root grass tufts */
+export function wishingTreeShowcase(): AiSceneSpec {
+  const sharedLeaves = {
+    cardType: 'quad' as const,
+    leafSize: .74,
+    leafPivot: .48,
+    twigLength: .46,
+    twigFrequency: 7.4,
+    leavesPerTwig: 8,
+    clumpFill: 5.8,
+    clumpFillScale: 1.44,
+    faceOutward: .88,
+    cameraFacing: .26,
+    normalSource: 'clumps' as const,
+    normalSpherize: .88,
+    aoStrength: .42,
+    alphaCutoff: .38,
+    pruneInner: .20,
+    tintInner: '#3a725a',
+    tintOuter: '#fefbc0',
+    tintVariance: .16,
+    atlasCols: 2,
+    atlasRows: 2,
+  }
+  const sharedShading = {
+    leafStyle: 'oak' as const,
+    translucency: .60,
+    rimLight: .46,
+    shadowShift: .38,
+    topWarmth: .64,
+    softSelfShadow: true,
+    petals: 0,
+    accent: 'none' as const,
+  }
+  const barkMeta = {
+    barkColor: '#b59a78',
+    barkScale: .82,
+    barkDetail: .46,
+    barkTint: .10,
+    barkMoss: .58,
+    barkMossColor: '#5c9430',
+    barkRootAO: .44,
+  }
+
+  // 1. Main sweeping S-curved ancient trunk + high luminous sunlit crown peak
+  const mainSpec = presetSpec('broadleaf-wishing', 88241)
+  mainSpec.name = '盘曲古干与顶云冠'
+  mainSpec.trunk = {
+    ...mainSpec.trunk,
+    ...barkMeta,
+    height: 6.45,
+    radius: .50,
+    taper: 1.55,
+    flare: 1.42,
+    flareLobes: 6,
+    flareHeight: 1.15,
+    wobble: .05,
+    lean: .06,
+    barkRidges: 10,
+    barkDepth: .084,
+    forkHeight: .64,
+    gnarl: .46,
+    surfaceRoots: 7,
+    spine: [
+      [0.00, 0.00, 0.00],
+      [-.16, .48, .06],
+      [-.30, .98, .12],
+      [.14, 1.44, .16],
+      [.82, 1.78, .18],
+      [1.26, 2.14, .12],
+      [.82, 2.62, .06],
+      [.28, 3.12, .02],
+      [.14, 3.64, -.02],
+      [.26, 4.14, -.02],
+    ],
+  }
+  mainSpec.crown = {
+    base: .62, top: 1, width: 2.38, depth: .84, roundness: 2.4, topBias: 1.28,
+    coneShape: 1, irregularity: .42, canopyLift: .44, padFlatten: .64,
+  }
+  mainSpec.branches = {
+    ...mainSpec.branches,
+    count: 6, perWhorl: 1, angle: 22, angleTop: 62, reach: .98, lengthVariance: .24,
+    curvature: .52, droop: .14, tipCurl: .06, radiusRatio: .68,
+    childCount: 3, childAngle: 50, childLength: .46, childDroop: .16, deadCount: 0, tierGradient: .45,
+  }
+  mainSpec.leaves = { ...mainSpec.leaves, ...sharedLeaves, leafSize: .78, leafSeed: 19 }
+  mainSpec.shading = { ...sharedShading, petals: 14, accent: 'wishing' }
+  mainSpec.accents = { ...defaultAccents, rockCount: 5, ribbonWraps: 3, plaqueCount: 8, sparkles: true, sparkleCount: 20 }
+
+  // 2. Lower-left sweeping horizontal ancient bough holding two wide floating cloud pads
+  const lowerLeftSpec = presetSpec('broadleaf-wishing', 88317)
+  lowerLeftSpec.name = '左下蜿蜒主枝与双云层'
+  lowerLeftSpec.trunk = {
+    ...lowerLeftSpec.trunk,
+    ...barkMeta,
+    height: 1.82,
+    radius: .16,
+    taper: 1.35,
+    flare: 0,
+    flareLobes: 4,
+    flareHeight: .08,
+    wobble: .04,
+    lean: 0,
+    barkRidges: 6,
+    barkDepth: .05,
+    forkHeight: .62,
+    gnarl: .35,
+    surfaceRoots: 0,
+    spine: [
+      [0.00, 0.00, 0.00],
+      [-.54, .12, .03],
+      [-1.18, .08, .06],
+      [-1.74, .22, .04],
+      [-2.16, .38, .02],
+    ],
+  }
+  lowerLeftSpec.crown = {
+    base: .26, top: .98, width: 1.56, depth: .78, roundness: 2.5, topBias: 1.18,
+    coneShape: 1, irregularity: .36, canopyLift: .34, padFlatten: .72,
+  }
+  lowerLeftSpec.branches = {
+    ...lowerLeftSpec.branches,
+    count: 5, perWhorl: 1, angle: 10, angleTop: 38, reach: .95, lengthVariance: .24,
+    curvature: .48, droop: .18, tipCurl: .08, radiusRatio: .62,
+    childCount: 3, childAngle: 52, childLength: .44, childDroop: .18, deadCount: 0, tierGradient: .45,
+  }
+  lowerLeftSpec.leaves = { ...lowerLeftSpec.leaves, ...sharedLeaves, leafSize: .66, clumpFill: 5.0, leafSeed: 37 }
+  lowerLeftSpec.shading = { ...sharedShading }
+
+  // 3. Mid-right sweeping bough emerging from the dramatic right trunk elbow
+  const midRightSpec = presetSpec('broadleaf-wishing', 88403)
+  midRightSpec.name = '右侧悬展大枝与云层'
+  midRightSpec.trunk = {
+    ...midRightSpec.trunk,
+    ...barkMeta,
+    height: 2.15,
+    radius: .155,
+    taper: 1.32,
+    flare: 0,
+    flareLobes: 4,
+    flareHeight: .08,
+    wobble: .04,
+    lean: 0,
+    barkRidges: 6,
+    barkDepth: .05,
+    forkHeight: .56,
+    gnarl: .34,
+    surfaceRoots: 0,
+    spine: [
+      [0.00, 0.00, 0.00],
+      [.44, .22, .02],
+      [.94, .54, -.02],
+      [1.36, .88, -.04],
+    ],
+  }
+  midRightSpec.crown = {
+    base: .36, top: 1.0, width: 1.48, depth: .80, roundness: 2.4, topBias: 1.20,
+    coneShape: 1, irregularity: .38, canopyLift: .36, padFlatten: .70,
+  }
+  midRightSpec.branches = {
+    ...midRightSpec.branches,
+    count: 5, perWhorl: 1, angle: 12, angleTop: 44, reach: .95, lengthVariance: .22,
+    curvature: .46, droop: .16, tipCurl: .06, radiusRatio: .62,
+    childCount: 3, childAngle: 48, childLength: .42, childDroop: .16, deadCount: 0, tierGradient: .45,
+  }
+  midRightSpec.leaves = { ...midRightSpec.leaves, ...sharedLeaves, leafSize: .68, clumpFill: 5.2, leafSeed: 53 }
+  midRightSpec.shading = { ...sharedShading }
+
+  // 4. Upper-left sweeping wing bough creating the wide luminous mid-upper canopy tier
+  const upperLeftSpec = presetSpec('broadleaf-wishing', 88519)
+  upperLeftSpec.name = '左上飘逸主枝与宽云冠'
+  upperLeftSpec.trunk = {
+    ...upperLeftSpec.trunk,
+    ...barkMeta,
+    height: 2.45,
+    radius: .175,
+    taper: 1.38,
+    flare: 0,
+    flareLobes: 4,
+    flareHeight: .08,
+    wobble: .04,
+    lean: 0,
+    barkRidges: 6,
+    barkDepth: .05,
+    forkHeight: .54,
+    gnarl: .32,
+    surfaceRoots: 0,
+    spine: [
+      [0.00, 0.00, 0.00],
+      [-.56, .28, .05],
+      [-1.24, .62, .08],
+      [-1.82, 1.02, .05],
+    ],
+  }
+  upperLeftSpec.crown = {
+    base: .38, top: 1.0, width: 1.88, depth: .82, roundness: 2.5, topBias: 1.24,
+    coneShape: 1, irregularity: .40, canopyLift: .40, padFlatten: .66,
+  }
+  upperLeftSpec.branches = {
+    ...upperLeftSpec.branches,
+    count: 6, perWhorl: 1, angle: 14, angleTop: 48, reach: .96, lengthVariance: .22,
+    curvature: .48, droop: .16, tipCurl: .05, radiusRatio: .62,
+    childCount: 3, childAngle: 50, childLength: .44, childDroop: .16, deadCount: 0, tierGradient: .45,
+  }
+  upperLeftSpec.leaves = { ...upperLeftSpec.leaves, ...sharedLeaves, leafSize: .74, clumpFill: 5.6, leafSeed: 71 }
+  upperLeftSpec.shading = { ...sharedShading }
+
+  // 5. Mid-center sculpted cloud cushion bridging the trunk S-arch
+  const midCenterSpec = presetSpec('broadleaf-wishing', 88607)
+  midCenterSpec.name = '中庭浮云枝簇'
+  midCenterSpec.trunk = {
+    ...midCenterSpec.trunk,
+    ...barkMeta,
+    height: 1.28,
+    radius: .085,
+    taper: 1.3,
+    flare: 0,
+    flareLobes: 4,
+    flareHeight: .06,
+    wobble: .03,
+    lean: 0,
+    barkRidges: 4,
+    barkDepth: .03,
+    forkHeight: .42,
+    gnarl: .2,
+    surfaceRoots: 0,
+    spine: [
+      [0.00, 0.00, 0.00],
+      [-.22, .22, .18],
+      [-.46, .48, .28],
+    ],
+  }
+  midCenterSpec.crown = {
+    base: .32, top: 1.0, width: 1.06, depth: .76, roundness: 2.4, topBias: 1.15,
+    coneShape: 1, irregularity: .32, canopyLift: .26, padFlatten: .72,
+  }
+  midCenterSpec.branches = {
+    ...midCenterSpec.branches,
+    count: 4, perWhorl: 1, angle: 12, angleTop: 42, reach: .92, lengthVariance: .2,
+    curvature: .4, droop: .14, tipCurl: .04, radiusRatio: .56,
+    childCount: 2, childAngle: 46, childLength: .40, childDroop: .14, deadCount: 0, tierGradient: .45,
+  }
+  midCenterSpec.leaves = { ...midCenterSpec.leaves, ...sharedLeaves, leafSize: .62, clumpFill: 4.8, leafSeed: 89 }
+  midCenterSpec.shading = { ...sharedShading }
+
+  // 6. Modeled 3D spring-green root grass tufts nestled around the mossy boulders
+  const grassSpec = presetSpec('grass-clump', 88711)
+  grassSpec.name = '根部青苔草簇'
+  grassSpec.ground = {
+    ...grassSpec.ground,
+    mode: 'blade', count: 34, length: .42, lengthVariance: .36, width: .058, widthVariance: .22, widthFullness: .72,
+    spread: 1.08, radialBias: .82, angleJitter: 18, sideSwirl: 6,
+    lean: 32, leanVariance: 16, arch: .36, bendVariance: .16, droop: .08, cup: .22, twist: 8,
+    segments: 5, across: 2, spherize: .35, colorTones: true,
+    tintBase: '#2c6e3b', tintTip: '#9ee056', aoStrength: .20,
+  }
+
+  return {
+    schemaVersion: 1,
+    mode: 'ai-blank',
+    name: '仙韵祈愿古树（案例库）',
+    summary: '国风仙侠盘曲祈愿古树 · 6 部件全可调：S 形苍古粗干与 7 条贴地盘根 + 厚涂宽纹苔藓古木皮 + 手绘橡叶金绿分层云冠 + 青苔巨石、红绸祈愿带、木牌与星芒',
+    parts: [
+      { id: 'part-trunk-main', label: '盘曲古干与顶云冠', enabled: true, position: [0, 0, 0], rotationY: 0, scale: 1, leafTexture: 'oak', spec: mainSpec },
+      { id: 'part-lower-left', label: '左下蜿蜒主枝与双云层', enabled: true, position: [-.10, 1.32, .08], rotationY: 0, scale: 1, leafTexture: 'oak', spec: lowerLeftSpec },
+      { id: 'part-mid-right', label: '右侧悬展大枝与云层', enabled: true, position: [1.08, 2.04, .12], rotationY: 0, scale: 1, leafTexture: 'oak', spec: midRightSpec },
+      { id: 'part-upper-left', label: '左上飘逸主枝与宽云冠', enabled: true, position: [.26, 2.98, .03], rotationY: 0, scale: 1, leafTexture: 'oak', spec: upperLeftSpec },
+      { id: 'part-mid-center', label: '中庭浮云枝簇', enabled: true, position: [.38, 2.58, .12], rotationY: 0, scale: 1, leafTexture: 'oak', spec: midCenterSpec },
+      { id: 'part-root-grass', label: '根部青苔草簇', enabled: true, position: [0, 0, .28], rotationY: 0, scale: 1, leafTexture: 'auto', spec: grassSpec },
+    ],
+  }
+}
+
 /** Ordered built-in AI Showcase Case Library — newest crafted trees appear first. */
 export const aiShowcases: AiShowcaseEntry[] = [
+  {
+    id: 'wishing-tree',
+    name: '仙韵祈愿古树',
+    subtitle: 'S 形苔藓古干 · 手绘橡叶金绿云冠 · 红绸木牌青苔石 · 6 部件',
+    tag: '6 部件古树',
+    lighting: 'celestial',
+    thumbnail: './showcases/wishing-tree.jpg',
+    barkTemplate: 'bark-painterly-driftwood',
+    build: wishingTreeShowcase,
+  },
   {
     id: 'flowering-bush',
     name: '繁花绿灌木丛',

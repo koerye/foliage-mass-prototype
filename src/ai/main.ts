@@ -5,23 +5,28 @@
 import '../style.css'
 import '../studio/studio.css'
 import './ai.css'
-import { Box3, Group, MathUtils, Vector3 } from 'three'
+import { Box3, Group, MathUtils, Vector3, type Texture } from 'three'
 import { lightingPresets, Viewer, type Camera, type LightingPreset } from '../viewport'
-import { views, type View } from '../tree/assemble'
+import { isWoodOnlyParam, views, type View } from '../tree/assemble'
 import { CrownEnvelope, defaultHandles } from '../tree/envelope'
 import { lodPresets, optimizeAt, solveForTriangleBudget } from '../tree/optimize'
 import { buildSkeleton } from '../tree/skeleton'
 import {
   presetSpec, treeKinds,
-  type BranchEdit, type TreeKind, type TreeSpec,
+  type BranchEdit, type LeafNormalEditSpec, type TreeKind, type TreeSpec,
 } from '../tree/spec'
-import { CrownEditor, type EditSubMode, type GizmoKind, type PickablePart } from '../studio/editor'
+import { CrownEditor, type EditSubMode, type GizmoKind, type NormalTool, type PickablePart } from '../studio/editor'
 import { bindEditToolsUi, editToolsHtml } from '../studio/editor-ui'
 import { bindGlbExportPopover } from '../studio/glb-export-ui'
 import { bindPanel, panelHtml } from '../studio/panel'
 import { mountPresetLibrary } from '../studio/preset-library'
 import { captureViewportThumbnail, createPresetStore, deepClone } from '../studio/preset-store'
 import { bindTextureSlots, createTextureRegistry, type EditableTextureSlot } from '../studio/texture-slots'
+import { mountTextureEditor } from '../texgraph/editor-ui'
+import { mountTextureLibrary, type AppliedTextureMeta } from '../texgraph/library-ui'
+import { createTextureLibraryStore } from '../texgraph/store'
+import { makePainterlyDriftwoodBarkTexture, makePainterlyMossBarkTexture } from '../texgraph/templates'
+import { defaultCategoryForSlot } from '../texgraph/types'
 import { analyzePlantImage, computeScribbleMask, type AnalysisReport, type PixelBuffer } from './analyze'
 import {
   aiCapabilitySchema, applySceneLeafTexture, applySceneParam, applySceneSeed, applySceneUniformScale,
@@ -30,6 +35,10 @@ import {
   type AiPart, type AiSceneAsset, type AiSceneSpec, type EditScope, type LeafTextureSource, type PartCustomTextures,
 } from './scene'
 import { aiShowcases, getAiShowcase } from './showcase'
+import { createHiddenShowcaseStore } from './showcase-store'
+
+const hiddenShowcaseStore = createHiddenShowcaseStore({ validIds: aiShowcases.map(s => s.id) })
+const visibleShowcases = () => aiShowcases.filter(s => !hiddenShowcaseStore.isHidden(s.id))
 
 const cameras: Record<Camera, string> = { front: '正面', angle: '45°', side: '侧面', top: '斜俯视' }
 const viewLabel: Record<View, string> = { final: '成品', skeleton: '枝干骨架', crown: '树冠' }
@@ -46,10 +55,13 @@ byId('app').innerHTML = `
   <div class="brand"><span class="mark" aria-hidden="true">✦</span><div><h1>Vegetation Studio <span class="ai-badge">AI 模式</span></h1><span>空白参数化工程 · 丢图即生成全参数可调植物</span></div></div>
   <nav aria-label="项目操作">
     <a class="b-link" href="./broadleaf.html">← 经典工作台</a>
+    <a class="b-link" href="./rock.html" title="风格化石头工作台 · 切面雕刻与赛璐璐">◈ 石头工作台</a>
     <input id="ai-image-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
     <button id="ai-upload-top" class="primary">上传参考图</button>
-    <button id="ai-showcase-top" class="pl-showcase-btn" title="打开内置 AI 成品案例库（支持悬停实时 3D 预览）">✿ 案例库<span class="pl-badge">${aiShowcases.length}</span></button>
+    <button id="ai-showcase-top" class="pl-showcase-btn" title="打开内置 AI 成品案例库（支持悬停实时 3D 预览）">✿ 案例库<span class="pl-badge" id="ai-showcase-top-count">${visibleShowcases().length}</span></button>
     <button id="ai-clear">清空空白</button>
+    <button id="tex-editor" class="tg-open-btn" title="打开 Substance 风格树叶/树皮程序化贴图节点编辑器">◈ 贴图编辑</button>
+    <button id="tex-lib" class="tl-open-btn" title="打开实时贴图库（支持悬停 3D 预览、保存与复用）">🎨 贴图库<span class="pl-badge" id="tex-lib-count">0</span></button>
     <button id="preset-save" class="pl-save-btn" title="带当前 3D 实时封面保存为预设">★ 保存预设</button>
     <button id="preset-lib" title="打开可视化预设库（支持悬停实时 3D 预览）">预设库<span class="pl-badge" id="preset-lib-count">0</span></button>
     <input id="file" type="file" accept=".json,application/json" hidden>
@@ -72,8 +84,8 @@ byId('app').innerHTML = `
           <p>已暴露全部 6 类植物算法、多叶型贴图库、树冠控制点、真树干样条复刻、LOD 减面与抠图画笔。<br>把任意植物图片拖到这里即可自动生成 3D 植物，或先体验内置成品案例。</p>
           <div class="ai-drop-actions">
             <button type="button" id="ai-drop-btn" class="primary">选择或拖入植物图片</button>
-            <button type="button" id="ai-showcase-btn" class="pl-showcase-btn">✿ 浏览案例库（${aiShowcases.length}）</button>
-            ${aiShowcases.map(s => `<button type="button" data-quick-case="${s.id}" title="${s.subtitle}">✿ ${s.name}</button>`).join('')}
+            <button type="button" id="ai-showcase-btn" class="pl-showcase-btn">✿ 浏览案例库（${visibleShowcases().length}）</button>
+            ${aiShowcases.map(s => `<button type="button" data-quick-case="${s.id}" title="${s.subtitle}"${hiddenShowcaseStore.isHidden(s.id) ? ' hidden' : ''}>✿ ${s.name}</button>`).join('')}
             <button type="button" id="ai-open-presets">★ 打开我的预设库</button>
             <button type="button" id="ai-add-blank">＋ 手动添加空白部件</button>
           </div>
@@ -287,6 +299,10 @@ const editor = viewer ? new CrownEditor(viewer, {
     const p = activePart()
     return p ? sceneAsset?.partAssets.get(p.id)?.skeleton : undefined
   },
+  foliageObject: () => {
+    const p = activePart()
+    return p ? sceneAsset?.partAssets.get(p.id)?.group : undefined
+  },
   partLabel: () => (sceneSpec.parts.length > 1 ? activePart()?.label : undefined),
   setHandles: (handles, final) => {
     const p = activePart()
@@ -301,6 +317,13 @@ const editor = viewer ? new CrownEditor(viewer, {
     if (branchEdits.length) next.branchEdits = branchEdits
     else delete next.branchEdits
     p.spec = next
+    scheduleBuild(final, p.id)
+  },
+  setNormalEdit: (normalEdit: LeafNormalEditSpec, final: boolean) => {
+    const p = activePart()
+    if (!p) return
+    p.spec = { ...p.spec, normalEdit }
+    panel.sync()
     scheduleBuild(final, p.id)
   },
   selected: handle => editUi?.showSelectedHandle(handle),
@@ -334,10 +357,67 @@ const editor = viewer ? new CrownEditor(viewer, {
 let lastBuildMs = 0, lastBuildAt = 0, pending = false, pendingFinal = false
 let pendingPartId: string | 'ALL' | undefined
 let frame = 0, frameHeight = 5.5
-let fullBuildCount = 0, partBuildCount = 0
+let fullBuildCount = 0, partBuildCount = 0, woodBuildCount = 0
+let lastWoodMs = 0, lastWoodAt = 0, woodPending = false, woodPendingFinal = false, woodFrame = 0
+let pendingWoodPartIds = new Set<string>()
 let jsonDirty = false
 
+function scheduleWoodBuild(partIds: string[], final = true) {
+  for (const id of partIds) pendingWoodPartIds.add(id)
+  woodPending = true
+  woodPendingFinal = woodPendingFinal || final
+  cancelAnimationFrame(woodFrame)
+  woodFrame = requestAnimationFrame(() => {
+    const isFinal = woodPendingFinal
+    const interval = isFinal ? 0 : Math.min(48, Math.max(0, lastWoodMs * 1.15))
+    if (performance.now() - lastWoodAt < interval) { scheduleWoodBuild([], isFinal); return }
+    if (woodPending) {
+      const ids = [...pendingWoodPartIds]
+      pendingWoodPartIds.clear()
+      woodPending = false
+      woodPendingFinal = false
+      rebuildPartsWoodOnly(ids)
+    }
+  })
+}
+
+function rebuildPartsWoodOnly(partIds: string[]) {
+  if (!viewer || !sceneAsset) { rebuild(false); return }
+  const started = performance.now()
+  try {
+    let allOk = true
+    for (const id of partIds) {
+      const p = sceneSpec.parts.find(x => x.id === id)
+      if (!p || !p.enabled || !sceneAsset.rebuildPartWoodOnly(p, textures, sceneSpec, partCustomTextures)) {
+        allOk = false
+        break
+      }
+    }
+    if (!allOk) {
+      if (partIds.length === 1) rebuildSinglePart(partIds[0])
+      else rebuild(false)
+      return
+    }
+    woodBuildCount++
+    updateSceneStatsUi(sceneAsset)
+    updateOptStatus()
+    updateGlobalLodUi()
+    viewer.refreshShadows()
+    markJsonDirty()
+    if (presetLibrary?.isOpen() && !presetLibrary.isPreviewing()) presetLibrary.refreshCapture(false)
+  } catch (error) {
+    console.error(error)
+    message(error, true)
+  }
+  lastWoodMs = performance.now() - started
+  lastWoodAt = performance.now()
+}
+
 function scheduleBuild(final = true, partId?: string) {
+  woodPending = false
+  woodPendingFinal = false
+  pendingWoodPartIds.clear()
+  cancelAnimationFrame(woodFrame)
   if (!pending) {
     pendingPartId = partId ?? 'ALL'
   } else if (pendingPartId !== (partId ?? 'ALL')) {
@@ -608,6 +688,19 @@ function applyInspectorParam(path: string, value: unknown, final: boolean) {
 
   const { changedIds, needsPanelSync } = applySceneParam(sceneSpec, p.id, path, value, scope)
   if (!changedIds.length) return
+  if (path === 'trunk.barkColor') {
+    let liftedTint = false
+    for (const id of changedIds) {
+      const targetPart = sceneSpec.parts.find(x => x.id === id)
+      const hasCustomBark = Boolean(registry.isCustom('bark') || (targetPart && partCustomTextures.get(targetPart.id)?.bark))
+      if (targetPart && hasCustomBark && (targetPart.spec.trunk.barkTint ?? 0) < .8) {
+        targetPart.spec = { ...targetPart.spec, trunk: { ...targetPart.spec.trunk, barkTint: .88 } }
+        sceneAsset?.applyPartLiveParam(targetPart, 'trunk.barkTint', sceneSpec)
+        liftedTint = true
+      }
+    }
+    if (liftedTint) panel.sync()
+  }
   if (path === 'optimize.level' && scope === 'whole') globalLodLevel = Number(value)
   if (needsPanelSync) {
     byId<HTMLSelectElement>('part-tex').value = p.leafTexture
@@ -621,6 +714,11 @@ function applyInspectorParam(path: string, value: unknown, final: boolean) {
   if (sceneAsset && changedParts.length > 0 && changedParts.every(part => sceneAsset!.applyPartLiveParam(part, path, sceneSpec))) {
     if (path === 'shading.softSelfShadow') viewer?.refreshShadows()
     markJsonDirty()
+    return
+  }
+  if (sceneAsset && !pending && isWoodOnlyParam(path) && changedParts.length > 0 &&
+    changedParts.every(part => (part.spec.kind === 'broadleaf' || part.spec.kind === 'conifer') && sceneAsset!.partAssets.has(part.id))) {
+    scheduleWoodBuild(changedParts.map(part => part.id), final)
     return
   }
   if (changedIds.length === 1) scheduleBuild(final, changedIds[0])
@@ -743,6 +841,13 @@ function loadShowcaseById(id: string) {
   const entry = getAiShowcase(id) ?? aiShowcases[0]
   if (!entry) return
   clearAllPartCustomTextures()
+  if (entry.barkTemplate === 'bark-painterly-driftwood') {
+    registry.setCustom('bark', makePainterlyDriftwoodBarkTexture(512))
+  } else if (entry.barkTemplate === 'bark-painterly-moss') {
+    registry.setCustom('bark', makePainterlyMossBarkTexture(512))
+  } else {
+    registry.resetDefault('bark')
+  }
   sceneSpec = entry.build()
   selectedId = sceneSpec.parts[0]?.id
   globalLodLevel = 0
@@ -756,6 +861,7 @@ function loadShowcaseById(id: string) {
   editUi?.showSelectedHandle(undefined)
   presetLibrary?.setActiveShowcaseId(entry.id)
   setLightingMood(entry.lighting)
+  texSlots?.drawSlot('bark', true)
   refreshUi(true)
   message(`已加载案例：${entry.name}（${sceneSpec.parts.length} 个可调部件）`)
 }
@@ -1248,7 +1354,19 @@ function ensureCustomTextureActive(kind: EditableTextureSlot) {
 }
 
 const texSlots = bindTextureSlots(registry, {
-  onBeforeUseCustom: ensureCustomTextureActive,
+  onBeforeUseCustom: slot => {
+    ensureCustomTextureActive(slot)
+    if (slot === 'leaf') {
+      const targets = editScope() === 'whole' ? sceneSpec.parts : (activePart() ? [activePart()!] : [])
+      for (const p of targets) {
+        if (p.spec.kind === 'broadleaf' && p.spec.leaves.atlasRegions?.length) {
+          p.spec = { ...p.spec, leaves: { ...p.spec.leaves, atlasRegions: undefined } }
+        }
+      }
+    }
+  },
+  onOpenEditor: slot => textureEditor.open({ slot }),
+  onOpenLibrary: slot => textureLibrary.open(undefined, defaultCategoryForSlot(slot)),
   onCustomTexture: (slot, texture, filename) => {
     if (editScope() === 'whole') {
       // Whole-asset mode: clear any old per-part override on this slot so global registry applies uniformly
@@ -1267,6 +1385,14 @@ const texSlots = bindTextureSlots(registry, {
     return true
   },
   onResetTexture: slot => {
+    if (slot === 'leaf') {
+      const targets = editScope() === 'whole' ? sceneSpec.parts : (activePart() ? [activePart()!] : [])
+      for (const p of targets) {
+        if (p.spec.kind === 'broadleaf' && p.spec.leaves.atlasRegions?.length) {
+          p.spec = { ...p.spec, leaves: { ...p.spec.leaves, atlasRegions: undefined } }
+        }
+      }
+    }
     if (editScope() === 'whole') {
       clearAllPartCustomTextures(slot)
       return false
@@ -1418,6 +1544,9 @@ const presetLibrary = mountPresetLibrary<
   scope: 'ai',
   store: presetStore,
   showcases: aiShowcases,
+  getHiddenShowcaseIds: () => hiddenShowcaseStore.hiddenIds(),
+  deleteShowcase: async sc => { await hiddenShowcaseStore.hide(sc.id) },
+  restoreShowcases: async () => { await hiddenShowcaseStore.restoreAll() },
   applyShowcase: sc => loadShowcaseById(sc.id),
   capture: () => {
     const enabled = sceneSpec.parts.filter(p => p.enabled)
@@ -1474,15 +1603,244 @@ const presetLibrary = mountPresetLibrary<
   message,
 })
 
+function syncShowcaseUi() {
+  const vis = visibleShowcases()
+  byId('ai-showcase-top-count').textContent = String(vis.length)
+  byId('ai-showcase-btn').textContent = `✿ 浏览案例库（${vis.length}）`
+  for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-quick-case]')) {
+    btn.hidden = hiddenShowcaseStore.isHidden(btn.dataset.quickCase!)
+  }
+  presetLibrary.refreshShowcases()
+}
+
 presetStore.subscribe(syncPresetBadge)
 void presetStore.ready().then(syncPresetBadge)
 syncPresetBadge()
+hiddenShowcaseStore.subscribe(syncShowcaseUi)
+void hiddenShowcaseStore.ready().then(syncShowcaseUi)
+syncShowcaseUi()
 
-byId('preset-save').onclick = () => presetLibrary.open(true, 'mine')
-byId('preset-lib').onclick = () => presetLibrary.toggle('mine')
-byId('ai-open-presets').onclick = () => presetLibrary.open(false, 'mine')
-byId('ai-showcase-top').onclick = () => presetLibrary.toggle('showcases')
-byId('ai-showcase-btn').onclick = () => presetLibrary.open(false, 'showcases')
+// ---- Substance-style Procedural Texture Editor & Real-Time Texture Library -
+interface AiSlotSnapshot {
+  slot: EditableTextureSlot
+  scope: EditScope
+  partId?: string
+  prevGlobal: Texture | undefined
+  prevPartTex: Texture | undefined
+  prevPartName: string | undefined
+  partStates: {
+    id: string
+    leafTexture: LeafTextureSource
+    leafStyle: TreeSpec['shading']['leafStyle']
+    atlasCols: number
+    atlasRows: number
+    atlasRegions: TreeSpec['leaves']['atlasRegions']
+    flowersEnabled: boolean
+    flowersStyle: TreeSpec['flowers']['style']
+    groundMode: TreeSpec['ground']['mode']
+  }[]
+}
+
+const textureStore = createTextureLibraryStore()
+let aiHoverPreviewTex: Texture | undefined
+let aiHoverStashedTex: Texture | undefined
+
+function activateFlowerSlotIfNeeded(slot: EditableTextureSlot) {
+  if (slot !== 'flower') return
+  const lead = activePart()
+  if (!lead) return
+  const targets = editScope() === 'part' ? [lead] : sceneSpec.parts
+  let changed = false
+  for (const part of targets) {
+    if (part.spec.kind === 'broadleaf' || part.spec.kind === 'conifer' || part.spec.kind === 'palm') {
+      if (!part.spec.flowers.enabled || part.spec.flowers.style !== 'default') {
+        part.spec = { ...part.spec, flowers: { ...part.spec.flowers, enabled: true, style: 'default' } }
+        changed = true
+      }
+    }
+  }
+  if (changed) panel.sync()
+}
+
+function applyAiProceduralTexture(
+  slot: EditableTextureSlot,
+  texture: Texture,
+  label: string,
+  isPreview = false,
+  meta?: AppliedTextureMeta,
+) {
+  texture.name = label
+  const scope = editScope()
+  const lead = activePart()
+
+  if (isPreview) {
+    const prevPreview = aiHoverPreviewTex
+    aiHoverPreviewTex = texture
+    if (scope === 'part' && lead) {
+      const map = partCustomTextures.get(lead.id) ?? {}
+      map[slot] = texture
+      partCustomTextures.set(lead.id, map)
+      const names = partCustomNames.get(lead.id) ?? {}
+      names[slot] = label
+      partCustomNames.set(lead.id, names)
+    } else {
+      registry.setCustom(slot, texture, false)
+    }
+    if (prevPreview && prevPreview !== texture && prevPreview !== aiHoverStashedTex) prevPreview.dispose()
+  } else {
+    const oldStashed = aiHoverStashedTex
+    aiHoverStashedTex = undefined
+    const prevPreview = aiHoverPreviewTex
+    aiHoverPreviewTex = undefined
+    if (scope === 'part' && lead) {
+      const map = partCustomTextures.get(lead.id) ?? {}
+      if (map[slot] && map[slot] !== texture && map[slot] !== oldStashed) map[slot]!.dispose()
+      map[slot] = texture
+      partCustomTextures.set(lead.id, map)
+      const names = partCustomNames.get(lead.id) ?? {}
+      names[slot] = label
+      partCustomNames.set(lead.id, names)
+    } else {
+      clearAllPartCustomTextures(slot)
+      registry.setCustom(slot, texture, true)
+    }
+    if (prevPreview && prevPreview !== texture) prevPreview.dispose()
+    if (oldStashed && oldStashed !== texture) oldStashed.dispose()
+  }
+
+  ensureCustomTextureActive(slot)
+  if (slot === 'leaf') {
+    const targets = scope === 'part' && lead ? [lead] : sceneSpec.parts.filter(p => p.spec.kind === 'broadleaf')
+    let atlasChanged = false
+    const nextRegions = meta?.atlasRegions?.length ? meta.atlasRegions : undefined
+    for (const part of targets) {
+      if (part.spec.kind !== 'broadleaf') continue
+      const nextCols = meta?.atlasCols ?? (nextRegions ? 1 : part.spec.leaves.atlasCols)
+      const nextRows = meta?.atlasRows ?? (nextRegions ? 1 : part.spec.leaves.atlasRows)
+      const regDiff = JSON.stringify(part.spec.leaves.atlasRegions ?? null) !== JSON.stringify(nextRegions ?? null)
+      if (part.spec.leaves.atlasCols !== nextCols || part.spec.leaves.atlasRows !== nextRows || regDiff) {
+        part.spec = {
+          ...part.spec,
+          leaves: { ...part.spec.leaves, atlasCols: nextCols, atlasRows: nextRows, atlasRegions: nextRegions },
+        }
+        atlasChanged = true
+      }
+    }
+    if (atlasChanged) panel.sync()
+  }
+  activateFlowerSlotIfNeeded(slot)
+  texSlots.drawSlot(slot, true)
+  if (scope === 'part' && lead) rebuildSinglePart(lead.id)
+  else if (sceneSpec.parts.length > 0) rebuild(false)
+}
+
+const textureEditor = mountTextureEditor({
+  store: textureStore,
+  applyTexture: (slot, tex, label, meta) => applyAiProceduralTexture(slot, tex, label, false, meta),
+  onOpen: () => {
+    presetLibrary.close()
+    textureLibrary.close()
+  },
+  message,
+})
+
+const textureLibrary = mountTextureLibrary<AiSlotSnapshot>({
+  store: textureStore,
+  snapshotSlot: slot => {
+    const scope = editScope()
+    const lead = activePart()
+    const prevGlobal = registry.getCustom(slot)
+    const prevPartTex = lead ? partCustomTextures.get(lead.id)?.[slot] : undefined
+    const prevPartName = lead ? partCustomNames.get(lead.id)?.[slot] : undefined
+    aiHoverStashedTex = scope === 'part' ? prevPartTex : prevGlobal
+    return {
+      slot,
+      scope,
+      partId: lead?.id,
+      prevGlobal,
+      prevPartTex,
+      prevPartName,
+      partStates: sceneSpec.parts.map(p => ({
+        id: p.id,
+        leafTexture: p.leafTexture,
+        leafStyle: p.spec.shading.leafStyle,
+        atlasCols: p.spec.leaves.atlasCols,
+        atlasRows: p.spec.leaves.atlasRows,
+        atlasRegions: p.spec.leaves.atlasRegions,
+        flowersEnabled: p.spec.flowers.enabled,
+        flowersStyle: p.spec.flowers.style,
+        groundMode: p.spec.ground.mode,
+      })),
+    }
+  },
+  restoreSlot: snap => {
+    const curPreview = aiHoverPreviewTex
+    aiHoverPreviewTex = undefined
+    aiHoverStashedTex = undefined
+    if (snap.scope === 'part' && snap.partId) {
+      const map = partCustomTextures.get(snap.partId)
+      const names = partCustomNames.get(snap.partId)
+      if (snap.prevPartTex) {
+        if (map) map[snap.slot] = snap.prevPartTex
+        if (names && snap.prevPartName) names[snap.slot] = snap.prevPartName
+      } else {
+        if (map) delete map[snap.slot]
+        if (names) delete names[snap.slot]
+      }
+      if (curPreview && curPreview !== snap.prevPartTex) curPreview.dispose()
+    } else {
+      if (snap.prevGlobal) registry.setCustom(snap.slot, snap.prevGlobal, false)
+      else registry.resetDefault(snap.slot, false)
+      if (curPreview && curPreview !== snap.prevGlobal) curPreview.dispose()
+    }
+    for (const st of snap.partStates) {
+      const p = sceneSpec.parts.find(x => x.id === st.id)
+      if (!p) continue
+      p.leafTexture = st.leafTexture
+      p.spec = {
+        ...p.spec,
+        shading: { ...p.spec.shading, leafStyle: st.leafStyle },
+        leaves: { ...p.spec.leaves, atlasCols: st.atlasCols, atlasRows: st.atlasRows, atlasRegions: st.atlasRegions },
+        flowers: { ...p.spec.flowers, enabled: st.flowersEnabled, style: st.flowersStyle },
+        ground: { ...p.spec.ground, mode: st.groundMode },
+      }
+    }
+    const lead = activePart()
+    if (lead) byId<HTMLSelectElement>('part-tex').value = lead.leafTexture
+    panel.sync()
+    texSlots.drawSlot(snap.slot, true)
+    if (snap.scope === 'part' && snap.partId) rebuildSinglePart(snap.partId)
+    else if (sceneSpec.parts.length > 0) rebuild(false)
+  },
+  applyTexture: (slot, tex, label, isPreview, meta) => applyAiProceduralTexture(slot, tex, label, isPreview, meta),
+  openEditor: opts => textureEditor.open(opts),
+  onOpen: () => {
+    presetLibrary.close()
+    textureEditor.close()
+  },
+  message,
+})
+
+const syncTexLibCount = () => { byId('tex-lib-count').textContent = String(textureStore.list().length) }
+textureStore.subscribe(syncTexLibCount)
+void textureStore.ready().then(syncTexLibCount)
+syncTexLibCount()
+
+byId('tex-editor').onclick = () => {
+  const lead = activePart()
+  const defaultSlot: EditableTextureSlot = lead?.spec.kind === 'conifer' ? 'needle'
+    : lead?.spec.kind === 'palm' ? 'palm'
+      : lead?.spec.kind === 'flowerbed' ? 'blossom'
+        : lead?.spec.kind === 'fern' ? 'fern' : 'leaf'
+  textureEditor.open({ slot: defaultSlot })
+}
+byId('tex-lib').onclick = () => textureLibrary.toggle()
+
+byId('preset-save').onclick = () => { textureLibrary.close(); textureEditor.close(); presetLibrary.open(true, 'mine') }
+byId('preset-lib').onclick = () => { textureLibrary.close(); textureEditor.close(); presetLibrary.toggle('mine') }
+byId('ai-open-presets').onclick = () => { textureLibrary.close(); textureEditor.close(); presetLibrary.open(false, 'mine') }
+byId('ai-showcase-top').onclick = () => { textureLibrary.close(); textureEditor.close(); presetLibrary.toggle('showcases') }
+byId('ai-showcase-btn').onclick = () => { textureLibrary.close(); textureEditor.close(); presetLibrary.open(false, 'showcases') }
 
 // Initialize blank project cleanly (or optional ?showcase=<id> direct link)
 const initialShowcase = new URL(location.href).searchParams.get('showcase')
@@ -1497,14 +1855,29 @@ Object.assign(window, {
     get stats() { return sceneAsset ? { ...sceneAsset.stats } : { parts: 0, branches: 0, twigs: 0, leaves: 0, flowers: 0, triangles: 0, ms: 0 } },
     get fullBuilds() { return fullBuildCount },
     get partBuilds() { return partBuildCount },
+    get woodBuilds() { return woodBuildCount },
     loadedTextures: () => registry.loadedSlots(),
-    showcases: () => aiShowcases.map(s => ({ id: s.id, name: s.name, tag: s.tag, subtitle: s.subtitle })),
+    showcases: () => visibleShowcases().map(s => ({ id: s.id, name: s.name, tag: s.tag, subtitle: s.subtitle })),
     presets: {
       store: presetStore,
+      showcaseStore: hiddenShowcaseStore,
       open: (focus?: boolean) => presetLibrary.open(focus, 'mine'),
       openShowcases: () => presetLibrary.open(false, 'showcases'),
       close: () => presetLibrary.close(),
       list: () => presetStore.list<AiSceneSpec>('ai'),
+      hiddenShowcases: () => hiddenShowcaseStore.listHiddenIds(),
+      deleteShowcase: (id: string) => hiddenShowcaseStore.hide(id),
+      restoreShowcases: () => hiddenShowcaseStore.restoreAll(),
+    },
+    textures: {
+      store: textureStore,
+      editor: textureEditor,
+      agent: textureEditor.agent,
+      library: textureLibrary,
+      openEditor: (slot?: EditableTextureSlot) => textureEditor.open(slot ? { slot } : {}),
+      closeEditor: () => textureEditor.close(),
+      openLibrary: (tab?: 'mine' | 'templates') => textureLibrary.open(tab),
+      closeLibrary: () => textureLibrary.close(),
     },
     schema: () => aiCapabilitySchema(),
     setScene(next: unknown) {
@@ -1544,7 +1917,11 @@ Object.assign(window, {
     selectBranch: (id: number | undefined) => editor?.selectBranch(id),
     selectedBranch: () => editor?.getSelectedBranchInfo(),
     branchScreen: (id: number, t?: number) => editor?.branchScreen(id, t),
-    gizmoScreen: (target: GizmoKind | `spline-${number}`) => editor?.gizmoScreen(target),
+    gizmoScreen: (target: GizmoKind | 'root' | `spline-${number}`) => editor?.gizmoScreen(target),
+    normalCenterScreen: () => editor?.normalCenterScreen(),
+    setNormalTool: (tool: NormalTool) => { editor?.setNormalTool(tool); editUi?.sync() },
+    setNormalDebugColor: (on: boolean) => { editor?.setNormalDebugColor(on); editUi?.sync() },
+    setShowNormalVectors: (on: boolean) => { editor?.setShowNormalVectors(on); editUi?.sync() },
     undoEdit: () => editor?.undo() ?? false,
     lastImageName: () => lastImageName,
   },

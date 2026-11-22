@@ -1,9 +1,26 @@
 ﻿// Unified tree specification (schema v2) shared by broadleaf and conifer.
 import { defaultLeafParams, parseLeafParams, type LeafParams } from '../broadleaf/leaves'
+import {
+  defaultLeafNormalEdit, parseLeafNormalEdit,
+  type LeafNormalEditSpec, type LeafNormalMode, type NormalBrushKind, type NormalBrushStroke,
+} from './leaf-normals'
+import {
+  defaultTrunkSculpt, parseTrunkSculpt, woodSculptStyleMeta,
+  type BarkUvMode, type TrunkSculptSpec, type WoodSculptStyleId,
+} from './wood-sculpt'
+export {
+  defaultLeafNormalEdit, leafNormalModes, normalBrushKinds,
+  type LeafNormalEditSpec, type LeafNormalMode, type NormalBrushKind, type NormalBrushStroke,
+} from './leaf-normals'
+export {
+  barkUvModes, cloneTrunkSculpt, defaultTrunkSculpt, isWoodSculptActive, parseTrunkSculpt,
+  woodSculptStyleIds, woodSculptStyleMeta,
+  type BarkUvMode, type TrunkSculptSpec, type WoodSculptStyleId,
+} from './wood-sculpt'
 
 export const treeKinds = ['broadleaf', 'conifer', 'palm', 'grass', 'fern', 'flowerbed'] as const
 export type TreeKind = typeof treeKinds[number]
-export const leafStyles = ['default', 'cloud', 'sakura', 'maple', 'willow', 'bush', 'flower'] as const
+export const leafStyles = ['default', 'cloud', 'oak', 'sakura', 'maple', 'willow', 'bush', 'flower'] as const
 export type LeafStyle = typeof leafStyles[number]
 export type XYZ = [number, number, number]
 
@@ -23,10 +40,14 @@ export interface TrunkSpec {
   barkScale?: number    // 3D procedural / triplanar bark projection density (0.25..4, default 1.0)
   barkDetail?: number   // 3D procedural bark relief/bump & grain strength (0..1.5, default 0.72)
   barkTint?: number     // custom bark image tint blend with barkColor (0..1, default 0.45)
+  barkMoss?: number     // 0..1 world-space upward-facing & root-crevice 3D velvety moss coverage
+  barkMossColor?: string // 3D world-space moss base hex color (default #5d9132)
+  barkRootAO?: number   // 0..1 grounded root-collar contact shadow & earth dampness
   spine?: XYZ[]         // optional traced/custom 3D trunk centerline in local meters ([0,0,0] -> fork)
   barkRidges: number    // vertical ridge count
   barkDepth: number     // ridge depth (fraction of radius)
   forkHeight: number    // broadleaf: fraction of height where the trunk dissolves into limbs
+  sculpt?: TrunkSculptSpec // high-detail sculpted bark wrinkles, flow-UV displacement & braided wood strands
 }
 
 export interface CrownSpec {
@@ -40,11 +61,16 @@ export interface CrownSpec {
   irregularity: number  // angular wobble of the envelope
   canopyLift?: number   // 0..0.75 carves under-canopy negative space to expose branching limbs
   padFlatten?: number   // 0..0.85 flattens leaf clusters into layered bonsai cloud pads & trims poking twigs
+  /** Optional vertical silhouette profile curve `[[u, scale], ...]` (`u` in [0,1] bottom->top, `scale` in [0.15, 1.85]). */
+  profileCurve?: [number, number][]
 }
 
 export interface BranchSpec {
   count: number         // broadleaf primary limbs / conifer whorls
   perWhorl: number      // conifer branches per whorl
+  startHeight: number   // broadleaf: lowest primary limb socket along trunk (0.05..0.92)
+  heightSpan: number    // broadleaf: upward distribution span along trunk (0.05..0.95)
+  azimuthOffset: number // global azimuth rotation around trunk axis (deg, -180..180)
   angle: number         // elevation at the bottom (deg, + up)
   angleTop: number      // elevation at the top (deg)
   reach: number         // tip distance as fraction of envelope radius
@@ -54,11 +80,15 @@ export interface BranchSpec {
   tipCurl: number       // conifer upturned tips
   radiusRatio: number   // limb root radius / parent radius
   childCount: number    // sub-branches per branch
+  childStart: number    // sub-branch start socket along parent limb (0.05..0.85)
   childAngle: number    // deg from parent axis
   childLength: number   // fraction of parent length
   childDroop: number
   deadCount: number     // bare stubs below the crown
   tierGradient: number  // conifer: >0 makes lower tiers far apart and upper tiers tight
+  offsetX: number       // global branch assembly X translation (m)
+  offsetY: number       // global branch assembly Y translation (m)
+  offsetZ: number       // global branch assembly Z translation (m)
 }
 
 export const frondModes = ['leaf', 'drape', 'tent'] as const
@@ -142,6 +172,8 @@ export interface BranchEdit {
   pitchDelta?: number   // -65..65 deg elevation tilt (default 0)
   yawDelta?: number     // -180..180 deg azimuth swing around Y (default 0)
   gravityDelta?: number // -1.5..1.5 extra arch (-) / droop (+) (default 0)
+  socketDelta?: number  // -0.95..0.95 slide branch root along parent spline t (ignored on trunk)
+  offset?: XYZ          // free 3D root translation [dx, dy, dz] in meters (moves branch + descendants)
   spineOffsets?: XYZ[]  // 4 direct 3D spline sculpt deltas at t = 0.25, 0.50, 0.75, 1.0
   pruned?: boolean      // true = prune this branch and all descendants (ignored on trunk)
   bare?: boolean        // true = strip foliage on this branch and all descendants
@@ -198,9 +230,13 @@ export interface FlowerSpec {
   seed: number
 }
 
+export const flowerBedLayouts = ['dome', 'square', 'rect', 'ring', 'cluster', 'row'] as const
+export type FlowerBedLayout = typeof flowerBedLayouts[number]
+
 /** Standalone ground flower patch template: with stems+leaves OR pure blossom heads. */
 export interface FlowerBedSpec {
   withStems: boolean      // true = curved green stems + stem leaves + blossoms; false = pure blossoms only
+  layout: FlowerBedLayout // spatial distribution: dome (spherical), square, rect strip, ring, multi-cluster, rows
   count: number           // number of flowers in the patch
   spread: number          // patch radius on the ground (m)
   height: number          // stem height (or blossom cushion height when pure) (m)
@@ -234,15 +270,34 @@ export interface OptimizeSpec {
   targetTriangles: number // 0 = manual; >0 = target budget for one-click auto-optimize
 }
 
+export type TreeAccent = 'none' | 'wishing'
+
+/** Parameterized ancient-tree decorative accents (moss-capped boulders, flat-folded silk sashes,
+ *  hanging cedar wishing plaques, and upper-canopy 4-point starlight motes). */
+export interface WishingAccentsSpec {
+  rockCount: number      // 0..8 sculpted moss-capped boulders around flared roots
+  rockScale: number      // 0.4..1.8 boulder scale multiplier
+  rockColor: string      // slate stone base hex color
+  rockMossColor: string  // lush moss cap hex color on boulder tops
+  ribbonWraps: number    // 0..4 draped flat-folded silk sashes & catenary swags around trunk arch
+  ribbonColor: string    // silk sash & plaque tassel hex color
+  plaqueCount: number    // 0..10 hanging cedar wishing plaques (trunk sash cluster + real limbs)
+  plaqueScale: number    // 0.6..1.8 plaque size multiplier
+  sparkles: boolean      // enable luminous 4-point starlight motes around upper canopy
+  sparkleCount: number   // 0..36 floating starlight motes count
+  sparkleColor: string   // starlight hex color
+}
+
 /** Stylized foliage look-dev shading: backlit SSS, cool shadow hue shift, sunlit rim & top warmth. */
 export interface ShadingSpec {
-  leafStyle: LeafStyle    // built-in broadleaf foliage card silhouette (default/cloud/sakura/maple/willow/flower)
+  leafStyle: LeafStyle    // built-in broadleaf foliage card silhouette (default/cloud/oak/sakura/maple/willow/bush/flower)
   translucency: number   // 0..1 backlit subsurface scattering glow
   rimLight: number       // 0..1 soft sunward silhouette rim
   shadowShift: number    // 0..1 enrich shadow tint (cool violet/teal) instead of muddy gray
   topWarmth: number      // 0..1 three-zone sunlight warmth on crown top vs cool underside
   softSelfShadow: boolean // foliage casts shadows on trunk/floor without jagged card-on-card shadow triangles
   petals: number         // 0..60 lightweight floating falling petals / accent leaves around silhouette
+  accent?: TreeAccent    // optional stylized decorative accents (e.g. mossy boulders + wishing ribbons/plaques)
 }
 
 export interface TreeSpec {
@@ -260,6 +315,8 @@ export interface TreeSpec {
   flowers: FlowerSpec
   flowerbed: FlowerBedSpec
   shading: ShadingSpec
+  accents?: WishingAccentsSpec
+  normalEdit?: LeafNormalEditSpec
   optimize: OptimizeSpec
   handles: CrownHandle[]
   branchEdits?: BranchEdit[]
@@ -295,7 +352,7 @@ export const defaultFlowers: FlowerSpec = {
 }
 
 export const defaultFlowerBed: FlowerBedSpec = {
-  withStems: true, count: 28, spread: .65, height: .48, heightVariance: .35, lean: 18, bend: .28,
+  withStems: true, layout: 'dome', count: 28, spread: .65, height: .48, heightVariance: .35, lean: 18, bend: .28,
   stemRadius: .009, stemLeaves: 2, stemLeafSize: .15, flowerSize: .18, flowerSizeVariance: .24,
   headTilt: 24, cardType: 'cup', faceOutward: .45, tintInner: '#e08a14', tintOuter: '#ffe44d',
   stemTint: '#3e8432', tintVariance: .12, alphaCutoff: .35, atlasCols: 1, atlasRows: 1,
@@ -306,22 +363,50 @@ export const defaultOptimize: OptimizeSpec = {
 }
 
 export const defaultShading: ShadingSpec = {
-  leafStyle: 'default', translucency: .45, rimLight: .32, shadowShift: .34, topWarmth: .36, softSelfShadow: true, petals: 0,
+  leafStyle: 'default', translucency: .45, rimLight: .32, shadowShift: .34, topWarmth: .36, softSelfShadow: true, petals: 0, accent: 'none',
+}
+
+export const defaultAccents: WishingAccentsSpec = {
+  rockCount: 5,
+  rockScale: 1,
+  rockColor: '#587680',
+  rockMossColor: '#6ca842',
+  ribbonWraps: 3,
+  ribbonColor: '#cc3b33',
+  plaqueCount: 8,
+  plaqueScale: 1,
+  sparkles: true,
+  sparkleCount: 18,
+  sparkleColor: '#fff7b0',
 }
 
 const broadTrunk: TrunkSpec = {
   height: 6.2, radius: .25, taper: 1.15, flare: .55, flareLobes: 5, flareHeight: .55, wobble: .12, lean: .25,
   leanAngle: -1, gnarl: 0, surfaceRoots: 0, barkColor: '#5b4636', barkScale: 1, barkDetail: .72, barkTint: .45,
+  barkMoss: 0, barkMossColor: '#5d9132', barkRootAO: .25,
   barkRidges: 9, barkDepth: .06, forkHeight: .48,
 }
 const conTrunk: TrunkSpec = {
   height: 8.4, radius: .28, taper: 1.2, flare: .72, flareLobes: 6, flareHeight: .7, wobble: .06, lean: .08,
   leanAngle: -1, gnarl: 0, surfaceRoots: 0, barkColor: '#5b4636', barkScale: 1, barkDetail: .72, barkTint: .45,
+  barkMoss: 0, barkMossColor: '#5d9132', barkRootAO: .25,
   barkRidges: 11, barkDepth: .07, forkHeight: 1,
 }
 
-const stubBranches: BranchSpec = { count: 2, perWhorl: 2, angle: 30, angleTop: 60, reach: .9, lengthVariance: .2, curvature: .3, droop: .2,
-  tipCurl: 0, radiusRatio: .5, childCount: 0, childAngle: 45, childLength: .4, childDroop: .2, deadCount: 0, tierGradient: .45 }
+const defaultBranchPlacement = (kind: TreeKind) => ({
+  startHeight: .58,
+  heightSpan: .38,
+  azimuthOffset: 0,
+  childStart: kind === 'conifer' ? .06 : .26,
+  offsetX: 0,
+  offsetY: 0,
+  offsetZ: 0,
+})
+
+const stubBranches: BranchSpec = {
+  count: 2, perWhorl: 2, ...defaultBranchPlacement('broadleaf'), angle: 30, angleTop: 60, reach: .9, lengthVariance: .2, curvature: .3, droop: .2,
+  tipCurl: 0, radiusRatio: .5, childCount: 0, childAngle: 45, childLength: .4, childDroop: .2, deadCount: 0, tierGradient: .45,
+}
 
 export const presets = {
   'broadleaf-round': {
@@ -376,12 +461,86 @@ export const presets = {
       tipCurl: 0, radiusRatio: .58, childCount: 4, childAngle: 44, childLength: .5, childDroop: .88, deadCount: 0, tierGradient: .45 },
     leaves: {
       twigUpBias: -.48, twigGravity: -.85, twigLength: .52,
-      cardType: 'drape', leafSize: 1.58, leafAspect: .52, leafSizeVariance: .36, leafPivot: 0, leavesPerTwig: 4, clumpFill: 2.8, clumpFillScale: 1.32,
+      cardType: 'drape', leafSize: 1.58, leafAspect: .52, leafSizeVariance: .36, leafPivot: 0, leavesPerTwig: 6, limbLeafFrequency: 3.5, clumpFill: 2.8, clumpFillScale: 1.32,
       faceOutward: .55, upAlign: 0, leafAngle: 0, randomRoll: 0, randomTilt: 0, leafFold: .06, leafCurl: -.18,
       cameraFacing: 0, normalSpherize: .78, aoStrength: .36, alphaCutoff: .38,
-      tintInner: '#356b30', tintOuter: '#d8f27e', tintVariance: .16, leafSeed: 19,
+      tintInner: '#426b36', tintOuter: '#bddb83', tintVariance: .16, leafSeed: 19,
     },
     shading: { leafStyle: 'willow', translucency: .54, rimLight: .36, shadowShift: .32, topWarmth: .4, softSelfShadow: true, petals: 0 },
+  },
+  'broadleaf-wishing': {
+    kind: 'broadleaf', name: '古树 · 仙韵祈愿', seed: 8824,
+    trunk: {
+      ...broadTrunk, height: 6.35, radius: .48, taper: 1.55, flare: 1.38, flareLobes: 6, flareHeight: 1.08,
+      wobble: .08, lean: .12, barkRidges: 10, barkDepth: .082, forkHeight: .62,
+      barkColor: '#b59a78', barkScale: .82, barkDetail: .46, barkTint: .10,
+      barkMoss: .56, barkMossColor: '#5c9430', barkRootAO: .42,
+      gnarl: .48, surfaceRoots: 7,
+      spine: [
+        [0, 0, 0], [-.14, .48, .06], [-.28, .98, .12], [.14, 1.44, .16],
+        [.80, 1.78, .18], [1.22, 2.14, .12], [.78, 2.62, .06], [.26, 3.12, .02], [.14, 3.68, -.02], [.06, 3.96, -.02],
+      ],
+    },
+    crown: { base: .44, top: 1, width: 3.45, depth: .84, roundness: 2.5, topBias: 1.24, coneShape: 1, irregularity: .46, canopyLift: .42, padFlatten: .64 },
+    branches: { count: 7, perWhorl: 1, angle: 16, angleTop: 56, reach: .98, lengthVariance: .26, curvature: .56, droop: .16,
+      tipCurl: .06, radiusRatio: .68, childCount: 4, childAngle: 52, childLength: .46, childDroop: .18, deadCount: 0, tierGradient: .45 },
+    leaves: {
+      cardType: 'quad', leafSize: .78, leafPivot: .48, leavesPerTwig: 8, clumpFill: 6.2, clumpFillScale: 1.48,
+      faceOutward: .88, cameraFacing: .28, normalSpherize: .88, aoStrength: .42, alphaCutoff: .38, pruneInner: .20,
+      tintInner: '#3a725a', tintOuter: '#fefbc0', tintVariance: .16, atlasCols: 2, atlasRows: 2, leafSeed: 37,
+    },
+    shading: { leafStyle: 'oak', translucency: .60, rimLight: .46, shadowShift: .38, topWarmth: .64, softSelfShadow: true, petals: 14, accent: 'wishing' },
+    accents: { ...defaultAccents },
+  },
+  'broadleaf-driftwood': {
+    kind: 'broadleaf', name: '古木 · 绞缠枯树', seed: 9104,
+    trunk: {
+      ...broadTrunk, height: 6.2, radius: .46, taper: 1.38, flare: 1.48, flareLobes: 6, flareHeight: 1.25,
+      wobble: .10, lean: .14, gnarl: .68, surfaceRoots: 0,
+      barkColor: '#9e9284', barkScale: 1.0, barkDetail: .92, barkTint: .35, barkRootAO: .46,
+      barkRidges: 6, barkDepth: .06, forkHeight: .64,
+      spine: [
+        [0, 0, 0], [-.14, .66, .06], [-.48, 1.42, .14], [-.70, 2.20, .16],
+        [-.40, 2.94, .10], [.14, 3.54, .04], [.02, 4.02, -.04],
+      ],
+      sculpt: { ...woodSculptStyleMeta['ancient-driftwood'].spec },
+    },
+    crown: { base: .56, top: 1, width: 3.1, depth: .86, roundness: 2.3, topBias: 1.35, coneShape: 1, irregularity: .62, canopyLift: .50, padFlatten: .44 },
+    branches: {
+      count: 6, perWhorl: 1, angle: 26, angleTop: 64, reach: .94, lengthVariance: .34, curvature: .78, droop: .24,
+      tipCurl: 0, radiusRatio: .56, childCount: 4, childAngle: 54, childLength: .48, childDroop: .32, deadCount: 2, tierGradient: .45,
+    },
+    leaves: {
+      cardType: 'quad', leafSize: .60, leafPivot: .42, leavesPerTwig: 6, clumpFill: 2.4, clumpFillScale: 1.25,
+      faceOutward: .85, cameraFacing: .2, normalSpherize: .78, aoStrength: .32, alphaCutoff: .44, pruneInner: .32,
+      tintInner: '#3f523a', tintOuter: '#9db07c', tintVariance: .20, leafSeed: 31,
+    },
+    shading: { leafStyle: 'cloud', translucency: .42, rimLight: .35, shadowShift: .38, topWarmth: .30, softSelfShadow: true, petals: 0 },
+  },
+  'broadleaf-twisted-trunk': {
+    kind: 'broadleaf', name: '盆景 · 扭纹古干', seed: 9208,
+    trunk: {
+      ...broadTrunk, height: 5.55, radius: .42, taper: 1.32, flare: 1.42, flareLobes: 5, flareHeight: 1.15,
+      wobble: .08, lean: .10, gnarl: .54, surfaceRoots: 0,
+      barkColor: '#b98d78', barkScale: 1.0, barkDetail: .78, barkTint: .30, barkRootAO: .34,
+      barkRidges: 5, barkDepth: .06, forkHeight: .62,
+      spine: [
+        [0, 0, 0], [-.14, .44, .03], [-.72, .96, .09], [-1.22, 1.54, .14],
+        [-.88, 2.14, .12], [-.18, 2.66, .06], [.32, 3.22, .02],
+      ],
+      sculpt: { ...woodSculptStyleMeta['stylized-twist'].spec },
+    },
+    crown: { base: .54, top: 1, width: 3.15, depth: .84, roundness: 2.5, topBias: 1.32, coneShape: 1, irregularity: .46, canopyLift: .48, padFlatten: .54 },
+    branches: {
+      count: 6, perWhorl: 1, angle: 24, angleTop: 60, reach: .95, lengthVariance: .24, curvature: .68, droop: .20,
+      tipCurl: 0, radiusRatio: .58, childCount: 4, childAngle: 50, childLength: .45, childDroop: .24, deadCount: 0, tierGradient: .45,
+    },
+    leaves: {
+      cardType: 'quad', leafSize: .66, leafPivot: .44, leavesPerTwig: 8, clumpFill: 4.8, clumpFillScale: 1.36,
+      faceOutward: .88, cameraFacing: .25, normalSpherize: .84, aoStrength: .24, alphaCutoff: .44, pruneInner: .26,
+      tintInner: '#365b34', tintOuter: '#9ec466', tintVariance: .16, leafSeed: 47,
+    },
+    shading: { leafStyle: 'cloud', translucency: .52, rimLight: .42, shadowShift: .34, topWarmth: .40, softSelfShadow: true, petals: 0 },
   },
   'conifer-standard': {
     kind: 'conifer', name: '松树 · 标准', seed: 1301, trunk: conTrunk,
@@ -427,11 +586,11 @@ export const presets = {
   },
   'conifer-shrub': {
     kind: 'conifer', name: '针叶灌木 · 刺柏', seed: 7702,
-    trunk: { ...conTrunk, height: 2.3, radius: .09, flare: .4, flareHeight: .2, barkRidges: 7, wobble: .06, lean: .08 },
-    crown: { base: .12, top: 1, width: 1.02, depth: 1, roundness: 2, topBias: 1, coneShape: .76, irregularity: .28 },
-    branches: { count: 7, perWhorl: 6, angle: -34, angleTop: -52, reach: 1.0, lengthVariance: .22, curvature: .2, droop: .1,
-      tipCurl: .35, radiusRatio: .25, childCount: 0, childAngle: 44, childLength: .42, childDroop: .4, deadCount: 0, tierGradient: .2 },
-    fronds: { width: .2, drop: .32, drapeTilt: 24, tuft: .9, cardAspect: .62, overhang: .25, arch: .1 },
+    trunk: { ...conTrunk, height: 2.3, radius: .085, flare: .38, flareHeight: .2, barkRidges: 7, wobble: .05, lean: .06 },
+    crown: { base: .10, top: 1, width: 1.05, depth: 1, roundness: 2, topBias: 1, coneShape: .74, irregularity: .24 },
+    branches: { count: 10, perWhorl: 6, angle: -18, angleTop: -30, reach: .94, lengthVariance: .18, curvature: .14, droop: .08,
+      tipCurl: .12, radiusRatio: .16, childCount: 0, childAngle: 42, childLength: .4, childDroop: .32, deadCount: 0, tierGradient: .18 },
+    fronds: { width: .26, drop: .44, drapeTilt: 18, tuft: 1.15, cardAspect: .78, overhang: .36, arch: .04, cardsPerBranch: 1, cardCup: .14 },
   },
   'grass-clump': {
     kind: 'grass', name: '草丛 · 宽叶放射', seed: 42,
@@ -533,16 +692,18 @@ export const presets = {
     ground: { mode: 'card', count: 16, length: 1.05, lengthVariance: .2, width: .19, spread: .06, lean: 40, arch: .92, twist: 12, planes: 1, fold: 22,
       segments: 7, spherize: .55, tintBase: '#4b823c', tintTip: '#eaffcc', aoStrength: .45, alphaCutoff: .32 },
   },
-} as const satisfies Record<string, Partial<Omit<TreeSpec, 'leaves' | 'fronds' | 'ground' | 'palm' | 'flowers' | 'flowerbed' | 'shading'>> & { leaves?: Partial<LeafParams>; fronds?: Partial<FrondSpec>; ground?: Partial<GroundSpec>; palm?: Partial<PalmSpec>; flowers?: Partial<FlowerSpec>; flowerbed?: Partial<FlowerBedSpec>; shading?: Partial<ShadingSpec> }>
+} as const satisfies Record<string, Partial<Omit<TreeSpec, 'branches' | 'leaves' | 'fronds' | 'ground' | 'palm' | 'flowers' | 'flowerbed' | 'shading' | 'accents'>> & { branches?: Partial<BranchSpec>; leaves?: Partial<LeafParams>; fronds?: Partial<FrondSpec>; ground?: Partial<GroundSpec>; palm?: Partial<PalmSpec>; flowers?: Partial<FlowerSpec>; flowerbed?: Partial<FlowerBedSpec>; shading?: Partial<ShadingSpec>; accents?: Partial<WishingAccentsSpec> }>
 
 export type PresetId = keyof typeof presets
 export const presetIds = Object.keys(presets) as PresetId[]
 
 export function presetSpec(id: PresetId, seed?: number): TreeSpec {
-  const p = presets[id] as unknown as Partial<TreeSpec> & { leaves?: Partial<LeafParams>; fronds?: Partial<FrondSpec>; ground?: Partial<GroundSpec>; palm?: Partial<PalmSpec>; flowers?: Partial<FlowerSpec>; flowerbed?: Partial<FlowerBedSpec>; shading?: Partial<ShadingSpec> }
+  const p = presets[id] as unknown as Partial<Omit<TreeSpec, 'branches'>> & { branches?: Partial<BranchSpec>; leaves?: Partial<LeafParams>; fronds?: Partial<FrondSpec>; ground?: Partial<GroundSpec>; palm?: Partial<PalmSpec>; flowers?: Partial<FlowerSpec>; flowerbed?: Partial<FlowerBedSpec>; shading?: Partial<ShadingSpec>; accents?: Partial<WishingAccentsSpec> }
   return {
     schemaVersion: 2, kind: p.kind!, name: p.name!, seed: seed ?? p.seed!,
-    trunk: { ...broadTrunk, ...p.trunk! }, crown: { canopyLift: 0, padFlatten: 0, ...p.crown! }, branches: { ...p.branches! },
+    trunk: { ...broadTrunk, ...p.trunk!, sculpt: { ...defaultTrunkSculpt(), ...(p.trunk?.sculpt ?? {}) } },
+    crown: { canopyLift: 0, padFlatten: 0, ...p.crown! },
+    branches: { ...stubBranches, ...defaultBranchPlacement(p.kind!), ...(p.branches ?? {}) },
     leaves: parseLeafParams({ ...defaultLeafParams, ...(p.leaves ?? {}) }),
     fronds: { ...defaultFronds, ...(p.fronds ?? {}) },
     ground: { ...defaultGround, ...(p.ground ?? {}) },
@@ -550,6 +711,8 @@ export function presetSpec(id: PresetId, seed?: number): TreeSpec {
     flowers: { ...defaultFlowers, ...(p.flowers ?? {}) },
     flowerbed: { ...defaultFlowerBed, ...(p.flowerbed ?? {}) },
     shading: { ...defaultShading, ...(p.shading ?? {}) },
+    accents: { ...defaultAccents, ...(p.accents ?? {}) },
+    normalEdit: defaultLeafNormalEdit(),
     optimize: { ...defaultOptimize },
     handles: [],
   }
@@ -591,6 +754,13 @@ export function parseTreeSpec(value: unknown): TreeSpec {
       const pd = clampNum(raw.pitchDelta, -65, 65); if (pd !== undefined && Math.abs(pd) > 1e-4) edit.pitchDelta = pd
       const yd = clampNum(raw.yawDelta, -180, 180); if (yd !== undefined && Math.abs(yd) > 1e-4) edit.yawDelta = yd
       const gd = clampNum(raw.gravityDelta, -1.5, 1.5); if (gd !== undefined && Math.abs(gd) > 1e-4) edit.gravityDelta = gd
+      const sd = clampNum(raw.socketDelta, -.95, .95); if (sd !== undefined && id !== 0 && Math.abs(sd) > 1e-4) edit.socketDelta = sd
+      if (Array.isArray(raw.offset) && raw.offset.length === 3 && raw.offset.every(n => typeof n === 'number' && Number.isFinite(n))) {
+        const ox = Math.min(4, Math.max(-4, raw.offset[0]))
+        const oy = Math.min(4, Math.max(-4, raw.offset[1]))
+        const oz = Math.min(4, Math.max(-4, raw.offset[2]))
+        if (ox * ox + oy * oy + oz * oz > 1e-8) edit.offset = [ox, oy, oz]
+      }
       if (Array.isArray(raw.spineOffsets) && raw.spineOffsets.length > 0) {
         const offs = raw.spineOffsets.slice(0, 6).map(p =>
           Array.isArray(p) && p.length === 3 && p.every(n => typeof n === 'number' && Number.isFinite(n))
@@ -604,24 +774,38 @@ export function parseTreeSpec(value: unknown): TreeSpec {
     }
   }
   const parsedTrunk = finite(data.trunk as never, base.trunk as never) as unknown as TrunkSpec
+  parsedTrunk.sculpt = parseTrunkSculpt((data.trunk as Partial<TrunkSpec> | undefined)?.sculpt)
   const rawSpine = (data.trunk as Partial<TrunkSpec> | undefined)?.spine
   if (Array.isArray(rawSpine) && rawSpine.length >= 3) {
     const valid = rawSpine.filter(p => Array.isArray(p) && p.length === 3 && p.every(n => typeof n === 'number' && Number.isFinite(n))) as XYZ[]
     if (valid.length >= 3) parsedTrunk.spine = valid
   }
+  const parsedCrown = finite(data.crown as never, base.crown as never) as unknown as CrownSpec
+  const rawProfile = (data.crown as Partial<CrownSpec> | undefined)?.profileCurve
+  if (Array.isArray(rawProfile) && rawProfile.length >= 2) {
+    const valid = rawProfile
+      .filter(p => Array.isArray(p) && p.length === 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+      .map(p => [Math.min(1, Math.max(0, Number(p[0]))), Math.min(1.85, Math.max(0.15, Number(p[1])))] as [number, number])
+      .sort((a, b) => a[0] - b[0])
+    if (valid.length >= 2) parsedCrown.profileCurve = valid
+  }
+  const parsedFlowerBed = finite(data.flowerbed as never, base.flowerbed as never) as unknown as FlowerBedSpec
+  if (!(flowerBedLayouts as readonly string[]).includes(parsedFlowerBed.layout)) parsedFlowerBed.layout = 'dome'
   return {
     schemaVersion: 2, kind: data.kind as TreeKind, name: String(data.name ?? base.name),
     seed: Number.isInteger(data.seed) ? data.seed! : base.seed,
     trunk: parsedTrunk,
-    crown: finite(data.crown as never, base.crown as never) as unknown as CrownSpec,
+    crown: parsedCrown,
     branches: finite(data.branches as never, base.branches as never) as unknown as BranchSpec,
     leaves: parseLeafParams(data.leaves),
     fronds: finite(data.fronds as never, base.fronds as never) as unknown as FrondSpec,
     ground: finite(data.ground as never, base.ground as never) as unknown as GroundSpec,
     palm: finite(data.palm as never, base.palm as never) as unknown as PalmSpec,
     flowers: finite(data.flowers as never, base.flowers as never) as unknown as FlowerSpec,
-    flowerbed: finite(data.flowerbed as never, base.flowerbed as never) as unknown as FlowerBedSpec,
+    flowerbed: parsedFlowerBed,
     shading: finite(data.shading as never, base.shading as never) as unknown as ShadingSpec,
+    accents: finite(data.accents as never, (base.accents ?? defaultAccents) as never) as unknown as WishingAccentsSpec,
+    normalEdit: parseLeafNormalEdit(data.normalEdit),
     optimize: finite(data.optimize as never, base.optimize as never) as unknown as OptimizeSpec,
     handles,
     ...(branchEdits.length ? { branchEdits } : {}),

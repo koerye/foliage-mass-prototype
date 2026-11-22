@@ -75,13 +75,19 @@ describe('Improved trunk/branch geometry & 3D procedural materials (no UV tiling
     expect(u.uBarkDetail.value).toBe(.72)
     expect(u.uBarkTint.value).toBe(.45)
 
-    // Live 0 ms uniform updates without rebuilding geometry
+    // Live 0 ms uniform updates without rebuilding geometry (scale, detail, tint + 3D world-space upward moss & root AO)
     expect(defaultTree.applyLiveParam('trunk.barkScale', { ...spec, trunk: { ...spec.trunk, barkScale: 2.2 } })).toBe(true)
     expect(u.uBarkScale.value).toBe(2.2)
     expect(defaultTree.applyLiveParam('trunk.barkDetail', { ...spec, trunk: { ...spec.trunk, barkDetail: 1.25 } })).toBe(true)
     expect(u.uBarkDetail.value).toBe(1.25)
     expect(defaultTree.applyLiveParam('trunk.barkTint', { ...spec, trunk: { ...spec.trunk, barkTint: .15 } })).toBe(true)
     expect(u.uBarkTint.value).toBe(.15)
+    expect(defaultTree.applyLiveParam('trunk.barkMoss', { ...spec, trunk: { ...spec.trunk, barkMoss: .72 } })).toBe(true)
+    expect(u.uBarkMoss.value).toBe(.72)
+    expect(defaultTree.applyLiveParam('trunk.barkRootAO', { ...spec, trunk: { ...spec.trunk, barkRootAO: .55 } })).toBe(true)
+    expect(u.uBarkRootAO.value).toBe(.55)
+    expect(defaultTree.applyLiveParam('trunk.barkMossColor', { ...spec, trunk: { ...spec.trunk, barkMossColor: '#488824' } })).toBe(true)
+    expect(mat.customProgramCacheKey()).toBe('procedural-bark-v7')
     defaultTree.dispose()
 
     // With custom imported bark texture: still NO mat.map UV tiling live; bound via uBarkMap triplanar shader
@@ -112,10 +118,10 @@ describe('Improved trunk/branch geometry & 3D procedural materials (no UV tiling
     expect(reg.loadedSlots()).toEqual([])
 
     const fb = buildTree(presetSpec('flowerbed-stemmed'), dummyTextures())
-    const stemMesh = fb.group.children.find(c => c.name === 'Flower stems and leaves') as Mesh
+    const stemMesh = fb.group.children.find(c => c.name === 'Flower stems') as Mesh
     expect((stemMesh.material as MeshStandardMaterial).userData.procUniforms).toBeDefined()
     const expFb = prepareGlbScene(fb.group)
-    const expStem = expFb.children.find(c => c.name === 'Flower stems and leaves') as Mesh
+    const expStem = expFb.children.find(c => c.name === 'Flower stems') as Mesh
     expect((expStem.material as MeshStandardMaterial).userData.procUniforms).toBeUndefined()
     fb.dispose()
 

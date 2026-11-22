@@ -685,9 +685,7 @@ export function makeMapleTexture(size = 512) {
   return canvasTexture(canvas, 'placeholder_maple_cluster')
 }
 
-/** Stylized weeping-willow hanging curtain texture (512x512).
- *  Top edge (y = 0, UV v = 1) = branch attachment; bottom edge (y = 512, UV v = 0) = graceful
- *  tapering willow tips. Broad painterly willow leaves prevent mipmap break-up into noisy dots. */
+/** One willow spray, with its petiole at the top and alternating leaves along the hanging stem. */
 export function makeWillowTexture(size = 512) {
   const canvas = document.createElement('canvas')
   canvas.width = canvas.height = size
@@ -696,23 +694,22 @@ export function makeWillowTexture(size = 512) {
   const s = size / 512
   g.lineCap = 'round'
 
-  const drawLeaf = (x: number, y: number, ang: number, len: number, width: number, bright: number, curve = 0) => {
+  const drawLeaf = (x: number, y: number, ang: number, len: number, width: number, bright: number, curve: number) => {
     g.save()
     g.translate(x * s, y * s)
     g.rotate(ang)
     const L = len * s, W = width * s, C = curve * s
-    // Slender weeping-willow lance leaf hanging downward (+Y) with gentle natural curve
     const grad = g.createLinearGradient(0, 0, C, L)
-    grad.addColorStop(0, `hsl(86, 11%, ${Math.round(73 + bright * 8)}%)`)
-    grad.addColorStop(.52, `hsl(80, 9%, ${Math.round(88 + bright * 7)}%)`)
-    grad.addColorStop(1, `hsl(74, 8%, ${Math.round(95 + bright * 4)}%)`)
+    grad.addColorStop(0, `hsl(91, 12%, ${Math.round(69 + bright * 10)}%)`)
+    grad.addColorStop(.55, `hsl(86, 10%, ${Math.round(82 + bright * 12)}%)`)
+    grad.addColorStop(1, `hsl(79, 8%, ${Math.round(86 + bright * 10)}%)`)
     g.fillStyle = grad
     g.beginPath()
     g.moveTo(0, 0)
     g.bezierCurveTo(W * .92 + C * .25, L * .22, W * .62 + C * .7, L * .68, C, L)
     g.bezierCurveTo(-W * .62 + C * .7, L * .68, -W * .92 + C * .25, L * .22, 0, 0)
     g.fill()
-    g.strokeStyle = 'rgba(225, 234, 198, 0.34)'
+    g.strokeStyle = 'rgba(235, 240, 215, 0.40)'
     g.lineWidth = Math.max(1, 1.2 * s)
     g.beginPath()
     g.moveTo(0, L * .06)
@@ -721,59 +718,29 @@ export function makeWillowTexture(size = 512) {
     g.restore()
   }
 
-  // 5 arched cascading willow strands: domed top origins eliminate flat "haircut" edges at v=1
-  // [startX, topY, endX, endY, pairs]
-  const strandConfigs: [number, number, number, number, number][] = [
-    [130, 56, 84, 378, 11],
-    [188, 24, 168, 458, 14],
-    [256, 10, 258, 502, 16],
-    [324, 26, 344, 452, 14],
-    [382, 58, 424, 372, 11],
-  ]
-
-  // Pass 1: arching golden-olive weeping stems curving softly outward from dome crest then down
-  const curves: { startX: number; topY: number; midX: number; midY: number; endX: number; endY: number; pairs: number }[] = []
-  for (const [x0, y0, x1, y1, pairs] of strandConfigs) {
-    const startX = x0 + (random() - .5) * 10
-    const endX = x1 + (random() - .5) * 16
-    const midX = x1 * .7 + startX * .3 + (random() - .5) * 10
-    const midY = y0 + (y1 - y0) * .36
-    curves.push({ startX, topY: y0, midX, midY, endX, endY: y1, pairs })
-
-    const grad = g.createLinearGradient(0, y0 * s, 0, y1 * s)
-    grad.addColorStop(0, 'rgba(138, 148, 112, 0.92)')
-    grad.addColorStop(.68, 'rgba(170, 182, 138, 0.86)')
-    grad.addColorStop(1, 'rgba(196, 208, 166, 0.72)')
-    g.strokeStyle = grad
-    g.lineWidth = 3.4 * s
-    g.beginPath()
-    g.moveTo(startX * s, y0 * s)
-    g.quadraticCurveTo(midX * s, midY * s, endX * s, y1 * s)
-    g.stroke()
+  const stemX = (t: number) => 256 + 28 * Math.sin(t * Math.PI) - 14 * t
+  g.strokeStyle = '#969f77'
+  g.lineWidth = 4.2 * s
+  g.beginPath()
+  for (let i = 0; i <= 32; i++) {
+    const t = i / 32
+    const y = t * 476 * s
+    if (i === 0) g.moveTo(stemX(t) * s, y)
+    else g.lineTo(stemX(t) * s, y)
   }
+  g.stroke()
 
-  // Pass 2: slender overlapping willow leaves draped along every strand (zero floating leaves)
-  for (const c of curves) {
-    const ptX = (t: number) => (1 - t) * (1 - t) * c.startX + 2 * (1 - t) * t * c.midX + t * t * c.endX
-    const ptY = (t: number) => (1 - t) * (1 - t) * c.topY + 2 * (1 - t) * t * c.midY + t * t * c.endY
-
-    for (let i = 0; i < c.pairs; i++) {
-      const t = (i + .18) / c.pairs
-      const px = ptX(t)
-      const py = ptY(t)
-      const taper = 1 - t * .36
-      for (const side of [-1, 1]) {
-        const leafLen = (64 + random() * 24) * taper
-        const leafW = (10.2 + random() * 3.8) * (.88 + .18 * (1 - t))
-        const ang = side * (.20 + random() * .24) * (1 - t * .3)
-        drawLeaf(px + side * 2, py + (random() - .5) * 5, ang, leafLen, leafW, .25 + random() * .75, -side * 7 * taper)
-      }
-      if (i % 2 === 0 && t < .85) {
-        drawLeaf(px + (random() - .5) * 4, py + 3, (random() - .5) * .16, (58 + random() * 18) * taper, 10 * taper, .4 + random() * .6)
-      }
-    }
-    drawLeaf(ptX(1), ptY(1) - 5, (random() - .5) * .12, 48 + random() * 12, 8.8, .78)
+  // Alternate the leaves and taper their lengths along the spray so the spaces between blades survive at distance.
+  const leafCount = 18
+  for (let i = 0; i < leafCount; i++) {
+    const t = .07 + .84 * (i + random() * .55) / leafCount
+    const side = i % 2 === 0 ? -1 : 1
+    const taper = .70 + .42 * Math.sin(t * Math.PI) - .34 * t
+    const angle = side * (.91 + random() * .32 - t * .31)
+    drawLeaf(stemX(t), t * 476, angle, (114 + random() * 36) * taper, (14 + random() * 5) * taper,
+      random(), side * (12 + random() * 9) * taper)
   }
+  drawLeaf(stemX(1), 470, .14, 34, 8.5, .78, -2)
 
   return canvasTexture(canvas, 'placeholder_willow_strands')
 }
@@ -941,4 +908,82 @@ export function makeWildRoseTexture(size = 512) {
   }
 
   return canvasTexture(canvas, 'placeholder_wild_rose')
+}
+
+/** Stylized botanical stem-leaf alpha card (petiole at bottom center, serrated lanceolate blade & soft veins). */
+export function makeStemLeafTexture(size = 256) {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = size
+  const g = canvas.getContext('2d')!
+  const s = size / 256
+  const cx = 128 * s
+
+  // Slender stem petiole anchored cleanly at bottom center (v = 0)
+  g.strokeStyle = '#3f6e2d'
+  g.lineWidth = 8 * s
+  g.lineCap = 'round'
+  g.beginPath()
+  g.moveTo(cx, 252 * s)
+  g.quadraticCurveTo(cx - 2 * s, 224 * s, cx, 198 * s)
+  g.stroke()
+
+  // Organic slightly serrated wildflower leaf blade silhouette
+  const blade = new Path2D()
+  const rightPts: [number, number][] = [
+    [128, 214], [156, 198], [176, 178], [168, 170], [186, 146],
+    [175, 138], [188, 112], [174, 104], [180, 76], [164, 68],
+    [164, 42], [148, 34], [128, 10],
+  ]
+  blade.moveTo(rightPts[0][0] * s, rightPts[0][1] * s)
+  for (let i = 1; i < rightPts.length; i++) {
+    const [px, py] = rightPts[i - 1], [nx, ny] = rightPts[i]
+    const mx = (px + nx) * 0.5, my = (py + ny) * 0.5
+    blade.quadraticCurveTo(px * s, py * s, mx * s, my * s)
+  }
+  blade.lineTo(128 * s, 10 * s)
+  for (let i = rightPts.length - 2; i >= 0; i--) {
+    const [px, py] = rightPts[i + 1], [nx, ny] = rightPts[i]
+    const lx0 = 256 - px, lx1 = 256 - nx
+    const mx = (lx0 + lx1) * 0.5, my = (py + ny) * 0.5
+    blade.quadraticCurveTo(lx0 * s, py * s, mx * s, my * s)
+  }
+  blade.closePath()
+
+  const grad = g.createLinearGradient(cx, 220 * s, cx, 12 * s)
+  grad.addColorStop(0, '#3a6f2d')
+  grad.addColorStop(0.45, '#5ca13e')
+  grad.addColorStop(0.82, '#86c854')
+  grad.addColorStop(1, '#a9df6c')
+  g.fillStyle = grad
+  g.fill(blade)
+
+  // Subtle rim edge definition for clean stylized silhouette
+  g.strokeStyle = 'rgba(34, 68, 26, 0.35)'
+  g.lineWidth = 2.4 * s
+  g.stroke(blade)
+
+  // Luminous central midrib & delicate curving lateral veins
+  g.strokeStyle = 'rgba(210, 245, 150, 0.58)'
+  g.lineWidth = 3.2 * s
+  g.beginPath()
+  g.moveTo(cx, 212 * s)
+  g.quadraticCurveTo(cx + 2 * s, 118 * s, cx, 24 * s)
+  g.stroke()
+
+  g.lineWidth = 1.8 * s
+  g.strokeStyle = 'rgba(196, 236, 138, 0.44)'
+  const veinYs = [184, 154, 122, 92, 62]
+  for (let i = 0; i < veinYs.length; i++) {
+    const y0 = veinYs[i]
+    const span = (44 - i * 6.5) * s
+    const rise = (24 - i * 2.5) * s
+    for (const side of [-1, 1]) {
+      g.beginPath()
+      g.moveTo(cx, y0 * s)
+      g.quadraticCurveTo(cx + side * span * 0.55, (y0 * s) - rise * 0.35, cx + side * span, (y0 * s) - rise)
+      g.stroke()
+    }
+  }
+
+  return canvasTexture(canvas, 'placeholder_stem_leaf')
 }

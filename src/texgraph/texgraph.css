@@ -1,0 +1,685 @@
+/* Substance Designer-style Procedural Texture Studio + Real-Time Texture Library */
+
+/* ---- Topbar button accents ---- */
+.tg-open-btn {
+  background: #edf2f7 !important;
+  border-color: #b5c7d9 !important;
+  color: #1f3c56 !important;
+  font-weight: 600;
+}
+.tg-open-btn:hover { background: #e1ebf4 !important; }
+.tl-open-btn {
+  background: #f5f0ea !important;
+  border-color: #d8c7b0 !important;
+  color: #5c3d1e !important;
+  font-weight: 600;
+}
+.tl-open-btn:hover { background: #ede3d7 !important; }
+
+/* ---- Right-Docked Real-Time Texture Library Drawer (light Vegetation Studio palette) ---- */
+.tl-drawer {
+  position: fixed; top: 70px; right: 0; bottom: 0; width: min(410px, 94vw);
+  z-index: 41; display: flex; flex-direction: column; overflow: hidden;
+  background: #fafaf4; border-left: 1px solid #d5dacb;
+  box-shadow: -10px 0 32px rgba(28, 44, 32, .12);
+}
+@media (min-width: 960px) {
+  body.tl-open .workspace {
+    grid-template-columns: minmax(0, 1fr) 410px !important;
+  }
+  .tl-drawer {
+    top: 83px; right: 17px; bottom: 13px; width: 410px;
+    border: 1px solid #d5dacb; border-radius: 10px;
+    box-shadow: 0 8px 28px rgba(28, 44, 32, .10);
+  }
+}
+.tl-drawer[hidden] { display: none; }
+
+.tl-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 9px 12px; border-bottom: 1px solid #e0e4d8; background: #f3f5ec;
+}
+.tl-head h3 { margin: 0; font-size: 13.5px; color: #24402c; display: flex; align-items: center; gap: 6px; }
+.tl-head-actions { display: flex; align-items: center; gap: 5px; }
+.tl-new-btn {
+  min-height: 26px; font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 6px; cursor: pointer;
+  background: #264d36; border: 1px solid #264d36; color: #fff;
+}
+.tl-new-btn:hover { background: #1e3f2c; }
+.tl-close {
+  min-height: 26px; border: 1px solid #d5dacb; background: #fff; color: #405c45;
+  border-radius: 6px; padding: 3px 9px; font-size: 11.5px; cursor: pointer;
+}
+.tl-close:hover { background: #eef1e6; }
+
+.tl-tabs-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 7px 12px 6px; border-bottom: 1px solid #e7eadf; background: #f7f8f1;
+}
+.tl-tabs {
+  display: inline-flex; align-items: center; gap: 2px; padding: 2px;
+  background: #e6eae0; border-radius: 7px;
+}
+.tl-tabs button {
+  min-height: 24px; padding: 2px 9px; font-size: 11.5px; font-weight: 600;
+  border: 1px solid transparent; border-radius: 5px;
+  background: transparent; color: #465f4b; cursor: pointer;
+}
+.tl-tabs button[aria-pressed="true"] {
+  background: #fcfdf8; border-color: #d3dbca; color: #22462e;
+  box-shadow: 0 1px 2px rgba(28, 46, 32, .08);
+}
+
+.tl-storage-pill {
+  font-size: 10.5px; padding: 2px 7px; border-radius: 999px;
+  background: #e6f0e8; color: #2c5b3b; font-weight: 600;
+}
+
+.tl-filters {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 7px 12px; border-bottom: 1px solid #e7eadf;
+}
+.tl-cats { display: flex; gap: 4px; flex-wrap: wrap; }
+.tl-cats button {
+  min-height: 23px; font-size: 11px; padding: 2px 9px; border-radius: 999px; cursor: pointer;
+  border: 1px solid #d6dccd; background: #fff; color: #445e4a;
+}
+.tl-cats button[aria-pressed="true"] {
+  background: #2d5c40; border-color: #2d5c40; color: #fff; font-weight: 600;
+}
+.tl-search-row { display: flex; align-items: center; gap: 8px; }
+.tl-search {
+  flex: 1; min-width: 100px; padding: 5px 8px; font-size: 11.5px;
+  border: 1px solid #d8dccd; border-radius: 6px; background: #fff; color: #243828;
+}
+.tl-hover-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; color: #36523d; cursor: pointer; user-select: none; white-space: nowrap;
+}
+.tl-hover-toggle input { width: 13px; height: 13px; margin: 0; accent-color: #2f5a3f; }
+
+.tl-preview-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 12px; font-size: 11.5px; font-weight: 600;
+  background: #e4f2e8; color: #1e5231; border-bottom: 1px solid #bdd9c4;
+}
+.tl-preview-bar[hidden] { display: none; }
+
+.tl-scroll {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px 14px;
+}
+.tl-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+  grid-auto-rows: max-content; align-items: start;
+}
+.tl-empty {
+  grid-column: 1 / -1; text-align: center; padding: 28px 14px;
+  color: #5c7260; font-size: 12px; line-height: 1.65;
+  border: 1px dashed #cfd6c6; border-radius: 10px; background: #f5f7ef;
+}
+.tl-empty button {
+  margin-top: 10px; font-size: 12px; font-weight: 600; padding: 6px 12px;
+  border-radius: 7px; border: 1px solid #264d36; background: #264d36; color: #fff; cursor: pointer;
+}
+
+.tl-card {
+  display: flex; flex-direction: column; overflow: hidden; align-self: start;
+  border: 1px solid #d8decf; border-radius: 9px; background: #fff;
+  transition: border-color .14s, box-shadow .14s, transform .14s;
+  cursor: pointer;
+}
+.tl-card:hover {
+  border-color: #4f8560;
+  box-shadow: 0 5px 16px rgba(34, 62, 42, .12);
+  transform: translateY(-1px);
+}
+.tl-card.is-active {
+  border-color: #26593a;
+  box-shadow: 0 0 0 2px rgba(47, 108, 71, .22);
+}
+.tl-card-thumb {
+  position: relative; width: 100%; height: 158px; flex: 0 0 158px; overflow: hidden;
+  background: repeating-conic-gradient(#e4e7dc 0 25%, #f6f7f1 0 50%) 0 0 / 14px 14px;
+  border-bottom: 1px solid #ecefe4;
+}
+.tl-card-thumb img, .tl-card-thumb canvas {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.tl-card-tag {
+  position: absolute; top: 6px; left: 6px;
+  font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 999px;
+  background: rgba(21, 28, 24, .76); color: #f6f8f2; backdrop-filter: blur(4px);
+}
+.tl-card-res {
+  position: absolute; bottom: 6px; right: 6px;
+  font: 600 9.5px Consolas, monospace; padding: 1px 5px; border-radius: 4px;
+  background: rgba(21, 28, 24, .70); color: #dbe6de;
+}
+.tl-card-body { padding: 7px 8px 8px; display: flex; flex-direction: column; gap: 4px; }
+.tl-card-title {
+  font-size: 12px; font-weight: 700; color: #223828;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tl-card-sub {
+  font-size: 10.5px; color: #617866;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tl-card-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 2px; }
+.tl-card-actions-sub { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.tl-card-actions button, .tl-card-actions-sub button {
+  min-height: 23px; font-size: 10.5px; padding: 2px 5px; border-radius: 5px; cursor: pointer;
+  border: 1px solid #d5dccd; background: #f7f9f3; color: #2d4b37;
+}
+.tl-card-actions button:hover, .tl-card-actions-sub button:hover { background: #e8f0e7; border-color: #aec7b5; }
+.tl-card-actions button.tl-act-apply {
+  background: #2c5b3e; border-color: #2c5b3e; color: #fff; font-weight: 600;
+}
+.tl-card-actions button.tl-act-apply:hover { background: #224a31; }
+.tl-card-actions button.tl-act-edit {
+  background: #eaf1f8; border-color: #b7cde0; color: #1d4363; font-weight: 600;
+}
+.tl-card-actions-sub button.tl-act-del { color: #8c2f2f; }
+.tl-card-actions-sub button.tl-act-del.is-confirm {
+  background: #c83232; border-color: #c83232; color: #fff; font-weight: 700;
+}
+
+.tl-rename-input {
+  width: 100%; box-sizing: border-box; font-size: 11.5px; padding: 3px 5px;
+  border: 1px solid #3f6f4c; border-radius: 4px; background: #fff;
+}
+
+.tl-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 7px 12px; border-top: 1px solid #e0e4d8; background: #f3f5ec;
+}
+.tl-foot-btns { display: flex; gap: 6px; }
+.tl-foot button {
+  min-height: 25px; font-size: 11px; padding: 3px 8px; border-radius: 6px; cursor: pointer;
+  border: 1px solid #cfd6c6; background: #fff; color: #33503b;
+}
+.tl-foot button:hover { background: #ebf0e6; }
+.tl-foot small { font-size: 10px; color: #647a69; }
+
+/* ---- Substance Designer-style Procedural Node Studio Overlay ---- */
+.tg-studio {
+  position: fixed; z-index: 55;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: #181c20; color: #e5ebf0;
+  border: 1px solid #2e363e;
+  box-shadow: -12px 0 40px rgba(0, 0, 0, .42);
+  font-family: 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+}
+.tg-studio[hidden] { display: none; }
+
+/* Split mode (default): live 3D tree visible on left ~38%, Node Studio docked cleanly on right ~62% */
+.tg-studio.is-split {
+  top: 70px; right: 0; bottom: 0; width: min(64vw, 1080px); min-width: min(680px, 100vw);
+  border-radius: 10px 0 0 0;
+}
+/* Fullscreen mode: full workspace canvas below top bar */
+.tg-studio.is-full {
+  top: 70px; left: 0; right: 0; bottom: 0; width: auto;
+  border-radius: 0; border-left: 0; border-right: 0; border-bottom: 0;
+}
+@media (min-width: 1100px) {
+  body.tg-split .workspace {
+    grid-template-columns: minmax(0, 1fr) 0px !important;
+    padding-right: min(64vw, 1080px);
+  }
+  body.tg-split .s-inspector { display: none !important; }
+}
+
+/* Studio Top Bar */
+.tg-topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;
+  padding: 6px 10px; background: #1f252b; border-bottom: 1px solid #2f3841;
+  min-height: 38px;
+}
+.tg-top-left, .tg-top-right { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.tg-brand {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; font-weight: 700; color: #f4d36c; letter-spacing: .01em;
+  padding-right: 6px; border-right: 1px solid #343f49;
+}
+.tg-name-input {
+  width: 132px; height: 26px; padding: 2px 7px; font-size: 11.5px; font-weight: 600;
+  background: #14181c; border: 1px solid #35404b; border-radius: 5px; color: #eef3f7;
+}
+.tg-name-input:focus { outline: none; border-color: #4db87d; }
+.tg-topbar select {
+  height: 26px; padding: 2px 6px; font-size: 11px;
+  background: #14181c; border: 1px solid #35404b; border-radius: 5px; color: #dce4eb;
+}
+.tg-btn {
+  min-height: 26px; padding: 2px 8px; font-size: 11px; border-radius: 5px; cursor: pointer;
+  border: 1px solid #3a4550; background: #262e36; color: #e2e9ef;
+  transition: background .12s, border-color .12s;
+}
+.tg-btn:hover { background: #313c46; border-color: #4f5f6e; }
+.tg-btn.is-primary { background: #2c7a4b; border-color: #36935b; color: #fff; font-weight: 600; }
+.tg-btn.is-primary:hover { background: #256840; }
+.tg-btn.is-accent { background: #335b87; border-color: #4476ad; color: #fff; font-weight: 600; }
+.tg-btn.is-accent:hover { background: #2b4e74; }
+.tg-btn[aria-pressed="true"] { background: #256241; border-color: #42a66e; color: #ebfff3; font-weight: 600; }
+.tg-btn.is-danger { color: #ff9c9c; border-color: #633838; }
+.tg-btn.is-danger:hover { background: #5a2626; color: #fff; }
+.tg-btn[hidden] { display: none; }
+
+/* Main 3-column Body */
+.tg-body {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: 162px minmax(0, 1fr) 276px;
+}
+@media (max-width: 980px) {
+  .tg-body { grid-template-columns: 136px minmax(0, 1fr) 244px; }
+}
+
+/* Left Node Palette */
+.tg-palette {
+  display: flex; flex-direction: column; overflow-y: auto;
+  background: #1b2025; border-right: 1px solid #2b333b; padding: 8px 8px 14px; gap: 9px;
+}
+.tg-pal-group { display: flex; flex-direction: column; gap: 4px; }
+.tg-pal-title {
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: #8b9aa8; padding: 0 3px;
+}
+.tg-pal-item {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  min-height: 26px; padding: 3px 7px; font-size: 11px; border-radius: 5px; cursor: pointer;
+  border: 1px solid #2c353e; background: #232a31; color: #dde5ec;
+  transition: background .1s, border-color .1s;
+}
+.tg-pal-item:hover { background: #2d3741; border-color: #4d5d6d; }
+.tg-pal-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.tg-cat-bark { background: #e09943; }
+.tg-cat-foliage { background: #46c26e; }
+.tg-cat-filter { background: #46a6de; }
+.tg-cat-adjust { background: #a478ee; }
+.tg-cat-blend { background: #e56d6d; }
+.tg-cat-output { background: #efc84a; }
+
+/* Center Node Graph Viewport */
+.tg-canvas-wrap {
+  position: relative; overflow: hidden; min-width: 0; min-height: 0;
+  background-color: #14181c;
+  background-image:
+    linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px),
+    linear-gradient(rgba(255,255,255,.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.07) 1px, transparent 1px);
+  background-size: 20px 20px, 20px 20px, 100px 100px, 100px 100px;
+  cursor: grab; user-select: none;
+}
+.tg-canvas-wrap.is-panning { cursor: grabbing; }
+
+.tg-world {
+  position: absolute; left: 0; top: 0; width: 0; height: 0;
+  transform-origin: 0 0;
+}
+.tg-wires-svg {
+  position: absolute; left: -2400px; top: -2400px; width: 6400px; height: 6400px;
+  overflow: visible; pointer-events: none;
+}
+.tg-wire-hit {
+  fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer;
+}
+.tg-wire {
+  fill: none; stroke-width: 2.6; stroke-linecap: round; pointer-events: none;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,.55));
+}
+.tg-wire.type-gray { stroke: #c5cfd8; }
+.tg-wire.type-rgba { stroke: #4fd68d; }
+.tg-wire.is-hover, .tg-wire-hit:hover + .tg-wire { stroke: #ff6e6e; stroke-width: 3.4; }
+.tg-wire-draft {
+  fill: none; stroke: #ffd84d; stroke-width: 2.6; stroke-dasharray: 6 5; pointer-events: none;
+}
+
+/* Individual Substance-style Node Card */
+.tg-node {
+  position: absolute; width: 170px;
+  background: #232a31; border: 1.5px solid #37424d; border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .42);
+  color: #e4ebf1; cursor: default;
+}
+.tg-node.is-selected {
+  border-color: #f4cc50;
+  box-shadow: 0 0 0 2px rgba(244, 204, 80, .32), 0 8px 24px rgba(0, 0, 0, .55);
+}
+.tg-node.is-pinned::after {
+  content: '👁'; position: absolute; top: -9px; right: 8px;
+  font-size: 10px; padding: 1px 5px; border-radius: 999px;
+  background: #2c7a4b; color: #fff; border: 1px solid #59c983;
+}
+.tg-node-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 5px;
+  padding: 5px 8px; border-radius: 6.5px 6.5px 0 0;
+  background: #2c353e; border-bottom: 1px solid #394450;
+  cursor: move;
+}
+.tg-node-head-l { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.tg-node-title {
+  font-size: 11px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tg-node-body {
+  display: grid; grid-template-columns: 1fr auto; gap: 4px;
+  padding: 6px 0; align-items: center;
+}
+.tg-node-ports-col { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.tg-node-mid {
+  display: flex; justify-content: center; padding: 2px 6px 4px;
+}
+.tg-node-thumb {
+  width: 66px; height: 66px; border-radius: 5px; border: 1px solid #3b4652;
+  background: repeating-conic-gradient(#2c3238 0 25%, #20252a 0 50%) 0 0 / 10px 10px;
+  display: block; cursor: pointer;
+}
+.tg-ports-wrap {
+  display: flex; justify-content: space-between; gap: 6px; padding: 2px 0 5px;
+}
+.tg-port-row {
+  display: flex; align-items: center; gap: 5px; font-size: 10px; color: #b5c1cc;
+  height: 18px; position: relative;
+}
+.tg-port-row.is-in { padding-left: 10px; }
+.tg-port-row.is-out { padding-right: 10px; justify-content: flex-end; }
+.tg-port-dot {
+  position: absolute; width: 11px; height: 11px; border-radius: 50%;
+  border: 2px solid #161a1e; cursor: crosshair; transition: transform .1s;
+}
+.tg-port-dot:hover { transform: scale(1.35); }
+.tg-port-row.is-in .tg-port-dot { left: -6px; }
+.tg-port-row.is-out .tg-port-dot { right: -6px; }
+.tg-port-dot.type-gray { background: #d0d9e2; }
+.tg-port-dot.type-rgba { background: #48d689; }
+.tg-port-dot.is-connected { box-shadow: 0 0 0 2px rgba(255,255,255,.22); }
+
+/* Floating Graph Toolbar & Status */
+.tg-graph-tools {
+  position: absolute; left: 10px; bottom: 10px; z-index: 4;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 3px; padding: 3px 5px;
+  max-width: calc(100% - 20px);
+  background: rgba(24, 29, 34, .92); border: 1px solid #343f4a; border-radius: 7px;
+  backdrop-filter: blur(6px);
+}
+.tg-graph-tools button {
+  min-height: 24px; padding: 2px 6px; font-size: 10.5px; border-radius: 4px; cursor: pointer;
+  border: 1px solid #394450; background: #262e36; color: #dbe3ea;
+}
+.tg-graph-tools button:hover { background: #34404b; }
+.tg-graph-stat {
+  position: absolute; right: 10px; top: 8px; z-index: 4;
+  font: 500 10.5px Consolas, monospace; padding: 3px 8px; border-radius: 5px;
+  background: rgba(24, 29, 34, .9); border: 1px solid #323c46; color: #a7b8c7;
+  pointer-events: none;
+}
+.tg-graph-hint {
+  position: absolute; left: 10px; top: 8px; right: 232px; z-index: 4; pointer-events: none;
+  font-size: 10.5px; color: #8c9ba8; background: rgba(20, 24, 28, .75);
+  padding: 3px 8px; border-radius: 5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Right-click Add-Node Context Menu */
+.tg-ctx-menu {
+  position: fixed; z-index: 70; min-width: 176px; max-height: 360px; overflow-y: auto;
+  background: #1f252b; border: 1px solid #3c4854; border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.55); padding: 5px;
+}
+.tg-ctx-menu[hidden] { display: none; }
+.tg-ctx-head { font-size: 10px; font-weight: 700; color: #8e9eab; padding: 4px 7px 2px; }
+.tg-ctx-item {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  padding: 5px 8px; font-size: 11.5px; border: 0; border-radius: 5px;
+  background: transparent; color: #e2e9ef; cursor: pointer;
+}
+.tg-ctx-item:hover { background: #2f3b47; }
+
+/* Right Column: 2D Material Preview + Node Inspector */
+.tg-right {
+  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  background: #1c2227; border-left: 1px solid #2c353d;
+}
+.tg-preview-pane {
+  padding: 9px 10px; border-bottom: 1px solid #2c353d; display: flex; flex-direction: column; gap: 6px;
+}
+.tg-preview-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  font-size: 11.5px; font-weight: 700; color: #dde6ee;
+}
+.tg-preview-head > span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tg-preview-toggles { display: flex; gap: 4px; flex: 0 0 auto; }
+.tg-mini-btn {
+  min-height: 23px; font-size: 10.5px; padding: 2px 6px; border-radius: 4px; cursor: pointer;
+  border: 1px solid #394552; background: #252d35; color: #c7d2dc;
+}
+.tg-mini-btn[aria-pressed="true"] { background: #2c6d48; border-color: #46a870; color: #fff; font-weight: 600; }
+.tg-preview-box {
+  position: relative; width: min(100%, 224px); aspect-ratio: 1 / 1;
+  margin: 0 auto; border-radius: 7px; overflow: hidden;
+  border: 1px solid #36414c; background: #14181c;
+}
+.tg-preview-box canvas { width: 100%; height: 100%; display: block; }
+.tg-preview-box.is-lit { cursor: crosshair; }
+.tg-preview-tip {
+  position: absolute; left: 6px; bottom: 6px; pointer-events: none;
+  font-size: 10px; padding: 2px 6px; border-radius: 4px;
+  background: rgba(16, 20, 24, .78); color: #dce5ed;
+}
+.tg-channels { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; }
+.tg-channels button {
+  min-height: 24px; font-size: 10px; padding: 2px 2px; border-radius: 4px; cursor: pointer;
+  border: 1px solid #343f4b; background: #242b33; color: #b8c4cf;
+}
+.tg-channels button[aria-pressed="true"] {
+  background: #335c85; border-color: #5186ba; color: #fff; font-weight: 700;
+}
+
+/* Node Parameter Inspector */
+.tg-inspector {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 9px 10px 16px;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.tg-insp-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  padding-bottom: 6px; border-bottom: 1px solid #2e3740;
+}
+.tg-insp-head h4 { margin: 0; font-size: 12.5px; color: #f5d774; }
+.tg-insp-desc { margin: 0; font-size: 10.5px; line-height: 1.45; color: #95a4b2; }
+.tg-param {
+  display: grid; grid-template-columns: 76px 1fr 48px; gap: 5px; align-items: center;
+  font-size: 11px; color: #cad5df;
+}
+.tg-param input[type="range"], .tg-grad-stop input[type="range"] {
+  -webkit-appearance: auto; appearance: auto;
+  width: 100%; height: 16px; margin: 0; padding: 0;
+  accent-color: #4ad084; background: transparent; cursor: ew-resize;
+}
+.tg-param input[type="range"]::-webkit-slider-runnable-track,
+.tg-grad-stop input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 999px; background: #36424e;
+}
+.tg-param input[type="range"]::-webkit-slider-thumb,
+.tg-grad-stop input[type="range"]::-webkit-slider-thumb {
+  margin-top: -5px;
+}
+.tg-param input[type="number"], .tg-param select {
+  width: 100%; min-width: 0; padding: 3px 4px; border-radius: 4px;
+  border: 1px solid #37434f; background: #14181c; color: #e6edf3;
+  font: 10.5px Consolas, monospace;
+}
+.tg-param select { grid-column: 2 / 4; font-family: inherit; }
+.tg-param input[type="color"] {
+  grid-column: 2 / 4; width: 100%; height: 24px; padding: 1px;
+  border: 1px solid #37434f; border-radius: 4px; background: #14181c; cursor: pointer;
+}
+.tg-param-check {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 11px; color: #cad5df; cursor: pointer;
+}
+.tg-param-check input { width: 15px; height: 15px; accent-color: #46c278; }
+
+/* Gradient Map Stop Editor */
+.tg-grad-box {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 7px; border-radius: 6px; background: #161b1f; border: 1px solid #2e3842;
+}
+.tg-grad-bar {
+  height: 18px; border-radius: 4px; border: 1px solid #404d5a;
+}
+.tg-grad-stop {
+  display: grid; grid-template-columns: 32px 1fr 40px 22px; gap: 5px; align-items: center;
+}
+.tg-grad-stop input[type="color"] {
+  width: 30px; height: 22px; padding: 0; border: 1px solid #414e5b; border-radius: 4px; background: #111;
+}
+.tg-grad-stop input[type="range"] { width: 100%; accent-color: #f0c246; }
+.tg-grad-stop span { font: 10px Consolas, monospace; color: #9fb0bf; text-align: right; }
+.tg-grad-stop button {
+  min-height: 22px; padding: 1px 4px; font-size: 11px; border: 1px solid #443337; border-radius: 4px;
+  background: #2b2023; color: #ff9c9c; cursor: pointer;
+}
+.tg-grad-presets { display: flex; gap: 4px; flex-wrap: wrap; }
+.tg-grad-presets button {
+  min-height: 22px; font-size: 10px; padding: 2px 6px; border-radius: 4px; cursor: pointer;
+  border: 1px solid #37434f; background: #232b32; color: #cfd9e2;
+}
+.tg-grad-presets button:hover { background: #313d48; }
+
+/* Quick Slot Buttons inside Classic/AI Inspector Texture Row */
+.s-texture-buttons { flex-wrap: wrap; }
+.s-tex-edit-btn {
+  background: #edf3f9 !important; border-color: #b7cce0 !important; color: #1d4363 !important; font-weight: 600;
+}
+.s-tex-lib-btn {
+  background: #f6f0e8 !important; border-color: #d9c6af !important; color: #5c3e1e !important; font-weight: 600;
+}
+
+/* ---- TexGraph v2: Label Ports, Bypass, Direct Vector Canvas, Curves, Palette, Ref Compare & Modals ---- */
+.tg-port-dot.type-label { border-color: #c28bff; background: #261b33; }
+.tg-port-dot.type-label.is-connected { background: #b474ff; }
+.tg-wire.type-label { stroke: #b474ff; stroke-dasharray: 5 3; }
+
+.tg-node.is-bypassed { opacity: 0.56; border-style: dashed; border-color: #8c7b4d; }
+.tg-bypass-badge {
+  font-size: 9px; padding: 1px 4px; border-radius: 3px;
+  background: #4e421f; color: #ffe08a; border: 1px solid #8a7230;
+}
+
+.tg-preview-box { position: relative; overflow: hidden; }
+.tg-vec-overlay {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 3;
+}
+.tg-preview-box.is-vec-active { cursor: crosshair; }
+.tg-preview-box.is-wipe-active { cursor: ew-resize; }
+.tg-preview-box.is-pick-active { cursor: crosshair; }
+
+.tg-ref-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  margin-top: 6px; padding: 5px 6px; border-radius: 6px;
+  background: #171c20; border: 1px solid #2b353e;
+}
+.tg-ref-bar button {
+  min-height: 22px; font-size: 10.5px; padding: 2px 6px; border-radius: 4px; cursor: pointer;
+  border: 1px solid #35414d; background: #222a31; color: #cbd7e2;
+}
+.tg-ref-bar button:hover { background: #2e3943; }
+.tg-ref-bar button[aria-pressed="true"] {
+  background: #1d4e63; border-color: #53d8fb; color: #e8faff;
+}
+.tg-ref-bar input[type="range"] { width: 66px; accent-color: #53d8fb; }
+.tg-ref-pick-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font: 10px Consolas, monospace; color: #dbe6ef; padding: 1px 5px;
+  border-radius: 4px; background: #212a31; border: 1px solid #364552;
+}
+.tg-ref-pick-swatch {
+  display: inline-block; width: 10px; height: 10px; border-radius: 2px; border: 1px solid #fff4;
+}
+
+/* Interactive SVG Curve Widget */
+.tg-curve-box {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 7px; border-radius: 6px; background: #161b1f; border: 1px solid #2e3842;
+}
+.tg-curve-svg {
+  width: 100%; height: 126px; display: block; border-radius: 4px;
+  background: #111519; border: 1px solid #323e49; cursor: crosshair; user-select: none; touch-action: none;
+}
+.tg-curve-pt { fill: #53d8fb; stroke: #0c1319; stroke-width: 1.5; cursor: grab; }
+.tg-curve-pt:hover { fill: #ffe066; }
+
+/* Discrete Color Palette Widget */
+.tg-pal-box {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 7px; border-radius: 6px; background: #161b1f; border: 1px solid #2e3842;
+}
+.tg-pal-swatches { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.tg-pal-chip {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px; border-radius: 4px; background: #20272e; border: 1px solid #384450;
+}
+.tg-pal-chip input[type="color"] {
+  width: 24px; height: 22px; padding: 0; border: none; background: transparent; cursor: pointer;
+}
+.tg-pal-chip button {
+  min-height: 20px; padding: 0 4px; font-size: 10px; border: none; background: transparent; color: #ff9c9c; cursor: pointer;
+}
+.tg-pal-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.tg-pal-actions button {
+  min-height: 22px; font-size: 10.5px; padding: 2px 6px; border-radius: 4px; cursor: pointer;
+  border: 1px solid #35414d; background: #222a31; color: #cbd7e2;
+}
+
+/* Vector Layout Inspector Card */
+.tg-vec-card {
+  display: flex; flex-direction: column; gap: 6px; margin-top: 6px;
+  padding: 7px; border-radius: 6px; background: #161c21; border: 1px solid #2e4552;
+}
+.tg-vec-card-head {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 11px; color: #8fe6ff; font-weight: 600;
+}
+.tg-vec-btns { display: flex; gap: 4px; flex-wrap: wrap; }
+.tg-vec-btns button {
+  min-height: 22px; font-size: 10.5px; padding: 2px 6px; border-radius: 4px; cursor: pointer;
+  border: 1px solid #354552; background: #202a32; color: #d4e2ec;
+}
+.tg-vec-btns button:hover { background: #2c3b46; }
+
+/* Quick Node Search & Graph JSON Modal */
+.tg-modal-backdrop {
+  position: fixed; inset: 0; z-index: 120; background: rgba(8, 12, 16, 0.56);
+  display: flex; align-items: center; justify-content: center;
+}
+.tg-modal-backdrop[hidden] { display: none; }
+.tg-modal-card {
+  width: min(560px, 92vw); max-height: 82vh; display: flex; flex-direction: column; gap: 8px;
+  padding: 12px; border-radius: 10px; background: #1b2228; border: 1px solid #3a4754;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.55); color: #e2ebf2;
+}
+.tg-modal-card input[type="search"], .tg-modal-card textarea {
+  width: 100%; box-sizing: border-box; padding: 8px; border-radius: 6px;
+  border: 1px solid #3b4a57; background: #11161a; color: #e6eff6;
+  font: 12px Consolas, monospace;
+}
+.tg-modal-card textarea { min-height: 280px; resize: vertical; }
+.tg-search-list {
+  display: flex; flex-direction: column; gap: 3px; max-height: 300px; overflow: auto;
+}
+.tg-search-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 8px; border-radius: 5px; border: 1px solid transparent;
+  background: #222b33; color: #dde7f0; cursor: pointer; text-align: left; font-size: 12px;
+}
+.tg-search-item:hover, .tg-search-item.is-active {
+  background: #273c4b; border-color: #53d8fb;
+}
+.tg-modal-foot { display: flex; justify-content: flex-end; gap: 6px; }
+.tg-modal-foot button {
+  min-height: 28px; padding: 4px 10px; border-radius: 5px; cursor: pointer;
+  border: 1px solid #3d4b58; background: #263038; color: #e2ebf2; font-size: 12px;
+}
+.tg-modal-foot button.is-primary { background: #1e6c54; border-color: #36a682; color: #fff; }
+

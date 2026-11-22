@@ -83,9 +83,9 @@ describe('GLB export cleanup & quantization (P1-2)', () => {
       if (o !== prepared && o.userData && 'spec' in o.userData) childSpecs.push(o.userData.spec)
     })
 
-    // 5-part showcase has 12 distinct material instances live -> deduplicated down to <= 6
+    // 5-part showcase has 13 distinct material instances live -> deduplicated down to <= 7 (includes alpha stem-leaf card material)
     expect(liveMats.size).toBeGreaterThanOrEqual(10)
-    expect(expMats.size).toBeLessThanOrEqual(6)
+    expect(expMats.size).toBeLessThanOrEqual(7)
     expect(prepared.userData.aiScene).toBeDefined()
     expect(childSpecs).toHaveLength(0)
 

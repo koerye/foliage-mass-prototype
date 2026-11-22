@@ -5,7 +5,7 @@ import {
   aiCapabilitySchema, applySceneLeafTexture, applySceneParam, applySceneSeed, applySceneUniformScale,
   blankAiScene, buildAiScene, parseAiScene, solveSceneForTriangleBudget, type PartCustomTextures,
 } from '../src/ai/scene'
-import { aiShowcases, floweringBushShowcase, getAiShowcase, sakuraBonsaiShowcase, twistedSakuraShowcase } from '../src/ai/showcase'
+import { aiShowcases, floweringBushShowcase, getAiShowcase, sakuraBonsaiShowcase, twistedSakuraShowcase, wishingTreeShowcase } from '../src/ai/showcase'
 import { buildTree } from '../src/tree/assemble'
 import { optimizeAt } from '../src/tree/optimize'
 import { buildSkeleton } from '../src/tree/skeleton'
@@ -15,7 +15,8 @@ const textures = {
   leaf: new Texture(), needle: new Texture(), drape: new Texture(),
   palm: new Texture(), grass: new Texture(), grassTint: new Texture(), fern: new Texture(),
   flower: new Texture(), blossom: new Texture(),
-  sakura: new Texture(), cloud: new Texture(), maple: new Texture(), willow: new Texture(),
+  sakura: new Texture(), cloud: new Texture(), oak: new Texture(), oakAtlas: new Texture(),
+  maple: new Texture(), willow: new Texture(),
   bush: new Texture(), wildrose: new Texture(),
 }
 
@@ -265,11 +266,22 @@ describe('Stage A & B aesthetic engine upgrades', () => {
     expect(cutRes.report.foliageStyle).toBe('green')
   })
 
-  it('AI Showcase Case Library registers flowering bush, twisted sakura & bonsai, builds all cases cleanly, and supports global LOD', () => {
-    expect(aiShowcases.length).toBeGreaterThanOrEqual(3)
+  it('AI Showcase Case Library registers wishing tree, flowering bush, twisted sakura & bonsai, builds all cases cleanly, and supports global LOD', () => {
+    expect(aiShowcases.length).toBeGreaterThanOrEqual(4)
+    expect(getAiShowcase('wishing-tree')?.name).toBe('仙韵祈愿古树')
+    expect(getAiShowcase('wishing-tree')?.barkTemplate).toBe('bark-painterly-driftwood')
     expect(getAiShowcase('flowering-bush')?.name).toBe('繁花绿灌木丛')
     expect(getAiShowcase('sakura-twist')?.name).toBe('盘曲古樱')
     expect(getAiShowcase('sakura')?.name).toBe('三干樱花盆景')
+
+    const wishing = wishingTreeShowcase()
+    expect(wishing.parts).toHaveLength(6)
+    const wishingAsset = buildAiScene(wishing, textures)
+    expect(wishingAsset.stats.parts).toBe(6)
+    expect(wishingAsset.stats.triangles).toBeGreaterThan(15000)
+    expect(new Box3().setFromObject(wishingAsset.group).min.y).toBeGreaterThanOrEqual(-0.06)
+    expect(parseAiScene(JSON.parse(JSON.stringify(wishing))).parts).toHaveLength(6)
+    wishingAsset.dispose()
 
     const bush = floweringBushShowcase()
     expect(bush.parts).toHaveLength(4)
@@ -389,5 +401,92 @@ describe('Stage A & B aesthetic engine upgrades', () => {
     expect((meshOf(bushSingle.parts[0].id).material as MeshStandardMaterial).map).not.toBe(customLeaf)
     built.dispose()
     customLeaf.dispose()
+  })
+
+  it('supports 2x2 broadleaf atlas UV anti-bleed + mirror flip, 3D upward bark moss sync, and parameterized wishing accents', () => {
+    // 1. Broadleaf 2x2 atlas UV sampling stays safely inset inside quadrant interiors + flips U ~50%
+    const wish = presetSpec('broadleaf-wishing')
+    expect(wish.leaves.atlasCols).toBe(2)
+    expect(wish.leaves.atlasRows).toBe(2)
+    expect(wish.trunk.barkMoss).toBeGreaterThan(0.5)
+    const builtWish = buildTree(wish, textures)
+    let leafMesh: Mesh | undefined
+    builtWish.group.traverse(o => { if (o instanceof Mesh && o.name === 'Leaf cards') leafMesh = o })
+    expect(leafMesh).toBeDefined()
+    expect((leafMesh!.material as MeshStandardMaterial).map).toBe(textures.oakAtlas)
+    const uvAttr = leafMesh!.geometry.getAttribute('uv')
+    const quadsHit = new Set<number>()
+    for (let i = 0; i < uvAttr.count; i++) {
+      const u = uvAttr.getX(i), v = uvAttr.getY(i)
+      // Must stay strictly inside quadrant interiors (anti-bleed inset keeps UVs off 0, 0.5, 1 seams)
+      expect(Math.abs(u - 0.5)).toBeGreaterThan(0.002)
+      expect(Math.abs(v - 0.5)).toBeGreaterThan(0.002)
+      expect(u).toBeGreaterThan(0.002)
+      expect(u).toBeLessThan(0.998)
+      quadsHit.add((u > 0.5 ? 1 : 0) + (v > 0.5 ? 2 : 0))
+    }
+    expect(quadsHit.size).toBe(4)
+
+    // 2. Parameterized wishing accents: rocks, flat-folded silk ribbons, plaques, sparkles & JSON round-trip
+    const countDecor = (grp: typeof builtWish.group) => {
+      let rocks = 0, ribbons = 0, plaques = 0, sparkles = 0
+      grp.traverse(o => {
+        if (o instanceof Mesh && o.userData.role === 'decoration') {
+          if (o.name.includes('Rock')) rocks++
+          else if (o.name.includes('Ribbon')) ribbons++
+          else if (o.name.includes('Plaques')) plaques++
+          else if (o.name.includes('Sparkles')) sparkles++
+        }
+      })
+      return { rocks, ribbons, plaques, sparkles }
+    }
+    expect(countDecor(builtWish.group)).toEqual({ rocks: 5, ribbons: 3, plaques: 1, sparkles: 1 })
+
+    const customSpec = parseTreeSpec(JSON.parse(JSON.stringify({
+      ...wish,
+      accents: {
+        ...wish.accents!,
+        rockCount: 7,
+        rockScale: 1.25,
+        rockColor: '#4a5a68',
+        rockMossColor: '#7eb844',
+        ribbonWraps: 4,
+        ribbonColor: '#e0a030',
+        plaqueCount: 10,
+        plaqueScale: 1.2,
+        sparkles: false,
+        sparkleCount: 0,
+        sparkleColor: '#fff0a0',
+      },
+    })))
+    expect(customSpec.accents?.rockCount).toBe(7)
+    expect(customSpec.accents?.ribbonColor).toBe('#e0a030')
+    expect(customSpec.accents?.sparkles).toBe(false)
+    const builtCustom = buildTree(customSpec, textures)
+    expect(countDecor(builtCustom.group)).toEqual({ rocks: 7, ribbons: 4, plaques: 1, sparkles: 0 })
+    // Verify flat-folded silk ribbons carry vertex color shading
+    let ribbonGeoVerts = 0
+    builtCustom.group.traverse(o => {
+      if (o instanceof Mesh && o.name.includes('Ribbon 1')) {
+        expect(o.geometry.getAttribute('color')).toBeDefined()
+        ribbonGeoVerts = o.geometry.getAttribute('position').count
+      }
+    })
+    expect(ribbonGeoVerts).toBeGreaterThan(60)
+    builtWish.dispose()
+    builtCustom.dispose()
+
+    // 3. AI whole-sync: barkMoss syncs across all 5 woody parts (not grass); accents.* routes ONLY to trunk owner
+    const scene = wishingTreeShowcase()
+    const trunkId = scene.parts[0].id
+    const boughId = scene.parts[1].id
+    const mossRes = applySceneParam(scene, boughId, 'trunk.barkMoss', 0.85, 'whole')
+    expect(mossRes.changedIds).toHaveLength(5)
+    expect(scene.parts.slice(0, 5).every(p => p.spec.trunk.barkMoss === 0.85)).toBe(true)
+
+    const accRes = applySceneParam(scene, boughId, 'accents.rockCount', 7, 'whole')
+    expect(accRes.changedIds).toEqual([trunkId])
+    expect(scene.parts[0].spec.accents?.rockCount).toBe(7)
+    expect(scene.parts[1].spec.shading.accent).toBe('none')
   })
 })

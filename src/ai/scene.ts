@@ -12,12 +12,14 @@ import {
   type OptimizeSpec, type PresetId, type TreeKind, type TreeSpec, type XYZ,
 } from '../tree/spec'
 
-export const leafTextureSources = ['auto', 'leaf', 'cloud', 'bush', 'sakura', 'maple', 'willow', 'flower', 'wildrose', 'blossom', 'needle', 'drape', 'palm', 'grass', 'grassTint', 'fern'] as const
+export const leafTextureSources = ['auto', 'leaf', 'oak', 'oakAtlas', 'cloud', 'bush', 'sakura', 'maple', 'willow', 'flower', 'wildrose', 'blossom', 'needle', 'drape', 'palm', 'grass', 'grassTint', 'fern'] as const
 export type LeafTextureSource = typeof leafTextureSources[number]
 
 export const leafTextureLabels: Record<LeafTextureSource, string> = {
   auto: '自动（随植物类型/叶型）',
   leaf: '阔叶叶片',
+  oak: '手绘厚涂橡叶叠簇',
+  oakAtlas: '手绘厚涂橡叶 2×2 图集',
   cloud: '厚涂圆云叶（吉卜力）',
   bush: '翠绿尖叶灌木簇',
   sakura: '樱花柔瓣簇（缺口5瓣）',
@@ -84,8 +86,11 @@ export function createAiPart(kind: TreeKind, label?: string, seed?: number): AiP
 export type EditScope = 'whole' | 'part'
 export type PartCustomTextures = Map<string, Partial<Record<EditableTextureSlot, Texture>>>
 
-function textureForSource(src: LeafTextureSource, textures: TreeTextures): Texture | undefined {
+function textureForSource(src: LeafTextureSource, textures: TreeTextures, part?: AiPart): Texture | undefined {
   if (src === 'auto') return undefined
+  if (src === 'oak' && part && (part.spec.leaves.atlasCols > 1 || part.spec.leaves.atlasRows > 1)) {
+    return textures.oakAtlas ?? textures.oak
+  }
   return textures[src]
 }
 
@@ -106,7 +111,7 @@ function texturesForPart(
     }
     effectiveBase = layered
   }
-  const override = textureForSource(part.leafTexture, effectiveBase)
+  const override = textureForSource(part.leafTexture, effectiveBase, part)
   if (!override) return effectiveBase
   const next = Object.create(effectiveBase) as TreeTextures
   const setOwn = (key: keyof TreeTextures) => Object.defineProperty(next, key, { value: override, enumerable: true, configurable: true })
@@ -152,6 +157,7 @@ export interface AiSceneAsset {
   display(view: View): void
   updatePartTransform(part: AiPart, scene?: AiSceneSpec): boolean
   applyPartLiveParam(part: AiPart, path: string, scene?: AiSceneSpec): boolean
+  rebuildPartWoodOnly(part: AiPart, textures: TreeTextures, scene?: AiSceneSpec, partTextures?: PartCustomTextures): boolean
   rebuildPart(part: AiPart, textures: TreeTextures, view: View, scene?: AiSceneSpec, partTextures?: PartCustomTextures): boolean
   exportGlb(options?: ExportGlbOptions): Promise<Blob>
   dispose(): void
@@ -212,6 +218,20 @@ export function buildAiScene(scene: AiSceneSpec, textures: TreeTextures, partTex
       const ok = built.applyLiveParam(path, effectiveSpecForPart(part))
       if (ok && nextScene) group.userData.aiScene = nextScene
       return ok
+    },
+    rebuildPartWoodOnly(part: AiPart, nextTextures: TreeTextures, nextScene?: AiSceneSpec, nextPartTextures?: PartCustomTextures): boolean {
+      if (!part.enabled) return false
+      const built = partAssets.get(part.id)
+      if (!built) return false
+      const t0 = performance.now()
+      const ok = built.rebuildWoodOnly(
+        effectiveSpecForPart(part),
+        texturesForPart(part, nextTextures, (nextPartTextures ?? partTextures)?.get(part.id)),
+      )
+      if (!ok) return false
+      if (nextScene) group.userData.aiScene = nextScene
+      recomputeStats(performance.now() - t0)
+      return true
     },
     rebuildPart(part: AiPart, nextTextures: TreeTextures, view: View, nextScene?: AiSceneSpec, nextPartTextures?: PartCustomTextures): boolean {
       const old = partAssets.get(part.id)
@@ -377,6 +397,7 @@ const stylePalettes: Record<string, [string, string]> = {
   cloud: ['#2f6e31', '#88d458'],
   sakura: ['#c44d74', '#fcb9d0'],
   maple: ['#9e1f1b', '#ff8a36'],
+  oak: ['#3d7458', '#f2f79e'],
   willow: ['#4e7d36', '#d9f28a'],
   bush: ['#164f33', '#d6ff66'],
   flower: ['#d45c88', '#ffd2e4'],
@@ -403,14 +424,17 @@ const DELTA_PATHS = new Set([
   'trunk.wobble', 'trunk.lean', 'trunk.gnarl', 'trunk.taper', 'trunk.flare',
   'crown.base', 'crown.top', 'crown.depth', 'crown.roundness', 'crown.topBias',
   'crown.coneShape', 'crown.irregularity', 'crown.canopyLift', 'crown.padFlatten',
+  'branches.startHeight', 'branches.heightSpan', 'branches.azimuthOffset',
   'branches.angle', 'branches.angleTop', 'branches.reach', 'branches.curvature',
   'branches.droop', 'branches.tipCurl', 'branches.radiusRatio',
-  'branches.childAngle', 'branches.childLength', 'branches.childDroop',
+  'branches.childStart', 'branches.childAngle', 'branches.childLength', 'branches.childDroop',
+  'branches.offsetX', 'branches.offsetY', 'branches.offsetZ',
 ])
 
 const WOODY_KINDS = new Set<TreeKind>(['broadleaf', 'conifer', 'palm'])
 const BARK_STYLE_PATHS = new Set([
   'trunk.barkColor', 'trunk.barkScale', 'trunk.barkDetail', 'trunk.barkTint',
+  'trunk.barkMoss', 'trunk.barkMossColor', 'trunk.barkRootAO',
   'trunk.barkRidges', 'trunk.barkDepth',
 ])
 
@@ -418,8 +442,16 @@ const BARK_STYLE_PATHS = new Set([
 export function wholeSyncTargets(scene: AiSceneSpec, lead: AiPart, path: string, scope: EditScope): AiPart[] {
   if (scope === 'part') return [lead]
   if (path.startsWith('optimize.')) return [...scene.parts]
+  if (path.startsWith('accents.')) {
+    const owner = scene.parts.find(p => p.spec.shading.accent === 'wishing')
+    return [owner ?? lead]
+  }
+  if (path.startsWith('normalEdit.')) {
+    const sameKind = scene.parts.filter(p => p.spec.kind === lead.spec.kind)
+    return sameKind.length ? sameKind : [lead]
+  }
   if (path.startsWith('shading.') && path !== 'shading.leafStyle') return [...scene.parts]
-  if (BARK_STYLE_PATHS.has(path)) {
+  if (BARK_STYLE_PATHS.has(path) || path === 'trunk.sculpt' || path.startsWith('trunk.sculpt.')) {
     const woody = scene.parts.filter(p => WOODY_KINDS.has(p.spec.kind))
     return woody.length ? woody : [lead]
   }
@@ -467,9 +499,41 @@ export function applySceneParam(
     return { changedIds, needsPanelSync: false }
   }
 
+  if (path === 'shading.accent' && scope === 'whole') {
+    const nextAcc = String(value)
+    const owner = scene.parts.find(p => p.spec.shading.accent === 'wishing') ?? lead
+    for (const part of targets) {
+      part.spec = setPath(part.spec, path, part.id === owner.id ? nextAcc : 'none')
+      changedIds.push(part.id)
+    }
+    return { changedIds, needsPanelSync: false }
+  }
+
+  if (path === 'trunk.sculpt') {
+    for (const part of targets) {
+      part.spec = setPath(part.spec, path, value)
+      changedIds.push(part.id)
+    }
+    return { changedIds, needsPanelSync: true }
+  }
+
+  if (path.startsWith('accents.')) {
+    for (const part of targets) {
+      let nextSpec = setPath(part.spec, path, value)
+      if (nextSpec.shading.accent !== 'wishing') {
+        nextSpec = setPath(nextSpec, 'shading.accent', 'wishing')
+        needsPanelSync = true
+      }
+      part.spec = nextSpec
+      changedIds.push(part.id)
+    }
+    return { changedIds, needsPanelSync }
+  }
+
   if (path === 'shading.leafStyle') {
     const nextStyle = String(value)
     const pal = stylePalettes[nextStyle]
+    const nextAtlas = nextStyle === 'oak' ? 2 : 1
     for (const part of targets) {
       let nextSpec = setPath(part.spec, path, nextStyle)
       if (part.spec.kind === 'broadleaf') {
@@ -479,7 +543,20 @@ export function applySceneParam(
           const nextCard = nextStyle === 'willow'
             ? 'drape' as const
             : nextSpec.leaves.cardType === 'drape' ? 'quad' as const : nextSpec.leaves.cardType
-          nextSpec = { ...nextSpec, leaves: { ...nextSpec.leaves, tintInner: pal[0], tintOuter: pal[1], cardType: nextCard } }
+          nextSpec = {
+            ...nextSpec,
+            leaves: {
+              ...nextSpec.leaves,
+              tintInner: pal[0],
+              tintOuter: pal[1],
+              cardType: nextCard,
+              atlasCols: nextAtlas,
+              atlasRows: nextAtlas,
+              atlasRegions: undefined,
+            },
+          }
+        } else if (nextSpec.leaves.atlasRegions?.length) {
+          nextSpec = { ...nextSpec, leaves: { ...nextSpec.leaves, atlasRegions: undefined } }
         }
       }
       part.spec = nextSpec
@@ -526,7 +603,18 @@ export function applySceneLeafTexture(
   const lead = scene.parts.find(p => p.id === leadPartId) ?? scene.parts[0]
   if (!lead) return []
   const targets = scope === 'part' ? [lead] : scene.parts.filter(p => p.spec.kind === lead.spec.kind)
-  for (const p of targets) p.leafTexture = src
+  for (const p of targets) {
+    p.leafTexture = src
+    if (p.spec.kind === 'broadleaf') {
+      if (src === 'oakAtlas') {
+        p.spec = { ...p.spec, leaves: { ...p.spec.leaves, atlasCols: 2, atlasRows: 2, atlasRegions: undefined } }
+      } else if (src !== 'oak' && src !== 'auto' && (p.spec.leaves.atlasCols !== 1 || p.spec.leaves.atlasRows !== 1 || p.spec.leaves.atlasRegions?.length)) {
+        p.spec = { ...p.spec, leaves: { ...p.spec.leaves, atlasCols: 1, atlasRows: 1, atlasRegions: undefined } }
+      } else if (p.spec.leaves.atlasRegions?.length) {
+        p.spec = { ...p.spec, leaves: { ...p.spec.leaves, atlasRegions: undefined } }
+      }
+    }
+  }
   return targets.map(p => p.id)
 }
 
@@ -619,7 +707,7 @@ export function aiCapabilitySchema() {
       shape: '{ id, kind: "shape", anchor: [x,y,z], offset: [dx,dy,dz], radius } — deforms crown silhouette and branches',
       bare: '{ id, kind: "bare", anchor: [x,y,z], offset: [0,0,0], radius } — carves foliage-free gaps exposing branches',
       customTrunkSpine: 'trunk.spine?: [x,y,z][] — optional 3D trunk centerline points from root [0,0,0] to crown fork (auto-extracted from photo medial axis)',
-      branchEdits: 'branchEdits?: { id, lengthScale?, radiusScale?, pitchDelta?, yawDelta?, gravityDelta?, spineOffsets?, pruned?, bare? }[] — SpeedTree-style per-branch node overrides with parent-to-child propagation',
+      branchEdits: 'branchEdits?: { id, lengthScale?, radiusScale?, pitchDelta?, yawDelta?, gravityDelta?, socketDelta?, offset?, spineOffsets?, pruned?, bare? }[] — SpeedTree-style per-branch node overrides (including parent-spline socket sliding & free 3D root offset) with parent-to-child propagation',
     },
   }
 }

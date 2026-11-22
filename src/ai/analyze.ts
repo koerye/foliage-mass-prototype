@@ -1152,7 +1152,8 @@ export function analyzePlantImage(source: PixelBuffer, imageName = '参考图植
       spec.leaves.leafAspect = .5
       spec.leaves.leafSizeVariance = .36
       spec.leaves.leafPivot = 0
-      spec.leaves.leavesPerTwig = 4
+      spec.leaves.leavesPerTwig = 6
+      spec.leaves.limbLeafFrequency = 3.5
       spec.leaves.clumpFill = 2.8
       spec.leaves.cameraFacing = 0
       spec.leaves.alphaCutoff = .38
@@ -1399,7 +1400,7 @@ export function analyzePlantImage(source: PixelBuffer, imageName = '参考图植
     flowerbed: '花丛',
   }
   const styleNames: Record<LeafStyle, string> = {
-    default: '标准阔叶', cloud: '厚涂圆云叶', bush: '翠绿尖叶灌木簇', sakura: '樱花柔瓣簇', maple: '枫叶五角簇', willow: '垂柳细长丝', flower: '通用花簇',
+    default: '标准阔叶', cloud: '厚涂圆云叶', oak: '手绘厚涂橡叶叠簇', bush: '翠绿尖叶灌木簇', sakura: '樱花柔瓣簇', maple: '枫叶五角簇', willow: '垂柳细长丝', flower: '通用花簇',
   }
   const summaryParts = [
     `识别类型：${kindLabel[kind]}`,
