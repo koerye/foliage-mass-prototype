@@ -17,6 +17,8 @@ import { mountPresetLibrary } from './preset-library'
 import { captureViewportThumbnail, createPresetStore, deepClone } from './preset-store'
 import { bindTextureSlots, createTextureRegistry, editableTextureSlots, type AllTextureSlot, type EditableTextureSlot } from './texture-slots'
 import { captureCustomRegistryTextures, decodeSavedTextureMap, parseSavedTextureMap, type SavedTextureMap } from './texture-serialize'
+import { activityLog, initStudioLogging } from './activity-log'
+import { mountActivityLogDrawer } from './activity-log-ui'
 import { mountTextureEditor } from '../texgraph/editor-ui'
 import { mountTextureLibrary, type AppliedTextureMeta } from '../texgraph/library-ui'
 import { createTextureLibraryStore } from '../texgraph/store'
@@ -43,6 +45,7 @@ byId('app').innerHTML = `
   <nav aria-label="项目操作">
     <a class="b-link" href="./ai.html" title="空白工程 · 拖图自动生成并暴露全部参数能力">✦ AI 模式</a>
     <a class="b-link" href="./rock.html" title="风格化石头工作台 · 切面雕刻与赛璐璐">◈ 石头工作台</a>
+    <a class="b-link" href="./scene.html" title="场景组装工作台 · 自由摆放树木花草石头查看整体效果">❖ 场景组装</a>
     <a class="b-link" href="./legacy.html">旧版工作台</a>
     <button id="tex-editor" class="tg-open-btn" title="打开 Substance 风格树叶/树皮程序化贴图节点编辑器">◈ 贴图编辑</button>
     <button id="tex-lib" class="tl-open-btn" title="打开实时贴图库（支持悬停 3D 预览、保存与复用）">🎨 贴图库<span class="pl-badge" id="tex-lib-count">0</span></button>
@@ -51,6 +54,7 @@ byId('app').innerHTML = `
     <input id="file" type="file" accept=".json,application/json" hidden>
     <button id="import">导入 JSON</button><button id="json">保存 JSON</button>
     <button id="png">截图 PNG</button><button id="glb" class="primary">导出 GLB</button>
+    <button id="activity-log-btn" class="al-open-btn" title="查看每一步用户操作与导出诊断日志（支持一键复制/导出排查问题）">📋 日志<span class="pl-badge" id="al-badge">0</span></button>
   </nav>
 </header>
 <section class="workspace">
@@ -169,13 +173,18 @@ const registry = createTextureRegistry()
 const textures = registry.textures
 let toastTimer: ReturnType<typeof setTimeout>
 
-function message(value: unknown, error = false) {
+function message(value: unknown, error = false, logIt = true) {
   const toast = byId('toast')
   clearTimeout(toastTimer)
-  toast.textContent = value instanceof Error ? value.message : String(value)
+  const text = value instanceof Error ? value.message : String(value)
+  toast.textContent = text
   toast.classList.toggle('is-error', error)
   toast.hidden = false
   toastTimer = setTimeout(() => { toast.hidden = true }, 4000)
+  if (logIt) {
+    if (error) activityLog.error('system', `提示错误：${text}`, value instanceof Error ? value : undefined)
+    else activityLog.info('system', `状态提示：${text}`)
+  }
 }
 
 function axisOf(s: TreeSpec) { return buildSkeleton({ ...s, handles: [] }).envelope.axis }
@@ -190,6 +199,10 @@ try {
   console.warn(error)
   byId('webgl').hidden = false
 }
+initStudioLogging({
+  page: 'broadleaf',
+  getWebGLContext: () => viewer?.renderer.getContext() ?? null,
+})
 
 let cachedAxis = { key: '', axis: axisOf(spec) }
 let editUi: ReturnType<typeof bindEditToolsUi> | undefined
@@ -205,6 +218,7 @@ const editor = viewer ? new CrownEditor(viewer, {
   setHandles: (handles, final) => {
     userDirty = true
     spec = { ...spec, handles }
+    if (final) activityLog.action(`调整树冠控制点（当前 ${handles.length} 个）`, { count: handles.length }, 'scene')
     scheduleBuild(final)
   },
   setBranchEdits: (branchEdits: BranchEdit[], final: boolean) => {
@@ -213,12 +227,14 @@ const editor = viewer ? new CrownEditor(viewer, {
     if (branchEdits.length) next.branchEdits = branchEdits
     else delete next.branchEdits
     spec = next
+    if (final) activityLog.action(`编辑 3D 枝条节点（已修改 ${branchEdits.length} 条枝干）`, { count: branchEdits.length }, 'scene')
     scheduleBuild(final)
   },
   setNormalEdit: (normalEdit: LeafNormalEditSpec, final: boolean) => {
     userDirty = true
     spec = { ...spec, normalEdit }
     panel.sync()
+    if (final) activityLog.action(`笔刷调整叶片法线（模式：${normalEdit.mode}）`, { mode: normalEdit.mode, brushes: normalEdit.brushes?.length ?? 0 }, 'scene')
     scheduleBuild(final)
   },
   selected: handle => editUi?.showSelectedHandle(handle),
@@ -283,6 +299,15 @@ function rebuildWoodOnly(final = true) {
     if (final && presetLibrary?.isOpen() && !presetLibrary.isPreviewing()) {
       presetLibrary.refreshCapture(false)
     }
+    if (final) {
+      activityLog.info('scene', `树干快速重建完成：${spec.name}（${fmt.format(asset.stats.triangles)} 面 · ${asset.stats.ms} ms）`, {
+        presetId,
+        kind: spec.kind,
+        seed: spec.seed,
+        triangles: asset.stats.triangles,
+        ms: asset.stats.ms,
+      })
+    }
   } catch (error) {
     console.error(error)
     message(error, true)
@@ -325,6 +350,16 @@ function rebuild(reframe: boolean, final = true) {
     editor?.refresh()
     if (final && presetLibrary?.isOpen() && !presetLibrary.isPreviewing()) {
       presetLibrary.refreshCapture(false)
+    }
+    if (final) {
+      activityLog.info('scene', `模型构建完成：${spec.name}（${fmt.format(asset.stats.triangles)} 面 · ${asset.stats.ms} ms）`, {
+        presetId,
+        kind: spec.kind,
+        seed: spec.seed,
+        triangles: asset.stats.triangles,
+        ms: asset.stats.ms,
+        loadedTextures: registry.loadedSlots(),
+      })
     }
   } catch (error) {
     console.error(error)
@@ -957,7 +992,19 @@ textureStore.subscribe(syncTexLibCount)
 void textureStore.ready().then(syncTexLibCount)
 syncTexLibCount()
 
+const activityLogDrawer = mountActivityLogDrawer({
+  triggerButton: byId<HTMLButtonElement>('activity-log-btn'),
+  badgeElement: byId('al-badge'),
+  onBeforeOpen: () => {
+    presetLibrary.close()
+    textureLibrary.close()
+    textureEditor.close()
+  },
+  message: (text, err) => message(text, err, false),
+})
+
 byId('tex-editor').onclick = () => {
+  activityLogDrawer.close()
   if (spec.kind === 'broadleaf') {
     if (spec.shading.leafStyle === 'oak') { textureEditor.open({ templateId: 'leaf-oak-painterly' }); return }
     if (spec.shading.leafStyle === 'maple') { textureEditor.open({ templateId: 'leaf-maple' }); return }
@@ -969,15 +1016,26 @@ byId('tex-editor').onclick = () => {
         : spec.kind === 'fern' ? 'fern' : 'leaf'
   textureEditor.open({ slot: defaultSlot })
 }
-byId('tex-lib').onclick = () => textureLibrary.toggle()
+byId('tex-lib').onclick = () => { activityLogDrawer.close(); textureLibrary.toggle() }
 
-byId('preset-save').onclick = () => { textureLibrary.close(); textureEditor.close(); presetLibrary.open(true) }
-byId('preset-lib').onclick = () => { textureLibrary.close(); textureEditor.close(); presetLibrary.toggle() }
+byId('preset-save').onclick = () => { activityLogDrawer.close(); textureLibrary.close(); textureEditor.close(); presetLibrary.open(true) }
+byId('preset-lib').onclick = () => { activityLogDrawer.close(); textureLibrary.close(); textureEditor.close(); presetLibrary.toggle() }
 
 void applyBuiltInPresetState(presetId, bootOverride, true)
 
 // automation hooks for browser checks
-Object.assign(window, { __studio: {
+Object.assign(window, {
+  __activityLog: {
+    store: activityLog,
+    open: () => activityLogDrawer.open(),
+    close: () => activityLogDrawer.close(),
+    entries: () => activityLog.entries(),
+    counts: () => activityLog.counts(),
+    exportJson: () => activityLog.exportJson(),
+    exportText: () => activityLog.exportText(),
+    clear: () => activityLog.clear(),
+  },
+  __studio: {
   get spec() { return spec },
   get stats() { return asset ? { ...asset.stats } : undefined },
   get buildCount() { return buildCount },

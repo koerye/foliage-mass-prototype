@@ -5,6 +5,7 @@ import { loadLeafTexture, makePlaceholderLeafTexture } from '../broadleaf/leaf-m
 import type { TreeTextures } from '../tree/assemble'
 import { loadBarkTexture, makeProceduralBarkPreview } from '../tree/bark-material'
 import { makeOakLeafAtlasTexture, makeOakLeafCardTexture } from '../texgraph/templates'
+import { activityLog } from './activity-log'
 import {
   makeBushSprigTexture, makeCloudLeafTexture, makeDrapeTexture, makeFernTexture, makeFlowerTexture, makeGrassTexture,
   makeMapleTexture, makeNeedleTexture, makeNeutralGrassTexture, makePalmTexture,
@@ -184,7 +185,21 @@ export function bindTextureSlots(registry: TextureRegistry, opts: BindTextureSlo
         const selected = file.files?.[0]
         if (!selected) return
         try {
+          activityLog.info('texture', `开始解码自定义贴图 [${slot}]：${selected.name}`, {
+            slot,
+            file: selected.name,
+            type: selected.type || '(empty)',
+            sizeKB: Number((selected.size / 1024).toFixed(1)),
+          })
           const loaded = slot === 'bark' ? await loadBarkTexture(selected) : await loadLeafTexture(selected)
+          const img = loaded.image as { width?: number; height?: number } | undefined
+          activityLog.info('texture', `贴图解码完成 [${slot}]：${loaded.name} (${img?.width ?? 0}×${img?.height ?? 0})`, {
+            slot,
+            name: loaded.name,
+            width: img?.width ?? 0,
+            height: img?.height ?? 0,
+            colorSpace: loaded.colorSpace,
+          })
           opts.onBeforeUseCustom?.(slot)
           if (!opts.onCustomTexture?.(slot, loaded, selected.name)) {
             registry.setCustom(slot, loaded)
@@ -193,6 +208,11 @@ export function bindTextureSlots(registry: TextureRegistry, opts: BindTextureSlo
           opts.onChange(slot)
           opts.onMessage(slot === 'bark' ? '已载入树皮贴图（3D 三平面无平铺投影）：' + selected.name : '已载入贴图 ' + selected.name)
         } catch (error) {
+          activityLog.error('texture', `贴图载入失败 [${slot}]：${error instanceof Error ? error.message : String(error)}`, {
+            slot,
+            file: selected.name,
+            error,
+          })
           opts.onMessage('贴图载入失败：' + String(error), true)
         } finally {
           file.value = ''
@@ -201,6 +221,7 @@ export function bindTextureSlots(registry: TextureRegistry, opts: BindTextureSlo
     }
     if (defBtn) {
       defBtn.onclick = () => {
+        activityLog.action(`恢复默认贴图 [${slot}]`, { slot }, 'texture')
         if (!opts.onResetTexture?.(slot)) {
           registry.resetDefault(slot)
         }

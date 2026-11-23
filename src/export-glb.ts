@@ -2,6 +2,7 @@ import {
   Box3, BufferAttribute, BufferGeometry, Color, Group, Matrix3, Matrix4, Mesh, MeshStandardMaterial,
   Texture, Vector3, type Material, type Object3D,
 } from 'three'
+import { activityLog, inspectGlbBinary } from './studio/activity-log'
 import type { TrunkSpec } from './tree/spec'
 import { isWoodSculptActive, type BarkHeightField, type TrunkFeaturePlan } from './tree/wood-sculpt'
 import {
@@ -1015,14 +1016,245 @@ export function extractStandaloneBarkBakePngs(
   return out
 }
 
+interface TextureDiagEntry {
+  slot: string
+  name: string
+  texType: string
+  imageType: string
+  width: number
+  height: number
+  complete?: boolean
+  naturalWidth?: number
+  format: number
+  colorSpace: string
+  flipY: boolean
+  mimeType: string
+  pixelStatus: 'ok' | 'all-zero' | 'empty' | 'not-loaded' | 'tainted' | 'unchecked'
+  pixelError?: string
+}
+
+function inspectTextureForLog(slot: string, tex: Texture): TextureDiagEntry {
+  const img = tex.image as Record<string, unknown> | null | undefined
+  const mimeType = typeof tex.userData?.mimeType === 'string' ? tex.userData.mimeType : 'image/png (default)'
+  if (!img) {
+    return {
+      slot,
+      name: tex.name || '(unnamed)',
+      texType: tex.constructor?.name || 'Texture',
+      imageType: 'null',
+      width: 0,
+      height: 0,
+      format: tex.format,
+      colorSpace: String(tex.colorSpace || ''),
+      flipY: Boolean(tex.flipY),
+      mimeType,
+      pixelStatus: 'empty',
+    }
+  }
+
+  let imageType = img.constructor?.name || typeof img
+  const isHtmlImg = typeof HTMLImageElement !== 'undefined' && img instanceof HTMLImageElement
+  const isHtmlCanvas = typeof HTMLCanvasElement !== 'undefined' && img instanceof HTMLCanvasElement
+  const isOffscreen = typeof OffscreenCanvas !== 'undefined' && img instanceof OffscreenCanvas
+  const isBitmap = typeof ImageBitmap !== 'undefined' && img instanceof ImageBitmap
+  if (isHtmlCanvas) imageType = 'HTMLCanvasElement'
+  else if (isOffscreen) imageType = 'OffscreenCanvas'
+  else if (isHtmlImg) imageType = 'HTMLImageElement'
+  else if (isBitmap) imageType = 'ImageBitmap'
+  else if ('data' in img && img.data) imageType = `DataTextureImage(${(img.data as object).constructor?.name || 'TypedArray'})`
+
+  const width = Number((isHtmlImg ? (img.naturalWidth || img.width) : img.width) || 0)
+  const height = Number((isHtmlImg ? (img.naturalHeight || img.height) : img.height) || 0)
+  let pixelStatus: TextureDiagEntry['pixelStatus'] = 'unchecked'
+  let pixelError: string | undefined
+
+  if (width <= 0 || height <= 0) {
+    pixelStatus = 'empty'
+  } else if (isHtmlImg) {
+    pixelStatus = img.complete && Number(img.naturalWidth) > 0 ? 'ok' : 'not-loaded'
+  } else if ('data' in img && img.data && ArrayBuffer.isView(img.data)) {
+    const arr = img.data as Uint8Array | Uint8ClampedArray
+    const step = Math.max(4, Math.floor(arr.length / 256) * 4)
+    let anyNonZero = false
+    for (let i = 0; i < arr.length; i += step) {
+      if ((arr[i] | arr[i + 1] | arr[i + 2] | arr[i + 3]) !== 0) { anyNonZero = true; break }
+    }
+    pixelStatus = anyNonZero ? 'ok' : 'all-zero'
+  } else if (isHtmlCanvas) {
+    try {
+      const ctx = img.getContext('2d')
+      if (ctx) {
+        const grid = 12
+        let anyNonZero = false
+        outer: for (let gy = 0; gy < grid; gy++) {
+          const py = Math.min(height - 1, Math.floor(((gy + 0.5) / grid) * height))
+          for (let gx = 0; gx < grid; gx++) {
+            const px = Math.min(width - 1, Math.floor(((gx + 0.5) / grid) * width))
+            const d = ctx.getImageData(px, py, 1, 1).data
+            if ((d[0] | d[1] | d[2] | d[3]) !== 0) { anyNonZero = true; break outer }
+          }
+        }
+        pixelStatus = anyNonZero ? 'ok' : 'all-zero'
+      }
+    } catch (err) {
+      pixelStatus = 'tainted'
+      pixelError = err instanceof Error ? err.message : String(err)
+    }
+  }
+
+  return {
+    slot,
+    name: tex.name || '(unnamed)',
+    texType: tex.constructor?.name || 'Texture',
+    imageType,
+    width,
+    height,
+    ...(isHtmlImg ? { complete: Boolean(img.complete), naturalWidth: Number(img.naturalWidth || 0) } : {}),
+    format: tex.format,
+    colorSpace: String(tex.colorSpace || ''),
+    flipY: Boolean(tex.flipY),
+    mimeType,
+    pixelStatus,
+    ...(pixelError ? { pixelError } : {}),
+  }
+}
+
+function inspectPreparedSceneForLog(prepared: Object3D) {
+  const seenMats = new Set<Material>()
+  const uniqueTextures = new Set<string>()
+  const issues: string[] = []
+  let meshCount = 0
+  let totalVertices = 0
+  let totalTriangles = 0
+  const meshes: { name: string; vertices: number; triangles: number; attrs: string[] }[] = []
+  const materials: {
+    name: string
+    type: string
+    vertexColors: boolean
+    transparent: boolean
+    alphaTest: number
+    textures: TextureDiagEntry[]
+  }[] = []
+
+  const texSlots = ['map', 'normalMap', 'roughnessMap', 'aoMap', 'emissiveMap', 'alphaMap'] as const
+
+  prepared.traverse(node => {
+    if (!(node instanceof Mesh)) return
+    meshCount++
+    const pos = node.geometry.getAttribute('position')
+    const verts = pos?.count ?? 0
+    const tris = node.geometry.index ? Math.round(node.geometry.index.count / 3) : Math.round(verts / 3)
+    totalVertices += verts
+    totalTriangles += tris
+    meshes.push({
+      name: node.name || '(unnamed)',
+      vertices: verts,
+      triangles: tris,
+      attrs: Object.keys(node.geometry.attributes),
+    })
+    const mats = Array.isArray(node.material) ? node.material : [node.material]
+    for (const mat of mats) {
+      if (!mat || seenMats.has(mat)) continue
+      seenMats.add(mat)
+      const texList: TextureDiagEntry[] = []
+      if (mat instanceof MeshStandardMaterial) {
+        for (const slot of texSlots) {
+          const t = mat[slot]
+          if (!t) continue
+          uniqueTextures.add(t.uuid)
+          const diag = inspectTextureForLog(slot, t)
+          texList.push(diag)
+          if (diag.pixelStatus === 'empty' || diag.pixelStatus === 'not-loaded' || diag.pixelStatus === 'tainted' || diag.pixelStatus === 'all-zero') {
+            issues.push(`材质 ${mat.name || '(unnamed)'}.${slot}(${diag.name}) 状态=${diag.pixelStatus} (${diag.width}×${diag.height})`)
+          }
+        }
+      }
+      materials.push({
+        name: mat.name || '(unnamed)',
+        type: mat.type,
+        vertexColors: Boolean((mat as MeshStandardMaterial).vertexColors),
+        transparent: Boolean(mat.transparent),
+        alphaTest: Number(mat.alphaTest || 0),
+        textures: texList,
+      })
+    }
+  })
+
+  return {
+    meshCount,
+    totalVertices,
+    totalTriangles,
+    uniqueTextureCount: uniqueTextures.size,
+    meshes,
+    materials,
+    issues,
+  }
+}
+
 export async function exportGlb(group: Object3D, options: ExportGlbOptions = {}) {
+  const started = typeof performance !== 'undefined' ? performance.now() : Date.now()
+  activityLog.exportStep(`开始导出 GLB（${options.mode === 'separate' ? '独立分体' : '整体合并'}）`, {
+    rootName: group.name || '(unnamed)',
+    options,
+  })
   const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js')
   const tempDisposables: { dispose(): void }[] = []
   const prepared = prepareGlbSceneInternal(group, options, tempDisposables)
+  const preDiag = inspectPreparedSceneForLog(prepared)
+  activityLog.exportStep(
+    `GLB 预处理完成：${preDiag.meshCount} 网格 · ${preDiag.materials.length} 材质 · ${preDiag.uniqueTextureCount} 张贴图`,
+    preDiag,
+  )
+  if (preDiag.issues.length > 0) {
+    activityLog.exportStep(
+      `⚠️ 导出前检测到 ${preDiag.issues.length} 项贴图状态异常：${preDiag.issues.join('；')}`,
+      preDiag.issues,
+      'warn',
+    )
+  }
   try {
+    const encodeStart = typeof performance !== 'undefined' ? performance.now() : Date.now()
     const bytes = await new GLTFExporter().parseAsync(prepared, { binary: true, onlyVisible: false })
     if (!(bytes instanceof ArrayBuffer)) throw new Error('GLB 导出未生成二进制文件')
+    const encodeMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - encodeStart)
+    const totalMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - started)
+    const glbDiag = inspectGlbBinary(bytes)
+    activityLog.exportStep(
+      `GLB 编码完成：${(bytes.byteLength / 1024).toFixed(1)} KB（${glbDiag.meshCount} 网格 · ${glbDiag.materialCount} 材质 · ${glbDiag.textureCount} 贴图 · ${glbDiag.imageCount} 图像 · 编码 ${encodeMs} ms / 总计 ${totalMs} ms）`,
+      glbDiag,
+    )
+    if (!glbDiag.valid) {
+      activityLog.exportStep(`⚠️ GLB 文件头校验失败：${glbDiag.error || '未知结构异常'}`, glbDiag, 'error')
+    } else if (preDiag.uniqueTextureCount > 0 && glbDiag.imageCount === 0) {
+      activityLog.exportStep(
+        `⚠️ GLB 贴图丢失：导出前有 ${preDiag.uniqueTextureCount} 张贴图，但生成的 GLB 中图像数为 0！`,
+        { preMaterials: preDiag.materials, glbMaterials: glbDiag.materials, glbImages: glbDiag.images },
+        'error',
+      )
+    } else {
+      const badImages = glbDiag.images.filter(i => i.byteLength === 0 || i.magic === 'EMPTY' || i.magic === 'MISSING' || i.magic === 'UNKNOWN')
+      if (badImages.length > 0) {
+        activityLog.exportStep(
+          `⚠️ GLB 内有 ${badImages.length} 张贴图数据异常（字节为空或格式头无效）`,
+          badImages,
+          'error',
+        )
+      } else if (preDiag.uniqueTextureCount === 0) {
+        activityLog.exportStep(
+          '提示：当前导出材质均使用顶点色/程序着色（未挂载位图贴图），因此 GLB 中不含位图图像（images=0）',
+          { glbMaterials: glbDiag.materials },
+          'info',
+        )
+      }
+    }
     return new Blob([bytes], { type: 'model/gltf-binary' })
+  } catch (err) {
+    activityLog.exportStep(
+      `GLB 编码失败：${err instanceof Error ? err.message : String(err)}`,
+      err,
+      'error',
+    )
+    throw err
   } finally {
     for (const d of tempDisposables) d.dispose()
   }

@@ -36,6 +36,8 @@ import {
 } from './scene'
 import { aiShowcases, getAiShowcase } from './showcase'
 import { createHiddenShowcaseStore } from './showcase-store'
+import { activityLog, initStudioLogging } from '../studio/activity-log'
+import { mountActivityLogDrawer } from '../studio/activity-log-ui'
 
 const hiddenShowcaseStore = createHiddenShowcaseStore({ validIds: aiShowcases.map(s => s.id) })
 const visibleShowcases = () => aiShowcases.filter(s => !hiddenShowcaseStore.isHidden(s.id))
@@ -56,6 +58,7 @@ byId('app').innerHTML = `
   <nav aria-label="项目操作">
     <a class="b-link" href="./broadleaf.html">← 经典工作台</a>
     <a class="b-link" href="./rock.html" title="风格化石头工作台 · 切面雕刻与赛璐璐">◈ 石头工作台</a>
+    <a class="b-link" href="./scene.html" title="场景组装工作台 · 自由摆放树木花草石头查看整体效果">❖ 场景组装</a>
     <input id="ai-image-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
     <button id="ai-upload-top" class="primary">上传参考图</button>
     <button id="ai-showcase-top" class="pl-showcase-btn" title="打开内置 AI 成品案例库（支持悬停实时 3D 预览）">✿ 案例库<span class="pl-badge" id="ai-showcase-top-count">${visibleShowcases().length}</span></button>
@@ -67,6 +70,7 @@ byId('app').innerHTML = `
     <input id="file" type="file" accept=".json,application/json" hidden>
     <button id="import">导入 JSON</button><button id="json">保存 JSON</button>
     <button id="png">截图 PNG</button><button id="glb">导出 GLB</button>
+    <button id="activity-log-btn" class="al-open-btn" title="查看每一步用户操作与导出诊断日志（支持一键复制/导出排查问题）">📋 日志<span class="pl-badge" id="al-badge">0</span></button>
   </nav>
 </header>
 <section class="workspace">
@@ -262,13 +266,18 @@ function clearAllPartCustomTextures(slot?: EditableTextureSlot) {
 }
 
 let toastTimer: ReturnType<typeof setTimeout>
-function message(value: unknown, error = false) {
+function message(value: unknown, error = false, logIt = true) {
   const toast = byId('toast')
   clearTimeout(toastTimer)
-  toast.textContent = value instanceof Error ? value.message : String(value)
+  const text = value instanceof Error ? value.message : String(value)
+  toast.textContent = text
   toast.classList.toggle('is-error', error)
   toast.hidden = false
   toastTimer = setTimeout(() => { toast.hidden = true }, 4200)
+  if (logIt) {
+    if (error) activityLog.error('system', `提示错误：${text}`, value instanceof Error ? value : undefined)
+    else activityLog.info('system', `状态提示：${text}`)
+  }
 }
 
 const activePart = (): AiPart | undefined => sceneSpec.parts.find(p => p.id === selectedId) ?? sceneSpec.parts[0]
@@ -282,6 +291,10 @@ try {
   console.warn(error)
   byId('webgl').hidden = false
 }
+initStudioLogging({
+  page: 'ai',
+  getWebGLContext: () => viewer?.renderer.getContext() ?? null,
+})
 
 let cachedAxis = { key: '', axis: new Vector3() }
 let editUi: ReturnType<typeof bindEditToolsUi> | undefined
@@ -308,6 +321,7 @@ const editor = viewer ? new CrownEditor(viewer, {
     const p = activePart()
     if (!p) return
     p.spec = { ...p.spec, handles }
+    if (final) activityLog.action(`调整部件「${p.label}」树冠控制点（${handles.length} 个）`, { partId: p.id, count: handles.length }, 'scene')
     scheduleBuild(final, p.id)
   },
   setBranchEdits: (branchEdits: BranchEdit[], final: boolean) => {
@@ -317,6 +331,7 @@ const editor = viewer ? new CrownEditor(viewer, {
     if (branchEdits.length) next.branchEdits = branchEdits
     else delete next.branchEdits
     p.spec = next
+    if (final) activityLog.action(`编辑部件「${p.label}」枝条节点（${branchEdits.length} 条）`, { partId: p.id, count: branchEdits.length }, 'scene')
     scheduleBuild(final, p.id)
   },
   setNormalEdit: (normalEdit: LeafNormalEditSpec, final: boolean) => {
@@ -324,6 +339,7 @@ const editor = viewer ? new CrownEditor(viewer, {
     if (!p) return
     p.spec = { ...p.spec, normalEdit }
     panel.sync()
+    if (final) activityLog.action(`笔刷调整部件「${p.label}」叶片法线（${normalEdit.mode}）`, { partId: p.id, mode: normalEdit.mode }, 'scene')
     scheduleBuild(final, p.id)
   },
   selected: handle => editUi?.showSelectedHandle(handle),
@@ -493,6 +509,11 @@ function rebuildSinglePart(partId: string) {
     editor?.refresh()
     markJsonDirty()
     if (presetLibrary?.isOpen() && !presetLibrary.isPreviewing()) presetLibrary.refreshCapture(false)
+    activityLog.info('scene', `AI 部件更新完成：${p.label}（场景共 ${fmt.format(sceneAsset.stats.triangles)} 面）`, {
+      partId: p.id,
+      label: p.label,
+      triangles: sceneAsset.stats.triangles,
+    })
   } catch (error) {
     console.error(error)
     message(error, true)
@@ -545,6 +566,13 @@ function rebuild(reframe: boolean) {
     editor?.refresh()
     markJsonDirty()
     if (presetLibrary?.isOpen() && !presetLibrary.isPreviewing()) presetLibrary.refreshCapture(false)
+    activityLog.info('scene', `AI 场景构建完成：${sceneSpec.name}（${next.stats.parts} 部件 · ${fmt.format(next.stats.triangles)} 面 · ${next.stats.ms} ms）`, {
+      name: sceneSpec.name,
+      parts: next.stats.parts,
+      triangles: next.stats.triangles,
+      ms: next.stats.ms,
+      loadedTextures: registry.loadedSlots(),
+    })
   } catch (error) {
     console.error(error)
     message(error, true)
@@ -928,6 +956,7 @@ function runAnalyzeOnPixels(pixels: PixelBuffer, name: string, dataUrl: string, 
 }
 
 async function processImageDataUrl(dataUrl: string, name: string) {
+  activityLog.action(`上传参考图进行 AI 识图：${name}`, { name }, 'scene')
   const img = new Image()
   await new Promise<void>((resolve, reject) => {
     img.onload = () => resolve()
@@ -1826,7 +1855,19 @@ textureStore.subscribe(syncTexLibCount)
 void textureStore.ready().then(syncTexLibCount)
 syncTexLibCount()
 
+const activityLogDrawer = mountActivityLogDrawer({
+  triggerButton: byId<HTMLButtonElement>('activity-log-btn'),
+  badgeElement: byId('al-badge'),
+  onBeforeOpen: () => {
+    presetLibrary.close()
+    textureLibrary.close()
+    textureEditor.close()
+  },
+  message: (text, err) => message(text, err, false),
+})
+
 byId('tex-editor').onclick = () => {
+  activityLogDrawer.close()
   const lead = activePart()
   const defaultSlot: EditableTextureSlot = lead?.spec.kind === 'conifer' ? 'needle'
     : lead?.spec.kind === 'palm' ? 'palm'
@@ -1834,13 +1875,13 @@ byId('tex-editor').onclick = () => {
         : lead?.spec.kind === 'fern' ? 'fern' : 'leaf'
   textureEditor.open({ slot: defaultSlot })
 }
-byId('tex-lib').onclick = () => textureLibrary.toggle()
+byId('tex-lib').onclick = () => { activityLogDrawer.close(); textureLibrary.toggle() }
 
-byId('preset-save').onclick = () => { textureLibrary.close(); textureEditor.close(); presetLibrary.open(true, 'mine') }
-byId('preset-lib').onclick = () => { textureLibrary.close(); textureEditor.close(); presetLibrary.toggle('mine') }
-byId('ai-open-presets').onclick = () => { textureLibrary.close(); textureEditor.close(); presetLibrary.open(false, 'mine') }
-byId('ai-showcase-top').onclick = () => { textureLibrary.close(); textureEditor.close(); presetLibrary.toggle('showcases') }
-byId('ai-showcase-btn').onclick = () => { textureLibrary.close(); textureEditor.close(); presetLibrary.open(false, 'showcases') }
+byId('preset-save').onclick = () => { activityLogDrawer.close(); textureLibrary.close(); textureEditor.close(); presetLibrary.open(true, 'mine') }
+byId('preset-lib').onclick = () => { activityLogDrawer.close(); textureLibrary.close(); textureEditor.close(); presetLibrary.toggle('mine') }
+byId('ai-open-presets').onclick = () => { activityLogDrawer.close(); textureLibrary.close(); textureEditor.close(); presetLibrary.open(false, 'mine') }
+byId('ai-showcase-top').onclick = () => { activityLogDrawer.close(); textureLibrary.close(); textureEditor.close(); presetLibrary.toggle('showcases') }
+byId('ai-showcase-btn').onclick = () => { activityLogDrawer.close(); textureLibrary.close(); textureEditor.close(); presetLibrary.open(false, 'showcases') }
 
 // Initialize blank project cleanly (or optional ?showcase=<id> direct link)
 const initialShowcase = new URL(location.href).searchParams.get('showcase')
@@ -1849,6 +1890,16 @@ else refreshUi(true)
 
 // Expose complete AI Studio API for external agents & automated browser tests
 Object.assign(window, {
+  __activityLog: {
+    store: activityLog,
+    open: () => activityLogDrawer.open(),
+    close: () => activityLogDrawer.close(),
+    entries: () => activityLog.entries(),
+    counts: () => activityLog.counts(),
+    exportJson: () => activityLog.exportJson(),
+    exportText: () => activityLog.exportText(),
+    clear: () => activityLog.clear(),
+  },
   __aiStudio: {
     get scene() { return sceneSpec },
     get report() { return lastReport },

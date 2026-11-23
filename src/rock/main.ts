@@ -3,6 +3,8 @@ import '../studio/studio.css'
 import './rock.css'
 import { Vector3 } from 'three'
 import { exportGlb } from '../export-glb'
+import { activityLog, initStudioLogging } from '../studio/activity-log'
+import { mountActivityLogDrawer } from '../studio/activity-log-ui'
 import { createDefaultOverrideStore } from '../studio/default-overrides'
 import { lightingPresets, Viewer, type Camera, type LightingPreset } from '../viewport'
 import { buildRockGroup, type RockBuildStats } from './geometry'
@@ -136,12 +138,14 @@ byId('app').innerHTML = `
   <nav aria-label="项目操作">
     <a class="b-link" href="./broadleaf.html" title="返回程序化树木工作台">← 树木工作台</a>
     <a class="b-link" href="./ai.html" title="前往 AI 模式空白工程">✦ AI 模式</a>
+    <a class="b-link" href="./scene.html" title="场景组装工作台 · 自由摆放树木花草石头查看整体效果">❖ 场景组装</a>
     <button id="rk-quick-reseed" title="随机生成新外形">🎲 随机石形</button>
     <input id="file" type="file" accept=".json,application/json" hidden>
     <button id="import">导入 JSON</button>
     <button id="json">保存 JSON</button>
     <button id="png">截图 PNG</button>
     <button id="glb" class="primary">导出 GLB</button>
+    <button id="activity-log-btn" class="al-open-btn" title="查看每一步用户操作与导出诊断日志（支持一键复制/导出排查问题）">📋 日志<span class="pl-badge" id="al-badge">0</span></button>
   </nav>
 </header>
 <section class="workspace">
@@ -243,13 +247,18 @@ let vertexColorsDirty = false
 let buildCount = 0
 let toastTimer: ReturnType<typeof setTimeout>
 
-function message(value: unknown, error = false) {
+function message(value: unknown, error = false, logIt = true) {
   const toast = byId('toast')
   clearTimeout(toastTimer)
-  toast.textContent = value instanceof Error ? value.message : String(value)
+  const text = value instanceof Error ? value.message : String(value)
+  toast.textContent = text
   toast.classList.toggle('is-error', error)
   toast.hidden = false
   toastTimer = setTimeout(() => { toast.hidden = true }, 3600)
+  if (logIt) {
+    if (error) activityLog.error('system', `提示错误：${text}`, value instanceof Error ? value : undefined)
+    else activityLog.info('system', `状态提示：${text}`)
+  }
 }
 
 let viewer: Viewer | undefined
@@ -262,6 +271,10 @@ try {
   console.warn(error)
   byId('webgl').hidden = false
 }
+initStudioLogging({
+  page: 'rock',
+  getWebGLContext: () => viewer?.renderer.getContext() ?? null,
+})
 
 function syncPanel() {
   const overridden = rockDefaults.has(presetId)
@@ -559,14 +572,37 @@ byId('glb').addEventListener('click', async () => {
   try {
     const blob = await exportGlb(built.group, { mode: 'merged', excludeDecorations: false })
     const filename = `${spec.preset}-${spec.seed}.glb`
+    activityLog.exportStep(`触发浏览器下载 ${filename}（${(blob.size / 1024).toFixed(1)} KB）`, {
+      filename,
+      bytes: blob.size,
+      mimeType: blob.type,
+      triangles: built.stats.triangles,
+    })
     downloadBlob(blob, filename)
     message(`已导出 ${filename}（${(blob.size / 1024).toFixed(1)} KB · ${fmt.format(built.stats.triangles)} 面）`)
   } catch (err) {
+    activityLog.exportStep(`石头 GLB 导出异常：${err instanceof Error ? err.message : String(err)}`, err, 'error')
     message(err instanceof Error ? `GLB 导出失败：${err.message}` : 'GLB 导出失败', true)
   }
 })
 
+const activityLogDrawer = mountActivityLogDrawer({
+  triggerButton: byId<HTMLButtonElement>('activity-log-btn'),
+  badgeElement: byId('al-badge'),
+  message: (text, err) => message(text, err, false),
+})
+
 // Expose clean automation & debug handle
+;(window as unknown as Record<string, unknown>).__activityLog = {
+  store: activityLog,
+  open: () => activityLogDrawer.open(),
+  close: () => activityLogDrawer.close(),
+  entries: () => activityLog.entries(),
+  counts: () => activityLog.counts(),
+  exportJson: () => activityLog.exportJson(),
+  exportText: () => activityLog.exportText(),
+  clear: () => activityLog.clear(),
+}
 ;(window as unknown as Record<string, unknown>).__rockStudio = {
   getSpec: () => parseRockSpec(spec),
   setPreset: (id: RockPresetId) => { loadPreset(id); return built?.stats },

@@ -98,6 +98,7 @@ function attachMiddleware(middlewares, rootDir) {
   const presetsFile = path.join(dir, 'presets.json')
   const overridesFile = path.join(dir, 'default-overrides.json')
   const hiddenShowcasesFile = path.join(dir, 'hidden-showcases.json')
+  const scenesFile = path.join(dir, 'scenes.json')
 
   // Built-in default preset overrides endpoint (rock + tree, scoped atomic merge)
   middlewares.use('/api/default-presets', (req, res, next) => {
@@ -187,6 +188,45 @@ function attachMiddleware(middlewares, rootDir) {
         const hiddenIds = normalizeIdList(parsed.hiddenIds)
         writeAtomicJson(dir, hiddenShowcasesFile, { schemaVersion: 1, hiddenIds })
         res.end(JSON.stringify({ ok: true, count: hiddenIds.length, hiddenIds }))
+      })
+      return
+    }
+
+    next()
+  })
+
+  // Saved Assembly Scene cases endpoint (Scene Assembly Studio)
+  middlewares.use('/api/scenes', (req, res, next) => {
+    const pathname = (req.url || '/').split('?')[0]
+    if (pathname !== '/' && pathname !== '') return next()
+
+    if (req.method === 'GET') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8')
+      res.setHeader('Cache-Control', 'no-store')
+      try {
+        if (!fs.existsSync(scenesFile)) {
+          res.end(JSON.stringify({ schemaVersion: 1, items: [] }))
+          return
+        }
+        const raw = fs.readFileSync(scenesFile, 'utf8')
+        JSON.parse(raw)
+        res.end(raw)
+      } catch (err) {
+        res.statusCode = 500
+        res.end(JSON.stringify({ error: String(err) }))
+      }
+      return
+    }
+
+    if (req.method === 'PUT' || req.method === 'POST') {
+      readJsonBody(req, res, parsed => {
+        if (!isPlainObject(parsed) || !Array.isArray(parsed.items)) {
+          res.statusCode = 400
+          res.end(JSON.stringify({ error: '需要包含 items 数组的场景案例库 JSON' }))
+          return
+        }
+        writeAtomicJson(dir, scenesFile, { schemaVersion: 1, items: parsed.items })
+        res.end(JSON.stringify({ ok: true, count: parsed.items.length }))
       })
       return
     }

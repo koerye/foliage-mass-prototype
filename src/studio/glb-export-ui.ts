@@ -9,6 +9,7 @@ import {
   type BakeResolution, type ExportGlbOptions,
 } from '../export-glb'
 import type { NormalMapConvention } from '../tree/wood-weld'
+import { activityLog } from './activity-log'
 
 export interface GlbExportHost {
   triggerButton: HTMLButtonElement
@@ -205,8 +206,14 @@ export function bindGlbExportPopover(host: GlbExportHost) {
         if (idx === 0) triggerDataUrlDownload(url, fname)
         else setTimeout(() => triggerDataUrlDownload(url, fname), idx * 120)
       })
+      activityLog.exportStep(`单独导出树干法线+AO贴图（${downloads.length} 张 PNG）`, {
+        size: opts.bakeBarkNormalSize,
+        convention: opts.bakeBarkNormalConvention,
+        files: downloads.map(([, f]) => f),
+      })
       host.message(`已独立导出 ${items.length * 2} 张烘焙贴图（Normal ${opts.bakeBarkNormalSize}² ${convTag.toUpperCase()} + Cavity AO PNG）`)
     } catch (error) {
+      activityLog.exportStep(`独立烘焙贴图导出失败：${error instanceof Error ? error.message : String(error)}`, error, 'error')
       host.message(error, true)
     } finally {
       refreshSummary()
@@ -250,6 +257,13 @@ export function bindGlbExportPopover(host: GlbExportHost) {
     try {
       const blob = await host.exportBlob(opts)
       const filename = host.getFilename(opts)
+      activityLog.exportStep(`触发浏览器下载 ${filename}（${(blob.size / 1024).toFixed(1)} KB）`, {
+        filename,
+        bytes: blob.size,
+        mimeType: blob.type,
+        materials: info.materials,
+        triangles: info.triangles,
+      })
       host.saveBlob(blob, filename)
       const modeTxt = opts.mode === 'merged' ? `整体合并（${info.materials.length} 材质槽）` : `独立分体（${info.meshCount} 网格）`
       const decorTxt = info.excludedDecorations > 0 ? `，已去除 ${info.excludedDecorations} 个装饰网格` : ''
@@ -259,6 +273,7 @@ export function bindGlbExportPopover(host: GlbExportHost) {
       host.message(`已导出 ${filename} · ${modeTxt}${decorTxt}${normalTxt}${windTxt}`)
       close()
     } catch (error) {
+      activityLog.exportStep(`确认导出 GLB 过程异常：${error instanceof Error ? error.message : String(error)}`, error, 'error')
       host.message(error, true)
     } finally {
       confirmBtn.disabled = false

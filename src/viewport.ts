@@ -125,6 +125,7 @@ export class Viewer {
     this.camera.right = scale / 2 * width / height
     this.camera.left = -this.camera.right
     this.camera.updateProjectionMatrix()
+    this.renderer.render(this.scene, this.camera)
   }
 
   setTree(config: TreeMassConfig, frame = false) {

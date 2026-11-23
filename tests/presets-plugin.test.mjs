@@ -180,4 +180,52 @@ describe('userPresetsPlugin (Vite disk persistence middleware)', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  it('persists saved Scene Assembly cases atomically on /api/scenes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'veg-scenes-'))
+    try {
+      const plugin = userPresetsPlugin()
+      plugin.configResolved({ root: dir })
+      const routes = {}
+      plugin.configureServer({
+        middlewares: {
+          use: (p, fn) => { routes[p] = fn },
+        },
+      })
+      const mw = routes['/api/scenes']
+      expect(mw).toBeTypeOf('function')
+
+      const callApi = (method, url, body) => new Promise((resolve) => {
+        const req = Object.assign(new EventEmitter(), { method, url })
+        const res = {
+          statusCode: 200,
+          setHeader: () => {},
+          end: (chunk) => resolve({ status: res.statusCode, body: chunk ?? '' }),
+        }
+        mw(req, res, () => resolve({ status: 404, body: 'NEXT' }))
+        if (method === 'PUT' || method === 'POST') {
+          queueMicrotask(() => {
+            if (body !== undefined) req.emit('data', Buffer.from(body))
+            req.emit('end')
+          })
+        }
+      })
+
+      expect(JSON.parse((await callApi('GET', '/')).body)).toEqual({ schemaVersion: 1, items: [] })
+      expect((await callApi('PUT', '/', JSON.stringify({ items: 'bad' }))).status).toBe(400)
+
+      const put = await callApi('PUT', '/', JSON.stringify({
+        schemaVersion: 1,
+        items: [{ id: 'scene-1', name: '林间孤树地块' }],
+      }))
+      expect(put.status).toBe(200)
+      expect(JSON.parse(put.body)).toEqual({ ok: true, count: 1 })
+
+      const onDisk = JSON.parse(await readFile(join(dir, 'user-presets', 'scenes.json'), 'utf8'))
+      expect(onDisk.items[0].name).toBe('林间孤树地块')
+      expect(JSON.parse((await callApi('GET', '/')).body).items[0].id).toBe('scene-1')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })

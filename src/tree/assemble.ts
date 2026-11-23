@@ -10,7 +10,7 @@ import { buildFronds } from './fronds'
 import { buildGround } from './ground'
 import { applyCustomLeafNormals, isCustomNormalActive } from './leaf-normals'
 import { buildPalmFronds, buildPalmWood } from './palm'
-import { buildSkeleton, hasGeometricEdit, hasGlobalBranchOffset } from './skeleton'
+import { buildSkeleton, hasGeometricEdit, hasGlobalBranchOffset, type Skeleton } from './skeleton'
 import type { TreeSpec } from './spec'
 import { buildWishingAccents } from './wishing-accents'
 import { buildWood } from './wood'
@@ -91,9 +91,13 @@ export interface TreeTextures {
   wildrose?: Texture
 }
 
-export function buildTree(spec: TreeSpec, textures: TreeTextures) {
+export function buildTree(
+  spec: TreeSpec,
+  textures: TreeTextures,
+  options: { skeleton?: Skeleton; foliage?: Mesh } = {},
+) {
   const started = performance.now()
-  const skeleton = buildSkeleton(spec)
+  const skeleton = options.skeleton ?? buildSkeleton(spec)
   const env = skeleton.envelope
   const group = new Group()
   group.name = 'Vegetation Studio / ' + spec.name + ' / ' + spec.seed
@@ -162,7 +166,14 @@ export function buildTree(spec: TreeSpec, textures: TreeTextures) {
     ...(keepCustomNormal !== undefined ? { keepNormal: keepCustomNormal } : {}),
   })
 
-  if (spec.kind === 'broadleaf') {
+  if (spec.kind === 'broadleaf' && options.foliage) {
+    const foliage = options.foliage
+    foliage.userData.role = 'foliage'
+    meshes.push(foliage)
+    const position = foliage.geometry.getAttribute('position')
+    stats.triangles += (foliage.geometry.index?.count ?? position.count) / 3
+    if (spec.flowers.enabled) sites = sitesFromGeometry(foliage.geometry, env, spec.leaves.leafSize)
+  } else if (spec.kind === 'broadleaf') {
     const carriers = skeleton.branches.filter(b => b.role !== 'dead' && !b.bare)
     const hasBranchGeomEdit = hasGlobalBranchOffset(spec.branches) || Boolean(spec.branchEdits?.some(hasGeometricEdit))
     const lift = Math.max(0, Math.min(.75, spec.crown.canopyLift ?? 0))
