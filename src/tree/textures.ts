@@ -1,6 +1,9 @@
 ﻿// Procedural pine-bough card texture: stem at top centre (v = 1), hanging
 // feathered pine frond tapering to a pointed tip at the bottom (v = 0).
-import { CanvasTexture, SRGBColorSpace } from 'three'
+import {
+  CanvasTexture, DataTexture, LinearFilter, LinearMipmapLinearFilter,
+  MathUtils, RGBAFormat, SRGBColorSpace,
+} from 'three'
 import { dilateAlphaCanvas } from '../broadleaf/leaf-material'
 import { rng } from '../shape'
 
@@ -986,4 +989,411 @@ export function makeStemLeafTexture(size = 256) {
   }
 
   return canvasTexture(canvas, 'placeholder_stem_leaf')
+}
+
+const PAINTED_GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
+
+/** Neutral pigment painterly foliage cluster card (256×256 DataTexture):
+ *  - Solid connected gouache core (eliminates internal card noise when overlapping)
+ *  - 114 mid pointed strokes + 47 separated outer pointed leaf tips (crisp hand-painted silhouette)
+ *  - Transparent texels pre-filled with bright neutral pigment (246) for zero-halo mipmapped alpha cutout! */
+export function makePaintedClusterTexture(size = 256): DataTexture {
+  const pixels = new Uint8ClampedArray(size * size * 4)
+  pixels.fill(246)
+  for (let i = 3; i < pixels.length; i += 4) pixels[i] = 0
+  const random = rng(67327)
+  const scale = size / 256
+
+  function stroke(x: number, y: number, rx: number, ry: number, angle: number, brightness: number, pointed = false) {
+    const sx = x * scale, sy = y * scale, srx = rx * scale, sry = ry * scale
+    const cos = Math.cos(angle)
+    const sin = Math.sin(angle)
+    const extent = Math.max(srx, sry) * 1.12
+    const left = Math.max(0, Math.floor(sx - extent))
+    const right = Math.min(size - 1, Math.ceil(sx + extent))
+    const top = Math.max(0, Math.floor(sy - extent))
+    const bottom = Math.min(size - 1, Math.ceil(sy + extent))
+    for (let py = top; py <= bottom; py++) {
+      for (let px = left; px <= right; px++) {
+        const dx = px - sx
+        const dy = py - sy
+        const u = (dx * cos + dy * sin) / srx
+        const v = (dy * cos - dx * sin) / sry
+        const distance = pointed
+          ? Math.hypot(u, v / (1 - .42 * Math.min(1, Math.abs(u))))
+          : Math.hypot(u, v) - .035 * Math.sin(u * 13 + v * 7) - .035 * Math.sin(v * 12 - u * 5)
+        const coverage = MathUtils.clamp(.5 + (1 - distance) * Math.min(srx, sry), 0, 1)
+        if (coverage === 0) continue
+        const i = (py * size + px) * 4
+        const base = pixels[i + 3] > 0 ? pixels[i] : brightness
+        const pigment = MathUtils.lerp(base, brightness, coverage)
+        pixels[i] = pixels[i + 1] = pixels[i + 2] = pigment
+        pixels[i + 3] = Math.max(pixels[i + 3], coverage * 255)
+      }
+    }
+  }
+
+  stroke(125, 142, 84, 64, -.23, 235)
+  stroke(99, 105, 55, 67, -.61, 244)
+  stroke(155, 111, 65, 56, .36, 249)
+  stroke(113, 169, 51, 47, .32, 245)
+  stroke(163, 154, 49, 46, -.47, 237)
+  for (let i = 0; i < 114; i++) {
+    const angle = random() * Math.PI * 2
+    const radius = .34 + random() * .62
+    const irregularity = .91 + .07 * Math.sin(angle * 5 + .4) + .045 * Math.cos(angle * 8)
+    const x = 125 + Math.cos(angle) * 95 * radius * irregularity
+    const y = 127 + Math.sin(angle) * 91 * radius * irregularity
+    stroke(x, y, 5 + random() * 9, 2 + random() * 5, angle + (random() - .5) * 2.6, 224 + random() * 31, true)
+  }
+  for (let i = 0; i < 47; i++) {
+    const angle = i * PAINTED_GOLDEN_ANGLE + random() * .25
+    const radius = .88 + random() * .24
+    const x = 125 + Math.cos(angle) * 96 * radius
+    const y = 127 + Math.sin(angle) * 94 * radius
+    stroke(x, y, 7 + random() * 11, 2 + random() * 4.5, angle + (random() - .5) * 1.2, 232 + random() * 23, true)
+  }
+
+  const tex = new DataTexture(new Uint8Array(pixels), size, size, RGBAFormat)
+  tex.name = 'placeholder_painted_cluster'
+  tex.colorSpace = SRGBColorSpace
+  tex.minFilter = LinearMipmapLinearFilter
+  tex.magFilter = LinearFilter
+  tex.generateMipmaps = true
+  tex.anisotropy = 4
+  tex.needsUpdate = true
+  return tex
+}
+
+/** Fine-leaved airy woodland botanical spray (512×512 Alpha CanvasTexture):
+ *  - Delicate branching twig network carrying ~195 crisp small ovate/elliptical deciduous micro-leaflets
+ *    grouped into 19 organic scalloped sub-clusters (zero spiky comb bristles!)
+ *  - 3 depth passes (cool shaded back leaves -> twigs weaving through -> bright mid & sunlit crown leaflets)
+ *    for built-in SpeedTree-grade micro-volume & ~42% lacy negative space for dappled filigree shadows
+ *  - Clean bright neutral-celadon values so vertex tintInner/tintOuter renders both vibrant deep-emerald-to-lime
+ *    tall woodland trees AND sculptural sunlit olive bonsai cloud pads cleanly. */
+export function makeFeatherySprayTexture(size = 512) {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = size
+  const g = canvas.getContext('2d')!
+  const s = size / 512
+  const random = rng(78419)
+
+  // Draw one plump ovate/elliptical deciduous micro-leaflet (base at origin, pointing along +X)
+  const drawLeaflet = (x: number, y: number, len: number, wid: number, angle: number, lum: number, cool = 0) => {
+    g.save()
+    g.translate(x * s, y * s)
+    g.rotate(angle)
+    const L = len * s
+    const W = wid * s
+
+    const baseV = Math.round(MathUtils.clamp(lum * 194, 96, 224))
+    const tipV = Math.round(MathUtils.clamp(lum * 250, 134, 255))
+    const grad = g.createLinearGradient(0, 0, L, 0)
+    grad.addColorStop(0, `rgb(${Math.round(baseV * (.84 - cool * .10))}, ${baseV}, ${Math.round(baseV * (.74 + cool * .12))})`)
+    grad.addColorStop(.55, `rgb(${Math.round(tipV * (.90 - cool * .06))}, ${tipV}, ${Math.round(tipV * (.78 + cool * .08))})`)
+    grad.addColorStop(1, `rgb(${Math.round(tipV * .97)}, ${Math.min(255, tipV + 4)}, ${Math.round(tipV * .82)})`)
+
+    g.fillStyle = grad
+    g.beginPath()
+    g.moveTo(0, 0)
+    g.bezierCurveTo(L * .22, -W * .88, L * .68, -W * .76, L, 0)
+    g.bezierCurveTo(L * .68, W * .76, L * .22, W * .88, 0, 0)
+    g.closePath()
+    g.fill()
+
+    // Soft two-half fold shade so tiny leaflets catch sparkling specular-like contrast
+    g.fillStyle = `rgba(34, 52, 26, ${(.14 + cool * .08).toFixed(2)})`
+    g.beginPath()
+    g.moveTo(0, 0)
+    g.bezierCurveTo(L * .22, W * .88, L * .68, W * .76, L, 0)
+    g.lineTo(0, 0)
+    g.closePath()
+    g.fill()
+
+    if (lum > .76) {
+      g.strokeStyle = 'rgba(255, 255, 226, 0.34)'
+      g.lineWidth = Math.max(.65, 1.0 * s)
+      g.lineCap = 'round'
+      g.beginPath()
+      g.moveTo(L * .10, 0)
+      g.lineTo(L * .76, 0)
+      g.stroke()
+    }
+    g.restore()
+  }
+
+  // Branching twig skeleton (drawn between Pass 0 deep leaves & Pass 1/2 front leaves)
+  const twigSegs: [number, number, number, number, number, number, number][] = [
+    // [x0, y0, cx, cy, x1, y1, width]
+    [256, 474, 252, 330, 258, 120, 3.8],
+    [254, 412, 188, 372, 114, 332, 2.7],
+    [257, 404, 326, 366, 398, 324, 2.7],
+    [253, 330, 166, 276, 94, 224, 2.6],
+    [257, 320, 344, 270, 418, 218, 2.6],
+    [254, 236, 186, 178, 134, 128, 2.3],
+    [257, 228, 326, 172, 378, 122, 2.3],
+    [164, 280, 132, 294, 96, 286, 1.9],
+    [346, 274, 380, 288, 416, 280, 1.9],
+    [186, 184, 166, 146, 152, 102, 1.8],
+    [324, 178, 346, 142, 362, 98, 1.8],
+    [255, 170, 234, 116, 224, 68, 1.9],
+    [257, 166, 280, 114, 292, 72, 1.9],
+  ]
+
+  // 19 organic micro-leaf cloudlets distributed in a natural lacy scalloped bouquet (zero spiky sticks!)
+  interface Cloudlet { x: number; y: number; r: number; n: number; scale: number; biasAng: number }
+  const cloudlets: Cloudlet[] = [
+    // Crown apex bouquet
+    { x: 256, y: 82, r: 42, n: 12, scale: .92, biasAng: -Math.PI / 2 },
+    { x: 204, y: 106, r: 38, n: 10, scale: .88, biasAng: -2.05 },
+    { x: 310, y: 102, r: 38, n: 10, scale: .88, biasAng: -1.08 },
+    // Upper-left & upper-right lacy shoulder cloudlets
+    { x: 142, y: 142, r: 44, n: 11, scale: .92, biasAng: -2.35 },
+    { x: 370, y: 138, r: 44, n: 11, scale: .92, biasAng: -.78 },
+    { x: 256, y: 158, r: 46, n: 12, scale: .96, biasAng: -Math.PI / 2 },
+    // Mid-crown rich scalloped plumes (leaving subtle breathing pores around center)
+    { x: 104, y: 218, r: 46, n: 12, scale: .96, biasAng: -2.65 },
+    { x: 184, y: 214, r: 44, n: 11, scale: .98, biasAng: -2.18 },
+    { x: 326, y: 210, r: 44, n: 11, scale: .98, biasAng: -.96 },
+    { x: 408, y: 212, r: 46, n: 12, scale: .96, biasAng: -.48 },
+    { x: 255, y: 248, r: 48, n: 12, scale: 1.00, biasAng: -Math.PI / 2 },
+    // Lower-mid wide wings
+    { x: 102, y: 294, r: 42, n: 10, scale: .92, biasAng: 3.00 },
+    { x: 410, y: 288, r: 42, n: 10, scale: .92, biasAng: .12 },
+    { x: 174, y: 312, r: 44, n: 11, scale: .95, biasAng: -2.42 },
+    { x: 338, y: 306, r: 44, n: 11, scale: .95, biasAng: -.72 },
+    // Lower skirt cloudlets (darker shaded understory)
+    { x: 126, y: 356, r: 38, n: 9, scale: .86, biasAng: 2.75 },
+    { x: 386, y: 350, r: 38, n: 9, scale: .86, biasAng: .38 },
+    { x: 210, y: 382, r: 38, n: 9, scale: .86, biasAng: -2.35 },
+    { x: 302, y: 378, r: 38, n: 9, scale: .86, biasAng: -.80 },
+  ]
+
+  // Deterministic leaf list split across 3 depth passes for rich 3D micro-shading
+  interface LeafSpec { x: number; y: number; len: number; wid: number; ang: number; lum: number; cool: number; layer: 0 | 1 | 2 }
+  const items: LeafSpec[] = []
+  for (const cl of cloudlets) {
+    const heightLum = MathUtils.clamp(1 - cl.y / 480, 0, 1) * .20
+    for (let i = 0; i < cl.n; i++) {
+      const a = (i / cl.n) * Math.PI * 2 + (random() - .5) * .65
+      const rad = Math.sqrt(random()) * cl.r
+      const lx = cl.x + Math.cos(a) * rad
+      const ly = cl.y + Math.sin(a) * rad * .86
+      // Radiate softly from cloudlet core blended with twig growth direction (zero linear comb lines!)
+      const outAng = Math.atan2(ly - cl.y, lx - cl.x)
+      const mix = rad / Math.max(1, cl.r)
+      const ang = mix > .35
+        ? outAng + (random() - .5) * .72
+        : cl.biasAng + (random() - .5) * 1.45
+      const layer: 0 | 1 | 2 = i < cl.n * .32 ? 0 : (i < cl.n * .74 ? 1 : 2)
+      const len = (layer === 0 ? 27 : layer === 1 ? 24 : 19) * cl.scale * (.80 + random() * .40)
+      const wid = len * (.54 + random() * .16)
+      const baseLum = layer === 0 ? .52 : layer === 1 ? .82 : 1.04
+      const lum = baseLum + heightLum + (random() - .5) * .12
+      const cool = layer === 0 ? .85 : layer === 1 ? .22 : 0
+      items.push({ x: lx, y: ly, len, wid, ang, lum, cool, layer })
+    }
+  }
+
+  // Pass 0: deep back shaded micro-leaflets behind twigs
+  for (const it of items) {
+    if (it.layer === 0) drawLeaflet(it.x, it.y, it.len, it.wid, it.ang, it.lum, it.cool)
+  }
+
+  // Delicate dark olive-brown branching twigs weaving between back & front foliage
+  g.strokeStyle = 'rgba(84, 68, 44, 0.86)'
+  g.lineCap = 'round'
+  for (const [x0, y0, cx, cy, x1, y1, w] of twigSegs) {
+    g.lineWidth = w * s
+    g.beginPath()
+    g.moveTo(x0 * s, y0 * s)
+    g.quadraticCurveTo(cx * s, cy * s, x1 * s, y1 * s)
+    g.stroke()
+  }
+
+  // Pass 1 & 2: mid body & crisp sunlit outer micro-leaflets
+  for (const layer of [1, 2] as const) {
+    for (const it of items) {
+      if (it.layer === layer) drawLeaflet(it.x, it.y, it.len, it.wid, it.ang, it.lum, it.cool)
+    }
+  }
+
+  return canvasTexture(canvas, 'procedural_feathery_spray')
+}
+
+/** Symmetrical, sharply pointed stylized lanceolate bamboo blade.
+ *  Petiole sits at top-center (0.5, 0.015), apex at bottom-center (0.5, 0.985),
+ *  with crisp midrib highlight, delicate parallel veins, and subtle two-plane V-fold shading. */
+export function makeBambooLeafTexture(size = 512) {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = size
+  const g = canvas.getContext('2d')!
+  g.scale(size, size)
+
+  const traceBlade = () => {
+    g.beginPath()
+    g.moveTo(.5, .012)
+    g.bezierCurveTo(.28, .10, .09, .22, .095, .36)
+    g.bezierCurveTo(.105, .56, .31, .79, .5, .988)
+    g.bezierCurveTo(.69, .79, .895, .56, .905, .36)
+    g.bezierCurveTo(.91, .22, .72, .10, .5, .012)
+    g.closePath()
+  }
+
+  // Luminous base-to-tip botanical gradient (rich saturated base -> bright sunlit chartreuse tip)
+  const pigment = g.createLinearGradient(.5, .012, .5, .988)
+  pigment.addColorStop(0, '#82ab66')
+  pigment.addColorStop(.26, '#b4db8a')
+  pigment.addColorStop(.60, '#daf2b0')
+  pigment.addColorStop(.86, '#edf9c4')
+  pigment.addColorStop(1, '#f6fcd4')
+  g.fillStyle = pigment
+  traceBlade()
+  g.fill()
+
+  // Clip interior detail cleanly inside blade silhouette
+  g.save()
+  traceBlade()
+  g.clip()
+
+  // Crisp two-plane stylized V-fold shading across central midrib
+  g.fillStyle = 'rgba(42, 74, 24, .22)'
+  g.fillRect(0, 0, .5, 1)
+  g.fillStyle = 'rgba(255, 255, 210, .16)'
+  g.fillRect(.5, 0, .5, 1)
+
+  // Soft edge translucency highlight near upper sunlit margins
+  const edgeGlow = g.createRadialGradient(.5, .44, .06, .5, .48, .44)
+  edgeGlow.addColorStop(0, 'rgba(255, 255, 230, 0)')
+  edgeGlow.addColorStop(1, 'rgba(246, 255, 196, .15)')
+  g.fillStyle = edgeGlow
+  g.fillRect(0, 0, 1, 1)
+
+  // Delicate parallel bamboo blade veins following the tapered silhouette
+  g.lineCap = 'round'
+  for (const offset of [-.24, -.16, -.08, .08, .16, .24]) {
+    g.strokeStyle = offset < 0 ? 'rgba(72, 104, 44, .14)' : 'rgba(252, 255, 212, .20)'
+    g.lineWidth = .0055
+    g.beginPath()
+    g.moveTo(.5 + offset * .15, .04)
+    g.bezierCurveTo(
+      .5 + offset * 1.15, .30,
+      .5 + offset * .95, .62,
+      .5 + offset * .12, .93,
+    )
+    g.stroke()
+  }
+
+  // Crisp tapering central midrib highlight running cleanly from petiole to apex
+  const midribGrad = g.createLinearGradient(.5, .016, .5, .97)
+  midribGrad.addColorStop(0, 'rgba(240, 248, 198, .88)')
+  midribGrad.addColorStop(.55, 'rgba(252, 255, 218, .84)')
+  midribGrad.addColorStop(1, 'rgba(255, 255, 230, .42)')
+  g.fillStyle = midribGrad
+  g.beginPath()
+  g.moveTo(.489, .018)
+  g.lineTo(.511, .018)
+  g.lineTo(.504, .955)
+  g.lineTo(.496, .955)
+  g.closePath()
+  g.fill()
+
+  g.restore()
+
+  const texture = canvasTexture(canvas, 'procedural_bamboo_blade')
+  texture.userData.bambooBlade = true
+  return texture
+}
+
+// UV-centred pigments and veins. The lotus geometry owns the edge and optional slit.
+export function makeLotusLeafTexture(size = 512) {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = size
+  const g = canvas.getContext('2d')!
+  const random = rng(9241)
+  const center = size * .5
+  const radius = size * .47
+
+  const wash = g.createRadialGradient(center, center, 0, center, center, radius)
+  wash.addColorStop(0, '#d8e3cd')
+  wash.addColorStop(.19, '#e6eedf')
+  wash.addColorStop(.65, '#e6eddb')
+  wash.addColorStop(.92, '#eaf1df')
+  wash.addColorStop(1, '#e1e9cc')
+  g.fillStyle = wash
+  g.fillRect(0, 0, size, size)
+
+  for (let i = 0; i < 70; i++) {
+    const x = random() * size, y = random() * size
+    const r = size * (.014 + random() * .095)
+    const cloud = g.createRadialGradient(x, y, 0, x, y, r)
+    cloud.addColorStop(0, i % 3 === 0 ? 'rgba(255,255,234,.23)' : 'rgba(152,175,147,.095)')
+    cloud.addColorStop(1, 'rgba(186,205,174,0)')
+    g.fillStyle = cloud
+    g.fillRect(x - r, y - r, 2 * r, 2 * r)
+  }
+
+  g.lineCap = 'round'
+  for (let i = 0; i < 15; i++) {
+    const a = (i + (random() - .5) * .52) * Math.PI * 2 / 15
+    const end = radius * (.9 + random() * .1)
+    const bend = (random() - .5) * .15
+    const point = (r: number, angle: number) => [center + Math.cos(angle) * r, center + Math.sin(angle) * r] as const
+    g.strokeStyle = 'rgba(255,255,226,.78)'
+    g.lineWidth = size * (.0035 + random() * .0017)
+    g.beginPath()
+    g.moveTo(...point(end * .035, a))
+    g.quadraticCurveTo(...point(end * .55, a + bend), ...point(end, a))
+    g.stroke()
+    g.strokeStyle = 'rgba(248,252,226,.47)'
+    g.lineWidth = size * .00155
+    for (const side of [-1, 1]) {
+      const root = end * (.48 + random() * .2)
+      g.beginPath()
+      g.moveTo(...point(root, a + bend * .42))
+      g.quadraticCurveTo(...point(end * .79, a + side * .095), ...point(end * .95, a + side * .14))
+      g.stroke()
+    }
+  }
+
+  const hub = g.createRadialGradient(center, center, 0, center, center, size * .038)
+  hub.addColorStop(0, 'rgba(255,255,230,1)')
+  hub.addColorStop(1, 'rgba(255,255,234,0)')
+  g.fillStyle = hub
+  g.fillRect(center - size * .04, center - size * .04, size * .08, size * .08)
+  return canvasTexture(canvas, 'placeholder_lotus_leaf')
+}
+
+// Narrow pale striations follow the petal's longitudinal UVs.
+export function makeLotusPetalTexture(size = 512) {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = size
+  const g = canvas.getContext('2d')!
+  const center = size * .5
+  const wash = g.createLinearGradient(0, size, 0, 0)
+  wash.addColorStop(0, '#fff5e9')
+  wash.addColorStop(.3, '#fffafa')
+  wash.addColorStop(.70, '#f8edf0')
+  wash.addColorStop(1, '#e9dce2')
+  g.fillStyle = wash
+  g.fillRect(0, 0, size, size)
+
+  const glow = g.createRadialGradient(center, size * .67, 0, center, size * .53, size * .41)
+  glow.addColorStop(0, 'rgba(255,255,255,.64)')
+  glow.addColorStop(1, 'rgba(255,255,255,0)')
+  g.fillStyle = glow
+  g.fillRect(0, 0, size, size)
+
+  g.lineCap = 'round'
+  for (let i = -4; i <= 4; i++) {
+    const spread = i * size * .053
+    g.strokeStyle = i === 0 ? 'rgba(255,255,255,.54)' : 'rgba(210,186,202,.22)'
+    g.lineWidth = size * .0027
+    g.beginPath()
+    g.moveTo(center + i * size * .006, size * .95)
+    g.bezierCurveTo(center + spread * .82, size * .68, center + spread, size * .38, center + i * size * .006, size * .10)
+    g.stroke()
+  }
+  return canvasTexture(canvas, 'placeholder_lotus_petal')
 }

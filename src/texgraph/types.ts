@@ -148,6 +148,14 @@ export interface TextureGraph {
   edges: GraphEdge[]
 }
 
+/** Provenance metadata attached to a Three.js Texture (`tex.userData.texGraphSource`)
+ *  so clicking「节点编辑」reopens the exact active node graph / library item instead of a blank default. */
+export interface TextureGraphSource {
+  graph?: TextureGraph
+  savedId?: string
+  templateId?: string
+}
+
 /** Evaluated grayscale single-channel image (values typically 0..1). */
 export interface GrayBuffer {
   kind: 'gray'
@@ -213,6 +221,9 @@ export const slotLabels: Record<EditableTextureSlot, string> = {
   needle: '松针叶形卡',
   drape: '松针垂片',
   palm: '棕榈叶',
+  bamboo: '竹叶簇贴图',
+  lotusLeaf: '荷叶圆形贴图',
+  lotusPetal: '荷花花瓣贴图',
   grass: '草叶贴图',
   fern: '蕨叶贴图',
   flower: '外层花簇',
@@ -232,7 +243,7 @@ export const nodeCategoryLabels: Record<NodeCategory, string> = {
 export function defaultCategoryForSlot(slot: EditableTextureSlot): TextureCategory {
   if (slot === 'bark') return 'bark'
   if (slot === 'needle' || slot === 'drape') return 'needle'
-  if (slot === 'flower' || slot === 'blossom') return 'flower'
+  if (slot === 'flower' || slot === 'blossom' || slot === 'lotusPetal') return 'flower'
   if (slot === 'grass' || slot === 'fern') return 'grass'
   return 'leaf'
 }

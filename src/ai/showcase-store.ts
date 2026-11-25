@@ -69,38 +69,68 @@ export function createHiddenShowcaseStore(options: HiddenShowcaseStoreOptions): 
     }
   }
 
-  const writeLocal = () => {
+  const writeLocal = (ids: readonly string[] = [...hidden]) => {
     if (!storage) return
     try {
-      storage.setItem(storageKey, JSON.stringify({ schemaVersion: 1, hiddenIds: [...hidden] }))
+      storage.setItem(storageKey, JSON.stringify({ schemaVersion: 1, hiddenIds: [...ids] }))
     } catch {
       // Ignore quota failures when disk persistence is active
     }
   }
 
-  const writeRemote = async (): Promise<boolean> => {
-    if (!apiUrl || !fetcher) return false
+  const writeRemote = async (ids: readonly string[]): Promise<{ ok: boolean; error?: string }> => {
+    if (!apiUrl || !fetcher) return { ok: false }
     try {
       const resp = await fetcher(apiUrl, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schemaVersion: 1, hiddenIds: [...hidden] }),
+        body: JSON.stringify({ schemaVersion: 1, hiddenIds: [...ids] }),
       })
       if (resp.ok) {
         mode = 'file'
-        return true
+        return { ok: true }
       }
-    } catch {
-      // Offline / static fallback to localStorage
+      let msg = `HTTP ${resp.status}`
+      try { const j = await resp.json() as { error?: string }; if (j?.error) msg = j.error } catch {}
+      return { ok: false, error: msg }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
-    return false
   }
 
-  const persist = async () => {
-    writeLocal()
-    await writeRemote()
+  let writeChain: Promise<void> = Promise.resolve()
+  const runSerialized = <T>(op: () => Promise<T>): Promise<T> => {
+    const run = writeChain.then(op)
+    writeChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  const persistSnapshot = async (snapshot: string[]) => {
+    if (mode === 'file') {
+      const res = await writeRemote(snapshot)
+      if (!res.ok) throw new Error(`内置案例隐藏状态写入本地磁盘失败：${res.error || '服务不可用'}`)
+      writeLocal(snapshot)
+    } else {
+      writeLocal(snapshot)
+      await writeRemote(snapshot)
+    }
     notify()
   }
+
+  const mutateWithRollback = <T>(apply: () => { changed: boolean; result: T }): Promise<T> =>
+    runSerialized(async () => {
+      const prev = [...hidden]
+      const { changed, result } = apply()
+      if (!changed) return result
+      try {
+        await persistSnapshot([...hidden])
+      } catch (err) {
+        hidden.clear()
+        for (const id of prev) hidden.add(id)
+        throw err
+      }
+      return result
+    })
 
   // Hydrate synchronously from localStorage for zero-flicker initial render
   for (const id of readLocal()) hidden.add(id)
@@ -122,7 +152,7 @@ export function createHiddenShowcaseStore(options: HiddenShowcaseStoreOptions): 
         writeLocal()
         if (JSON.stringify([...hidden]) !== prevSnap) notify()
       } else if (hidden.size > 0) {
-        await writeRemote()
+        await writeRemote([...hidden])
       }
     } catch {
       mode = 'local'
@@ -138,25 +168,28 @@ export function createHiddenShowcaseStore(options: HiddenShowcaseStoreOptions): 
     hiddenCount: () => hidden.size,
     async hide(id: string) {
       await initPromise
-      if (!validSet.has(id) || hidden.has(id)) return false
-      hidden.add(id)
-      await persist()
-      return true
+      return mutateWithRollback(() => {
+        if (!validSet.has(id) || hidden.has(id)) return { changed: false, result: false }
+        hidden.add(id)
+        return { changed: true, result: true }
+      })
     },
     async restore(id: string) {
       await initPromise
-      if (!hidden.has(id)) return false
-      hidden.delete(id)
-      await persist()
-      return true
+      return mutateWithRollback(() => {
+        if (!hidden.has(id)) return { changed: false, result: false }
+        hidden.delete(id)
+        return { changed: true, result: true }
+      })
     },
     async restoreAll() {
       await initPromise
-      const count = hidden.size
-      if (count === 0) return 0
-      hidden.clear()
-      await persist()
-      return count
+      return mutateWithRollback(() => {
+        const count = hidden.size
+        if (count === 0) return { changed: false, result: 0 }
+        hidden.clear()
+        return { changed: true, result: count }
+      })
     },
     subscribe(listener: () => void) {
       listeners.add(listener)

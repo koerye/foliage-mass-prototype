@@ -1,13 +1,14 @@
 # Vegetation Studio & Rock Studio (`foliage-mass-prototype`)
 
 > **在线体验（GitHub Pages）**：
-> - **[打开经典树木工作台（主入口）](https://koerye.github.io/foliage-mass-prototype/)** — 全品类程序化植被、树干褶皱雕刻、SpeedTree 节点编辑、贴图节点工坊 v2、LOD 与 6 项 GLB 导出
+> - **[打开经典树木工作台（主入口）](https://koerye.github.io/foliage-mass-prototype/)** — 全品类程序化植被（含竹子/荷花/羽叶林木/卧枝盆景）、树干雕刻、SpeedTree 枝干/树叶/法线编辑、贴图节点工坊 v2、LOD 与 GLB/FBX 导出
+> - **[打开场景组装工作台（Scene Studio）](https://koerye.github.io/foliage-mass-prototype/scene.html)** — 自由摆放无限资产、直连树木工作台资产库、UE 风格刷草与地形材质笔刷（RVT 联动）、远景 LOD 与透明底抠图
 > - **[打开 AI 模式（丢图生成 & 案例库）](https://koerye.github.io/foliage-mass-prototype/ai.html)** — 面向 Agent / 拖图自动拆解多部件植物、抠图画笔、案例库与整体/单体编辑
 > - **[打开风格化石头工作台（Rock Studio）](https://koerye.github.io/foliage-mass-prototype/rock.html)** — 三层地质切面雕刻、厚涂 & 赛璐璐双着色风格、灰模/线框与 GLB 导出
 >
-> 💡 **本地运行推荐**：仓库内置了作者手调的 **14 套默认树木预设覆盖**（`user-presets/default-overrides.json`）与 **19 项程序贴图库**（`user-textures/library.json`），本地 `npm run dev` 启动后将通过 Vite 中间件自动加载并支持实时落盘保存。
+> 💡 **本地运行 & 桌面版**：仓库内置作者精修的 **14 套默认树木预设覆盖**、**个人预设库与场景案例**（`user-presets/`）及 **12 项程序贴图库**（`user-textures/library.json`），支持 Web（`npm run dev`）、Electron 桌面双模版（`npm run electron` / `npm run dist:win`）与内置 MCP 服务（`npm run mcp`）。
 
-一个基于 **TypeScript + Three.js + WebGL 2 + Vite** 构建的实时程序化 3D 植被与风格化石头创作工作台，面向游戏与风格化三维场景的资产生产。
+一个基于 **TypeScript + Three.js + WebGL 2 + Vite + Electron** 构建的实时程序化 3D 植被、岩石与场景组装创作工作台，面向游戏与风格化三维场景的资产生产。
 
 ---
 
@@ -34,8 +35,8 @@
 ## 核心功能
 
 ### 1. 多品类程序化植被生成 & 多排布花丛
-- **阔叶 / 观赏树**：多级分叉骨架、底冠露枝负空间（`canopyLift`）、云片冠层压平（`padFlatten`）、扭棱古干与贴地露根；内置圆冠、舒展、樱花盆景、红枫绯秋、垂柳轻丝、仙韵祈愿古树、绞缠枯树、扭纹古干等预设。
-- **针叶 / 棕榈 / 灌木 / 实体 3D 草叶 / 蕨类**：松树低面数折叠叶形面片、带节环与椰果簇的棕榈、无贴图纯几何实体 3D 草叶。
+- **阔叶 / 观赏树**：多级分叉骨架、底冠露枝负空间（`canopyLift`）、云片冠层压平（`padFlatten`）、扭棱古干与贴地露根；内置圆冠、舒展、羽叶高冠树（`feathery` 细腻微叶卡）、卧枝云片盆景、樱花盆景、红枫绯秋、垂柳轻丝、仙韵祈愿古树、绞缠枯树、扭纹古干等预设。
+- **竹子 / 荷花 / 针叶 / 棕榈 / 灌木 / 实体 3D 草叶 / 蕨类**：束腰双唇竹节与 V 折掌状叶扇竹丛（写实/Q 版）、挺水/浮叶荷花、松树折叠面片、带节环与椰果簇的棕榈、无贴图纯几何实体 3D 草叶。
 - **独立花丛模板（带杆 / 纯花）**：带植物杆模式自带植物学 Alpha 茎叶贴图槽，支持一键切换**球形圆丘 / 方形 / 长条花带 / 环形 / 列阵**等多种分布排布。
 
 ### 2. 树干高质感褶皱雕刻 v3 & 感知 HSL 实时换色
@@ -43,9 +44,10 @@
 - **所见即所得感知换色**：针对彩色手绘叶贴图与自定义树皮贴图提供感知 HSL 色相映射，拉动内外叶色与树皮色调所见即所得、不发灰发脏。
 - **3D 世界空间朝上青苔**：按世界法线与根沟积苔实时渲染厚涂青苔（`0 ms` GPU 实时滑块）。
 
-### 3. SpeedTree 风格节点编辑、竖向轮廓曲线与自定义法线
+### 3. SpeedTree 风格节点编辑、3D 树叶直接编辑与自定义法线
 - **树冠竖向轮廓曲线 & 全局枝条位移**：交互式镜像 SVG 曲线编辑器（默认 / 花瓶收腰 / 宝塔层级 / 伞盖宽顶 + 5 点实时拖拽），支持全局枝条起始高度、方位旋转与 XYZ 空间位移。
 - **SpeedTree 风格枝干节点模式**：3D 视口直接点选主干/主枝/侧枝，使用金色长度柄、同心仰角弧与 4 点 3D 样条塑形，支持**拖动绿色根点沿树干上下滑动（或 `Shift+拖拽` 自由 3D 偏移）**、单枝去叶、级联修剪（`Delete`）与 30 步撤销（`Ctrl+Z`）。
+- **🍃 树叶直接编辑（3D 补叶簇 + 树冠笔刷）**：支持点击枝干/树冠种植可 3D 拖拽的补叶簇（半径/压扁/密度/叶大小/局部染色），并提供 **增密 / 疏剪 / 放大缩小 / 局部染色 / 擦除** 5 款 3D 笔刷，全面兼容撤销、JSON、LOD 与 GLB/FBX 导出。
 - **树叶自定义法线编辑（Normal Transfer + 3D 笔刷）**：支持 6 种法线投射模式、拖拽 3D 青色投射球心、树冠表面 3D 梳向/提亮/球凸/平滑笔刷与 RGB 法线实时检视，导出 GLB 100% 保留自定义 `NORMAL`。
 
 ### 4. Substance 风格贴图节点工坊 v2 & 实时贴图库
@@ -60,16 +62,12 @@
 - **三层地质切面多面体裁切 + 面加权法线**：闭合凸多面体 + 跨倒角连续法线（零破缝），内置**厚涂风格化**（顶部沙/青苔/积雪覆层 + 棱角干扫）与**赛璐璐简面**（4 阶硬朗明暗 + 断续高光线）双着色模式。
 - **6 套即用预设**：沙顶切面岩、赛璐璐简面石、凿面碎棱岩、宽厚平棱巨石、森林青苔磐石、自然石堆组合，支持成品 / 灰模 / 线框切换、随机石形、JSON 读写与 GLB 导出。
 
-### 7. 内置默认预设覆盖落盘、四档 LOD 与 6 项硬核 GLB 导出
-- **全状态保存替换默认预设**：树木工作台与石头工作台均支持将调好的整株状态（含全参数、9 槽 PBR 贴图、节点编辑、自定义法线与灯光）一键保存覆盖本地 `user-presets/default-overrides.json`，并可随时一键「恢复出厂」。
-- **四档 / 目标面数自动 LOD**：一键切换「高模 / 标准游戏 / 手游轻量 / 远景 LOD」，或按目标三角面数二分自动压面。
-- **6 项工程级 GLB 导出**：
-  1. 整体合并导出（单网格多材质槽：`Mat_Tree_Bark` / `Mat_Foliage_*` 等）
-  2. 不合并（保留独立多部件层级）
-  3. 去除装饰类网格体（根草/磐石/飘带/落瓣等）
-  4. 烘焙 3D 朝上青苔与根部阴影进顶点色 `COLOR_0`
-  5. **高模雕刻树干 → 低模切线空间 Normal + Cavity AO 贴图自动烘焙**（支持 `512 / 1024 / 2048`、`OpenGL (+Y) / DirectX (-Y · UE)` 及独立 PNG 下载）
-  6. **导出引擎风动权重（`UV1 / TEXCOORD_1`）**，直接接入 Blender / Unity / Unreal Engine
+### 7. Scene Studio 场景组装、Electron 桌面端 + MCP 与工程级多格式导出
+- **场景组装工作台（`/scene.html`）**：自由摆放无限树木/花草/石头/AI 多部件场景，**双向直连树木工作台资产库**（`★ 我的库` + `🌳 树木资产库` 含自定义贴图与跨页热同步、支持选中植物一键存回树木预设库）；内置 UE 风格植被刷草笔刷、手绘地形材质笔刷（RVT 草色/法线实时融合）、远景自动 `THREE.LOD` 与参考图卷帘对比。
+- **Electron 桌面双模壳 & 内置 MCP 服务端**：支持热更新开发（`npm run electron:dev`）、一键打包 Windows 便携 `.exe`（`npm run dist:win`）与 23 个结构化 MCP 工具（`npm run mcp`），可直接由 AI 代理实时建树、调参、组装场景与截屏验收。
+- **全状态保存替换默认预设 & 多格式导出**：
+  - 支持 **GLB 合并/拆分**、**拆分 `glTF + textures/*.png`**、**标准二进制 `FBX 7.4 + textures/*.png`**、**一键 `LOD0~LOD3.zip`** 及四工作台统一 **透明底 PNG**；
+  - 支持默认程序化树皮自动烘焙 BaseColor + Normal PNG、实体 3D 草可选烘焙渐变贴图、独立 Worker 高模雕刻法线 + Cavity AO 烘焙（OpenGL/DirectX）与 `UV1 / TEXCOORD_1` 风动权重。
 
 ---
 
@@ -90,7 +88,8 @@ npm run dev
 
 | 入口路径 | 说明 |
 | --- | --- |
-| `/`（或 `/broadleaf.html`） | **经典树木工作台（主入口）**：全品类程序化植被、树干雕刻、节点/法线编辑、贴图工坊 v2、LOD 与预设库 |
+| `/`（或 `/broadleaf.html`） | **经典树木工作台（主入口）**：全品类程序化植被、树干雕刻、枝干/树叶/法线编辑、贴图工坊 v2、LOD 与预设库 |
+| `/scene.html` | **场景组装工作台（Scene Studio）**：多资产摆放、直连树木资产库、刷草/地形 RVT 笔刷、远景 LOD 与案例库 |
 | `/ai.html` | **AI 模式（空白工程）**：面向 Agent、拖入参考图生成多部件植物、案例库、抠图画笔 |
 | `/rock.html` | **风格化石头工作台（Rock Studio）**：切面雕刻、厚涂 & 赛璐璐双着色风格、随机石形与 GLB 导出 |
 | `/legacy.html` | **旧版工作台**：薄片阔叶与松树对照页面 |
@@ -99,19 +98,23 @@ Windows 用户也可以直接双击或运行 `start.cmd`：
 
 ```bat
 start.cmd            :: 默认启动经典树木工作台
+start.cmd scene      :: 启动场景组装工作台 (/scene.html)
 start.cmd ai         :: 启动 AI 模式 (/ai.html)
 start.cmd rock       :: 启动风格化石头工作台 (/rock.html)
-start.cmd sakura     :: 直达 AI 樱花盆景案例
 ```
 
-### 构建与测试
+### 构建、桌面打包与测试
 
 ```bash
 # TypeScript 类型检查 + Vite 生产构建
 npm run build
 
-# 运行 Vitest 单元测试套件（21 个测试文件 / 257 项）
+# 运行 Vitest 单元测试套件（27 个测试文件 / 349 项）
 npm test
+
+# 启动 Electron 桌面端 / 打包 Windows 便携版 EXE
+npm run electron
+npm run dist:win
 ```
 
 > 可选：如需运行 Python Playwright 浏览器视觉自动化检查（`tests/*_browser.py`），需本地安装 Chrome 以及 Python 的 `playwright` 与 `Pillow`。
@@ -124,28 +127,34 @@ npm test
 foliage-mass-prototype/
 ├── index.html                 # 经典程序化树木工作台主入口
 ├── broadleaf.html             # 经典树木工作台兼容入口
+├── scene.html                 # Scene Studio 场景组装工作台入口
 ├── ai.html                    # AI 识图多部件工作台入口
 ├── rock.html                  # Rock Studio 风格化石头工作台入口
 ├── legacy.html                # 旧版工作台入口
 ├── start.cmd                  # Windows 一键启动脚本
-├── user-presets/              # 作者手调的 14 套默认树木预设覆盖、个人预设与隐藏案例状态
-├── user-textures/             # 贴图工坊本地实时贴图库（含全通道 PBR 与 8 区橡叶图集）
+├── electron/                  # Electron 桌面双模壳与本地服务（app-server / main / preload）
+├── mcp/                       # 面向 AI Agent 的 MCP 服务端与 23 项结构化操控工具
+├── user-presets/              # 作者精修的 14 套默认树木预设覆盖、个人预设库与场景案例
+├── user-textures/             # 贴图工坊本地实时贴图库（12 项程序贴图与 PBR 资产）
 ├── src/
-│   ├── tree/                  # 统一程序化植物核心引擎（骨架/树干雕刻/无缝焊接/感知换色/法线/花丛/LOD 等）
+│   ├── tree/                  # 统一程序化植物核心引擎（骨架/树干雕刻/竹子/荷花/树叶编辑/法线/花丛/烘焙/LOD 等）
+│   ├── assembly/              # Scene Studio 场景组装引擎、刷草/地形 RVT 笔刷、案例与跨工作台同步桥
 │   ├── rock/                  # Rock Studio 风格化石头切面雕刻与厚涂/赛璐璐着色器
 │   ├── texgraph/              # Substance 风格节点贴图工坊 v2、Web Worker 求值核与参考图自动复刻引擎
-│   ├── studio/                # 工作台 UI、SpeedTree 节点/法线编辑器、预设库、GLB 6 项导出弹窗
+│   ├── studio/                # 工作台 UI、SpeedTree 枝干/树叶/法线编辑器、预设库、多格式导出弹窗与日志
 │   ├── ai/                    # AI 图像解析、抠图画笔、多部件场景与案例库
 │   ├── broadleaf/             # 叶片插片引擎、风格化 SSS/微风着色器与旧版工作台
-│   ├── export-glb.ts          # glTF/GLB 导出预处理、合批分槽、青苔/高模法线 AO 烘焙与 UV1 风动权重
-│   └── viewport.ts            # Three.js 视口、四机位、氛围光与微风驱动
+│   ├── export-glb.ts          # glTF/GLB 与拆分贴图导出、合批分槽、青苔/树皮烘焙与 UV1 风动权重
+│   ├── export-fbx.ts          # 标准二进制 FBX 7.4 + textures/*.png 导出管线
+│   ├── export-zip.ts          # 轻量标准 PKZIP 打包（拆分贴图包与 LOD0~LOD3.zip）
+│   └── viewport.ts            # Three.js 视口、四机位、透明抠图、氛围光与微风驱动
 ├── scripts/                   # Vite 本地持久化中间件（presets / textures）与无头贴图 CLI
 ├── presets/                   # 默认 JSON 预设文件
-├── public/showcases/          # AI 案例库 3D 封面缩略图
+├── public/showcases/          # 案例库 3D 封面缩略图
 ├── textures/                  # 内置占位与程序化贴图资源
 ├── experiments/               # 早期松杉枝叶薄片对比实验代码
-├── tests/                     # Vitest 单元测试（257 项）与 Playwright 浏览器验证脚本
-└── docs/                      # 算法笔记与展示截图
+├── tests/                     # Vitest 单元测试套件（27 个测试文件 / 349 项）
+└── docs/                      # 算法笔记、变更日志与展示截图
 ```
 
 ---

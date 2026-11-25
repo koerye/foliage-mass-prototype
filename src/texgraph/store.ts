@@ -1,7 +1,7 @@
 // Real-time Texture Library persistent store (shared between Classic Studio & AI Mode).
 // Dual persistence: local project disk (`user-textures/library.json` via `/api/textures`)
 // + localStorage mirror & offline static fallback.
-import type { EditableTextureSlot } from '../studio/texture-slots'
+import { editableTextureSlots, type EditableTextureSlot } from '../studio/texture-slots'
 import { cloneGraph, parseTextureGraph } from './nodes'
 import { resolveAtlasRegions } from './nodes-v2'
 import type { AtlasRegion, TextureCategory, TextureGraph } from './types'
@@ -87,7 +87,7 @@ function inferAtlasMeta(
 }
 
 const STORAGE_KEY = 'vegetation-studio:saved-textures:v1'
-const validSlots = new Set<string>(['bark', 'leaf', 'needle', 'drape', 'palm', 'grass', 'fern', 'flower', 'blossom'])
+const validSlots = new Set<string>(editableTextureSlots)
 const validCats = new Set<TextureCategory>(['leaf', 'bark', 'needle', 'flower', 'grass', 'other'])
 const safeDataUrlRe = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/
 
@@ -196,11 +196,16 @@ export interface TextureStoreOptions {
   storage?: StorageLike | null
   apiUrl?: string | null
   fetcher?: typeof fetch
+  /** Defer downloading full multi-MB library.json until ensureLoaded() is called (boot only fetches ~2 KB summary count). */
+  lazy?: boolean
 }
 
 export interface TextureLibraryStore {
   readonly storageMode: TextureStorageMode
+  readonly count: number
+  readonly isLoaded: boolean
   ready(): Promise<void>
+  ensureLoaded(): Promise<void>
   list(category?: TextureCategory): SavedTextureItem[]
   get(id: string): SavedTextureItem | undefined
   saveNew(input: SaveTextureInput): Promise<SavedTextureItem>
@@ -222,6 +227,9 @@ export function createTextureLibraryStore(options: TextureStoreOptions = {}): Te
 
   let items: SavedTextureItem[] = []
   let mode: TextureStorageMode = 'local'
+  let summaryCount = 0
+  let fullyLoaded = false
+  let fullLoadPromise: Promise<void> | undefined
   const listeners = new Set<() => void>()
 
   const notify = () => { for (const fn of listeners) fn() }
@@ -261,8 +269,8 @@ export function createTextureLibraryStore(options: TextureStoreOptions = {}): Te
     }
   }
 
-  const writeRemote = async (list: SavedTextureItem[]): Promise<boolean> => {
-    if (!apiUrl || !fetcher) return false
+  const writeRemote = async (list: SavedTextureItem[]): Promise<{ ok: boolean; error?: string }> => {
+    if (!apiUrl || !fetcher) return { ok: false }
     try {
       const resp = await fetcher(apiUrl, {
         method: 'PUT',
@@ -271,48 +279,172 @@ export function createTextureLibraryStore(options: TextureStoreOptions = {}): Te
       })
       if (resp.ok) {
         mode = 'file'
-        return true
+        return { ok: true }
       }
-    } catch { /* fallback to localStorage */ }
-    return false
-  }
-
-  const persist = async () => {
-    items = sortTextures(items)
-    writeLocal(items)
-    await writeRemote(items)
-    notify()
-  }
-
-  items = readLocal()
-
-  const initPromise = (async () => {
-    if (!apiUrl || !fetcher) return
-    try {
-      const resp = await fetcher(apiUrl, { cache: 'no-store' })
-      if (!resp.ok) return
-      const ct = resp.headers.get('content-type') || ''
-      if (!ct.includes('application/json')) return
-      const remoteItems = parseTextureLibrary(await resp.json())
-      mode = 'file'
-      const merged = mergeTextureLists(items, remoteItems)
-      const changed = merged.length !== items.length
-        || JSON.stringify(merged.map(x => [x.id, x.updatedAt, Boolean(x.normalDataUrl), Boolean(x.dataUrl)]))
-          !== JSON.stringify(items.map(x => [x.id, x.updatedAt, Boolean(x.normalDataUrl), Boolean(x.dataUrl)]))
-      items = merged
-      writeLocal(items)
-      if (merged.length !== remoteItems.length || merged.some((m, i) => remoteItems[i]?.id !== m.id || remoteItems[i]?.updatedAt !== m.updatedAt)) {
-        await writeRemote(items)
-      }
-      if (changed || mode === 'file') notify()
-    } catch {
-      mode = 'local'
+      let msg = `HTTP ${resp.status}`
+      try { const j = await resp.json() as { error?: string }; if (j?.error) msg = j.error } catch {}
+      return { ok: false, error: msg }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
-  })()
+  }
+
+  let writeChain: Promise<void> = Promise.resolve()
+  const runMutation = async <T>(
+    mutator: () => { nextItems: SavedTextureItem[]; result: T; changed?: boolean },
+  ): Promise<T> => {
+    await loadFull()
+    const run = writeChain.then(async () => {
+      const prevItems = items
+      const prevCount = summaryCount
+      const { nextItems, result, changed = true } = mutator()
+      if (!changed) return result
+      const sorted = sortTextures(nextItems)
+      try {
+        if (mode === 'file') {
+          // Disk is authoritative: do NOT push multi-MB Base64 textures into 5MB localStorage
+          const res = await writeRemote(sorted)
+          if (!res.ok) {
+            throw new Error(`贴图库写入本地磁盘失败：${res.error || '服务不可用'}`)
+          }
+          items = sorted
+          summaryCount = sorted.length
+        } else {
+          items = sorted
+          summaryCount = sorted.length
+          writeLocal(sorted)
+          await writeRemote(sorted)
+        }
+      } catch (err) {
+        items = prevItems
+        summaryCount = prevCount
+        throw err
+      }
+      notify()
+      return result
+    })
+    writeChain = run.then(() => {}, () => {})
+    return await run
+  }
+
+  if (!options.lazy) {
+    items = readLocal()
+    summaryCount = items.length
+  }
+
+  const loadFull = (): Promise<void> => {
+    if (fullyLoaded) return Promise.resolve()
+    if (fullLoadPromise) return fullLoadPromise
+    fullLoadPromise = (async () => {
+      if (options.lazy && items.length === 0) {
+        items = readLocal()
+      }
+      if (!apiUrl || !fetcher) {
+        fullyLoaded = true
+        summaryCount = items.length
+        return
+      }
+      try {
+        const resp = await fetcher(apiUrl, { cache: 'no-cache' })
+        if (!resp.ok) {
+          fullyLoaded = true
+          summaryCount = items.length
+          return
+        }
+        const ct = resp.headers.get('content-type') || ''
+        if (!ct.includes('application/json')) {
+          fullyLoaded = true
+          summaryCount = items.length
+          return
+        }
+        const persistedHeader = resp.headers.get('x-persisted')
+        const remoteItems = parseTextureLibrary(await resp.json())
+        mode = 'file'
+        fullyLoaded = true
+        if (persistedHeader === '1') {
+          items = remoteItems
+          summaryCount = items.length
+          notify()
+          return
+        }
+        if (persistedHeader === '0') {
+          if (items.length > 0) {
+            await writeRemote(items)
+          } else {
+            items = remoteItems
+          }
+          summaryCount = items.length
+          notify()
+          return
+        }
+        const merged = mergeTextureLists(items, remoteItems)
+        const changed = merged.length !== items.length
+          || JSON.stringify(merged.map(x => [x.id, x.updatedAt, Boolean(x.normalDataUrl), Boolean(x.dataUrl)]))
+            !== JSON.stringify(items.map(x => [x.id, x.updatedAt, Boolean(x.normalDataUrl), Boolean(x.dataUrl)]))
+        items = merged
+        summaryCount = items.length
+        writeLocal(items)
+        if (merged.length !== remoteItems.length || merged.some((m, i) => remoteItems[i]?.id !== m.id || remoteItems[i]?.updatedAt !== m.updatedAt)) {
+          await writeRemote(items)
+        }
+        if (changed || mode === 'file') notify()
+      } catch {
+        mode = 'local'
+        fullyLoaded = true
+        summaryCount = items.length
+      }
+    })()
+    return fullLoadPromise
+  }
+
+  const initPromise = options.lazy
+    ? (async () => {
+        if (!apiUrl || !fetcher) {
+          items = readLocal()
+          summaryCount = items.length
+          fullyLoaded = true
+          return
+        }
+        try {
+          const sep = apiUrl.includes('?') ? '&' : '?'
+          const resp = await fetcher(`${apiUrl}${sep}summary=1`, { cache: 'no-cache' })
+          if (!resp.ok) {
+            await loadFull()
+            return
+          }
+          const ct = resp.headers.get('content-type') || ''
+          if (!ct.includes('application/json')) {
+            await loadFull()
+            return
+          }
+          const doc = await resp.json() as { summary?: boolean; count?: number; items?: unknown[] }
+          mode = 'file'
+          if (doc && doc.summary === true && typeof doc.count === 'number') {
+            summaryCount = doc.count
+            notify()
+            return
+          }
+          // Fallback if server doesn't support ?summary=1 (e.g. static server)
+          items = parseTextureLibrary(doc)
+          summaryCount = items.length
+          fullyLoaded = true
+          notify()
+        } catch {
+          items = readLocal()
+          summaryCount = items.length
+          mode = 'local'
+          fullyLoaded = true
+          notify()
+        }
+      })()
+    : loadFull()
 
   return {
     get storageMode() { return mode },
+    get count() { return fullyLoaded ? items.length : summaryCount },
+    get isLoaded() { return fullyLoaded },
     ready: () => initPromise,
+    ensureLoaded: () => loadFull(),
     list(category?: TextureCategory) {
       return category ? items.filter(x => x.category === category) : [...items]
     },
@@ -320,135 +452,131 @@ export function createTextureLibraryStore(options: TextureStoreOptions = {}): Te
       return items.find(x => x.id === id)
     },
     async saveNew(input: SaveTextureInput) {
-      await initPromise
-      const now = new Date().toISOString()
-      const category = input.category ?? defaultCategoryForSlot(input.targetSlot)
-      const name = input.name.trim().slice(0, 80) || '我的程序贴图'
-      const graph = cloneGraph(input.graph)
-      graph.name = name
-      graph.category = category
-      graph.targetSlot = input.targetSlot
-      if (input.resolution) graph.resolution = input.resolution
-      const optUrl = (u?: string) => (u && safeDataUrlRe.test(u) ? u : undefined)
-      const normalDataUrl = optUrl(input.normalDataUrl)
-      const heightDataUrl = optUrl(input.heightDataUrl)
-      const roughnessDataUrl = optUrl(input.roughnessDataUrl)
-      const entry: SavedTextureItem = {
-        id: makeId(category),
-        name,
-        category,
-        targetSlot: input.targetSlot,
-        resolution: input.resolution ?? graph.resolution,
-        seamless: input.seamless ?? graph.seamless,
-        ...inferAtlasMeta(graph, input.atlasCols, input.atlasRows, input.atlasRegions),
-        dataUrl: safeDataUrlRe.test(input.dataUrl) ? input.dataUrl : '',
-        ...(normalDataUrl ? { normalDataUrl } : {}),
-        ...(heightDataUrl ? { heightDataUrl } : {}),
-        ...(roughnessDataUrl ? { roughnessDataUrl } : {}),
-        thumbnail: safeDataUrlRe.test(input.thumbnail) ? input.thumbnail : (safeDataUrlRe.test(input.dataUrl) ? input.dataUrl : ''),
-        graph,
-        createdAt: now,
-        updatedAt: now,
-      }
-      items = [entry, ...items]
-      await persist()
-      return entry
+      return runMutation(() => {
+        const now = new Date().toISOString()
+        const category = input.category ?? defaultCategoryForSlot(input.targetSlot)
+        const name = input.name.trim().slice(0, 80) || '我的程序贴图'
+        const graph = cloneGraph(input.graph)
+        graph.name = name
+        graph.category = category
+        graph.targetSlot = input.targetSlot
+        if (input.resolution) graph.resolution = input.resolution
+        const optUrl = (u?: string) => (u && safeDataUrlRe.test(u) ? u : undefined)
+        const normalDataUrl = optUrl(input.normalDataUrl)
+        const heightDataUrl = optUrl(input.heightDataUrl)
+        const roughnessDataUrl = optUrl(input.roughnessDataUrl)
+        const entry: SavedTextureItem = {
+          id: makeId(category),
+          name,
+          category,
+          targetSlot: input.targetSlot,
+          resolution: input.resolution ?? graph.resolution,
+          seamless: input.seamless ?? graph.seamless,
+          ...inferAtlasMeta(graph, input.atlasCols, input.atlasRows, input.atlasRegions),
+          dataUrl: safeDataUrlRe.test(input.dataUrl) ? input.dataUrl : '',
+          ...(normalDataUrl ? { normalDataUrl } : {}),
+          ...(heightDataUrl ? { heightDataUrl } : {}),
+          ...(roughnessDataUrl ? { roughnessDataUrl } : {}),
+          thumbnail: safeDataUrlRe.test(input.thumbnail) ? input.thumbnail : (safeDataUrlRe.test(input.dataUrl) ? input.dataUrl : ''),
+          graph,
+          createdAt: now,
+          updatedAt: now,
+        }
+        return { nextItems: [entry, ...items], result: entry }
+      })
     },
     async overwrite(id: string, input: Partial<SaveTextureInput>) {
-      await initPromise
-      const idx = items.findIndex(x => x.id === id)
-      if (idx < 0) throw new Error('找不到要覆盖更新的贴图')
-      const prev = items[idx]
-      const name = (input.name ?? prev.name).trim().slice(0, 80) || prev.name
-      const targetSlot = input.targetSlot ?? prev.targetSlot
-      const category = input.category ?? defaultCategoryForSlot(targetSlot)
-      const graph = input.graph ? cloneGraph(input.graph) : cloneGraph(prev.graph)
-      graph.name = name
-      graph.category = category
-      graph.targetSlot = targetSlot
-      const nextAtlas = inferAtlasMeta(graph, input.atlasCols, input.atlasRows, input.atlasRegions)
-      const keepOr = (cand?: string, old?: string) => (cand && safeDataUrlRe.test(cand) ? cand : old)
-      const updated: SavedTextureItem = {
-        ...prev,
-        name,
-        category,
-        targetSlot,
-        resolution: input.resolution ?? graph.resolution,
-        seamless: input.seamless ?? graph.seamless,
-        atlasCols: nextAtlas.atlasCols,
-        atlasRows: nextAtlas.atlasRows,
-        atlasRegions: nextAtlas.atlasRegions,
-        dataUrl: input.dataUrl && safeDataUrlRe.test(input.dataUrl) ? input.dataUrl : prev.dataUrl,
-        normalDataUrl: keepOr(input.normalDataUrl, prev.normalDataUrl),
-        heightDataUrl: keepOr(input.heightDataUrl, prev.heightDataUrl),
-        roughnessDataUrl: keepOr(input.roughnessDataUrl, prev.roughnessDataUrl),
-        thumbnail: input.thumbnail && safeDataUrlRe.test(input.thumbnail) ? input.thumbnail : prev.thumbnail,
-        graph,
-        updatedAt: new Date().toISOString(),
-      }
-      items = items.map((x, i) => i === idx ? updated : x)
-      await persist()
-      return updated
+      return runMutation(() => {
+        const idx = items.findIndex(x => x.id === id)
+        if (idx < 0) throw new Error('找不到要覆盖更新的贴图')
+        const prev = items[idx]
+        const name = (input.name ?? prev.name).trim().slice(0, 80) || prev.name
+        const targetSlot = input.targetSlot ?? prev.targetSlot
+        const category = input.category ?? defaultCategoryForSlot(targetSlot)
+        const graph = input.graph ? cloneGraph(input.graph) : cloneGraph(prev.graph)
+        graph.name = name
+        graph.category = category
+        graph.targetSlot = targetSlot
+        const nextAtlas = inferAtlasMeta(graph, input.atlasCols, input.atlasRows, input.atlasRegions)
+        const keepOr = (cand?: string, old?: string) => (cand && safeDataUrlRe.test(cand) ? cand : old)
+        const updated: SavedTextureItem = {
+          ...prev,
+          name,
+          category,
+          targetSlot,
+          resolution: input.resolution ?? graph.resolution,
+          seamless: input.seamless ?? graph.seamless,
+          atlasCols: nextAtlas.atlasCols,
+          atlasRows: nextAtlas.atlasRows,
+          atlasRegions: nextAtlas.atlasRegions,
+          dataUrl: input.dataUrl && safeDataUrlRe.test(input.dataUrl) ? input.dataUrl : prev.dataUrl,
+          normalDataUrl: keepOr(input.normalDataUrl, prev.normalDataUrl),
+          heightDataUrl: keepOr(input.heightDataUrl, prev.heightDataUrl),
+          roughnessDataUrl: keepOr(input.roughnessDataUrl, prev.roughnessDataUrl),
+          thumbnail: input.thumbnail && safeDataUrlRe.test(input.thumbnail) ? input.thumbnail : prev.thumbnail,
+          graph,
+          updatedAt: new Date().toISOString(),
+        }
+        return { nextItems: items.map((x, i) => i === idx ? updated : x), result: updated }
+      })
     },
     async rename(id: string, nextName: string) {
-      await initPromise
-      const idx = items.findIndex(x => x.id === id)
-      if (idx < 0) throw new Error('找不到要重命名的贴图')
-      const name = nextName.trim().slice(0, 80)
-      if (!name) throw new Error('贴图名称不能为空')
-      const prev = items[idx]
-      const graph = cloneGraph(prev.graph)
-      graph.name = name
-      const updated: SavedTextureItem = { ...prev, name, graph, updatedAt: new Date().toISOString() }
-      items = items.map((x, i) => i === idx ? updated : x)
-      await persist()
-      return updated
+      return runMutation(() => {
+        const idx = items.findIndex(x => x.id === id)
+        if (idx < 0) throw new Error('找不到要重命名的贴图')
+        const name = nextName.trim().slice(0, 80)
+        if (!name) throw new Error('贴图名称不能为空')
+        const prev = items[idx]
+        const graph = cloneGraph(prev.graph)
+        graph.name = name
+        const updated: SavedTextureItem = { ...prev, name, graph, updatedAt: new Date().toISOString() }
+        return { nextItems: items.map((x, i) => i === idx ? updated : x), result: updated }
+      })
     },
     async duplicate(id: string) {
-      await initPromise
-      const orig = items.find(x => x.id === id)
-      if (!orig) throw new Error('找不到要复制的贴图')
-      const now = new Date().toISOString()
-      const name = `${orig.name} 副本`.slice(0, 80)
-      const graph = cloneGraph(orig.graph)
-      graph.name = name
-      const copy: SavedTextureItem = {
-        ...orig,
-        id: makeId(orig.category),
-        name,
-        graph,
-        createdAt: now,
-        updatedAt: now,
-      }
-      items = [copy, ...items]
-      await persist()
-      return copy
+      return runMutation(() => {
+        const orig = items.find(x => x.id === id)
+        if (!orig) throw new Error('找不到要复制的贴图')
+        const now = new Date().toISOString()
+        const name = `${orig.name} 副本`.slice(0, 80)
+        const graph = cloneGraph(orig.graph)
+        graph.name = name
+        const copy: SavedTextureItem = {
+          ...orig,
+          id: makeId(orig.category),
+          name,
+          graph,
+          createdAt: now,
+          updatedAt: now,
+        }
+        return { nextItems: [copy, ...items], result: copy }
+      })
     },
     async remove(id: string) {
-      await initPromise
-      const before = items.length
-      items = items.filter(x => x.id !== id)
-      if (items.length === before) return false
-      await persist()
-      return true
+      return runMutation(() => {
+        const nextItems = items.filter(x => x.id !== id)
+        if (nextItems.length === items.length) {
+          return { nextItems: items, result: false, changed: false }
+        }
+        return { nextItems, result: true }
+      })
     },
     exportBundle(): TextureLibraryFile {
       return { schemaVersion: 1, items: JSON.parse(JSON.stringify(items)) as SavedTextureItem[] }
     },
     async importBundle(raw: unknown) {
-      await initPromise
-      const parsed = parseTextureLibrary(raw)
-      if (!parsed.length) throw new Error('文件中没有有效的贴图条目')
-      let added = 0, updated = 0
-      const map = new Map(items.map(x => [x.id, x]))
-      for (const entry of parsed) {
-        if (map.has(entry.id)) updated++
-        else added++
-        map.set(entry.id, entry)
-      }
-      items = sortTextures([...map.values()])
-      await persist()
-      return { added, updated }
+      return runMutation(() => {
+        const parsed = parseTextureLibrary(raw)
+        if (!parsed.length) throw new Error('文件中没有有效的贴图条目')
+        let added = 0, updated = 0
+        const map = new Map(items.map(x => [x.id, x]))
+        for (const entry of parsed) {
+          if (map.has(entry.id)) updated++
+          else added++
+          map.set(entry.id, entry)
+        }
+        return { nextItems: [...map.values()], result: { added, updated } }
+      })
     },
     subscribe(listener: () => void) {
       listeners.add(listener)

@@ -29,6 +29,9 @@ import {
   type CompareMode, type PickedRefColor, type ReferenceImageState,
 } from './ref-compare'
 import type { ScoreBreakdown, ScoreMode } from './ref-score'
+import {
+  attachTextureGraphSource, type AppliedTextureMeta,
+} from './library-ui'
 import type { SavedTextureItem, TextureLibraryStore } from './store'
 import {
   defaultTemplateForSlot, detectGraphAtlasGrid, detectGraphAtlasRegions,
@@ -51,7 +54,7 @@ export interface TextureEditorHost {
     slot: EditableTextureSlot,
     texture: Texture,
     label: string,
-    meta?: { atlasCols?: number; atlasRows?: number; atlasRegions?: AtlasRegion[] },
+    meta?: AppliedTextureMeta,
   ): void
   onOpen?(): void
   onClose?(): void
@@ -172,6 +175,9 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
   let liveSync = true
   let isFull = false
   let openState = false
+  let dirtyDraft = false
+  let dirtyDraftLabel = '参数微调'
+  let disposing = false
 
   let lastOutput: MaterialOutputResult | undefined
   let lastPinnedBuffer: ImageBuffer | undefined
@@ -414,12 +420,25 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
     redoBtn.disabled = !history.canRedo()
   }
 
+  function markDirtyDraft(label = '参数微调') {
+    dirtyDraft = true
+    dirtyDraftLabel = label
+  }
+
+  function flushDirtyDraft(reason?: string) {
+    if (!dirtyDraft) return
+    dirtyDraft = false
+    commitCurrentGraph(reason || dirtyDraftLabel)
+  }
+
   function applyPatch(ops: GraphTransactionOp[], label = '编辑', baseRevision?: number): PatchResult {
+    if (dirtyDraft && baseRevision === undefined) flushDirtyDraft()
     const res = history.apply(ops, label, baseRevision)
     if (!res.ok) {
       host.message(res.errors[0] || '事务校验失败', true)
       return res
     }
+    dirtyDraft = false
     graph = cloneGraph(history.current)
     syncUndoRedoButtons()
     syncHeader()
@@ -430,14 +449,18 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
   }
 
   function commitCurrentGraph(label = '编辑') {
+    dirtyDraft = false
     graph = normalizeGraphSchemaVersion(graph)
     history.commit(graph, label)
     syncUndoRedoButtons()
   }
 
   function undo(): boolean {
+    if (dirtyDraft) flushDirtyDraft()
     const prev = history.undo()
     if (!prev) return false
+    dirtyDraft = false
+    activePickTarget = undefined
     graph = prev
     if (selectedNodeId && !graph.nodes.some(n => n.id === selectedNodeId)) selectedNodeId = graph.nodes[0]?.id
     if (pinnedNodeId && !graph.nodes.some(n => n.id === pinnedNodeId)) pinnedNodeId = undefined
@@ -453,6 +476,8 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
   function redo(): boolean {
     const next = history.redo()
     if (!next) return false
+    dirtyDraft = false
+    activePickTarget = undefined
     graph = next
     if (selectedNodeId && !graph.nodes.some(n => n.id === selectedNodeId)) selectedNodeId = graph.nodes[0]?.id
     if (pinnedNodeId && !graph.nodes.some(n => n.id === pinnedNodeId)) pinnedNodeId = undefined
@@ -628,9 +653,16 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
 
     if (sync3d && liveSync && openState) {
       const tex = materialOutputToThreeTexture(outcome.output, graph.targetSlot, graph.name || '程序贴图')
+      const graphCopy = cloneGraph(graph)
+      attachTextureGraphSource(tex, { graph: graphCopy, savedId: activeSavedId })
       const grid = detectGraphAtlasGrid(graph)
       const regions = detectGraphAtlasRegions(graph)
-      const meta = (grid || regions) ? { atlasCols: grid?.cols, atlasRows: grid?.rows, atlasRegions: regions } : undefined
+      const meta: AppliedTextureMeta = {
+        ...(grid ? { atlasCols: grid.cols, atlasRows: grid.rows } : {}),
+        ...(regions ? { atlasRegions: regions } : {}),
+        graph: graphCopy,
+        savedId: activeSavedId,
+      }
       host.applyTexture(graph.targetSlot, tex, `◈ ${graph.name}`, meta)
     }
   }
@@ -759,7 +791,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
       const out = lastOutput
       const wantRawTransparent = Boolean(refImage && compareMode !== 'off')
       if (previewChannel === 'lit') {
-        renderLitPbrPreview(out, genCanvas, lightAzimuth, lightElevation, tile2x2)
+        renderLitPbrPreview(out, genCanvas, lightAzimuth, lightElevation, tile2x2, !wantRawTransparent)
         tipLabel = `PBR 实时光照（拖动换光向）${tile2x2 ? ' · 2×2' : ''}`
       } else if (previewChannel === 'normal') {
         drawBufferToCanvas(out.normal, genCanvas, { tile2x2 })
@@ -882,6 +914,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
           if (nx !== node.x || ny !== node.y) {
             moved = true
             node.x = nx; node.y = ny
+            markDirtyDraft('移动节点')
             card.style.left = `${node.x}px`
             card.style.top = `${node.y}px`
             renderWires()
@@ -898,10 +931,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
 
       card.addEventListener('dblclick', e => {
         e.stopPropagation()
-        if (node.type === 'output_material') pinnedNodeId = undefined
-        else pinnedNodeId = pinnedNodeId === node.id ? undefined : node.id
-        syncNodeClasses()
-        void runEvaluateAsync(Math.min(256, graph.resolution), false, false)
+        setPinnedNode(node.type === 'output_material' || pinnedNodeId === node.id ? undefined : node.id)
       })
     }
 
@@ -923,16 +953,27 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
     }
   }
 
+  function setPinnedNode(nextId: string | undefined) {
+    const target = nextId ? graph.nodes.find(n => n.id === nextId) : undefined
+    pinnedNodeId = target && target.type !== 'output_material' ? target.id : undefined
+    if (!pinnedNodeId) lastPinnedBuffer = undefined
+    if (highResTimer) { clearTimeout(highResTimer); highResTimer = undefined }
+    syncNodeClasses()
+    const evalRes = pinnedNodeId ? Math.min(256, graph.resolution) : graph.resolution
+    void runEvaluateAsync(evalRes, false, false)
+  }
+
   // ---- Interactive Bezier Wire Dragging ------------------------------------
   function startWireDrag(startNodeId: string, startPortId: string, startKind: 'in' | 'out', downEvt: PointerEvent) {
     let anchorNode = startNodeId
     let anchorPort = startPortId
     let anchorKind: 'in' | 'out' = startKind
+    let existingEdgeId: string | undefined
 
     if (startKind === 'in') {
       const existing = graph.edges.find(e => e.toNode === startNodeId && e.toPort === startPortId)
       if (existing) {
-        applyPatch([{ op: 'disconnect', edgeId: existing.id }], '断开连线')
+        existingEdgeId = existing.id
         anchorNode = existing.fromNode
         anchorPort = existing.fromPort
         anchorKind = 'out'
@@ -941,34 +982,94 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
 
     const origin = portCenterWorld(anchorNode, anchorKind, anchorPort)
     if (!origin) return
-    draftWire.style.display = ''
+
+    const startClientX = downEvt.clientX
+    const startClientY = downEvt.clientY
+    const DRAG_THRESHOLD_PX = 6
+    let dragStarted = !existingEdgeId
+
     const updateDraft = (cx: number, cy: number) => {
       const [wx, wy] = clientToWorld(cx, cy)
       draftWire.setAttribute('d', anchorKind === 'out'
         ? bezierPath(origin[0], origin[1], wx, wy)
         : bezierPath(wx, wy, origin[0], origin[1]))
     }
-    updateDraft(downEvt.clientX, downEvt.clientY)
 
-    const onMove = (me: PointerEvent) => updateDraft(me.clientX, me.clientY)
+    if (dragStarted) {
+      draftWire.style.display = ''
+      updateDraft(downEvt.clientX, downEvt.clientY)
+    }
+
+    const onMove = (me: PointerEvent) => {
+      if (!dragStarted) {
+        if (Math.hypot(me.clientX - startClientX, me.clientY - startClientY) < DRAG_THRESHOLD_PX) return
+        dragStarted = true
+        draftWire.style.display = ''
+      }
+      updateDraft(me.clientX, me.clientY)
+    }
+
     const onUp = (ue: PointerEvent) => {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
       draftWire.style.display = 'none'
       draftWire.setAttribute('d', '')
 
+      // Brief click without dragging past threshold keeps existing input wire intact
+      if (!dragStarted) return
+
       const target = document.elementFromPoint(ue.clientX, ue.clientY)?.closest('.tg-port-dot') as HTMLElement | null
-      if (!target) return
+      if (!target) {
+        if (existingEdgeId) {
+          applyPatch([{ op: 'disconnect', edgeId: existingEdgeId }], '断开连线')
+        }
+        return
+      }
       const targetNode = target.dataset.nodeId!
       const targetPort = target.dataset.portId!
       const targetKind = target.dataset.portKind as 'in' | 'out'
-      if (targetKind === anchorKind || targetNode === anchorNode) return
+
+      // Dropped back onto the original input port: keep wire untouched
+      if (existingEdgeId && targetKind === 'in' && targetNode === startNodeId && targetPort === startPortId) {
+        return
+      }
+
+      if (targetKind === anchorKind || targetNode === anchorNode) {
+        if (existingEdgeId) {
+          applyPatch([{ op: 'disconnect', edgeId: existingEdgeId }], '断开连线')
+        }
+        return
+      }
 
       const fromNode = anchorKind === 'out' ? anchorNode : targetNode
       const fromPort = anchorKind === 'out' ? anchorPort : targetPort
       const toNode = anchorKind === 'in' ? anchorNode : targetNode
       const toPort = anchorKind === 'in' ? anchorPort : targetPort
-      connectPorts(fromNode, fromPort, toNode, toPort)
+
+      if (existingEdgeId) {
+        const fn = graph.nodes.find(n => n.id === fromNode)
+        const tn = graph.nodes.find(n => n.id === toNode)
+        const fp = fn ? nodeDefinitions[fn.type].outputs.find(p => p.id === fromPort) : undefined
+        const tp = tn ? nodeDefinitions[tn.type].inputs.find(p => p.id === toPort) : undefined
+        if (!fp || !tp) return
+        if (!arePortsCompatible(fp.type, tp.type)) {
+          host.message(`端口类型不兼容：${fp.type} 不可连入 ${tp.type}`, true)
+          return
+        }
+        const edgesWithoutOld = graph.edges.filter(
+          e => e.id !== existingEdgeId && !(e.toNode === toNode && e.toPort === toPort),
+        )
+        if (wouldCreateCycle(graph.nodes, edgesWithoutOld, fromNode, toNode)) {
+          host.message('不能创建循环连线', true)
+          return
+        }
+        applyPatch([
+          { op: 'disconnect', edgeId: existingEdgeId },
+          { op: 'connect', fromNode, fromPort, toNode, toPort },
+        ], '重连端口')
+      } else {
+        connectPorts(fromNode, fromPort, toNode, toPort)
+      }
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
@@ -1012,6 +1113,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
     if (!node) return
     node.params[key] = value
     if (commit) commitCurrentGraph(`修改 ${key}`)
+    else markDirtyDraft(`修改 ${key}`)
     scheduleEvaluate(fast)
   }
 
@@ -1226,7 +1328,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
       }
       for (const colEl of gradBox.querySelectorAll<HTMLInputElement>('[data-stop-color]')) {
         const idx = Number(colEl.dataset.stopColor)
-        colEl.oninput = () => { const st = getStops(); if (st[idx]) st[idx].color = colEl.value; updateBar(); scheduleEvaluate(true) }
+        colEl.oninput = () => { const st = getStops(); if (st[idx]) st[idx].color = colEl.value; markDirtyDraft('修改渐变色标'); updateBar(); scheduleEvaluate(true) }
         colEl.onchange = () => { commitCurrentGraph('修改渐变色标'); scheduleEvaluate(false) }
       }
       for (const posEl of gradBox.querySelectorAll<HTMLInputElement>('[data-stop-pos]')) {
@@ -1234,6 +1336,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
         posEl.oninput = () => {
           const st = getStops()
           if (st[idx]) st[idx].pos = posEl.valueAsNumber
+          markDirtyDraft('移动渐变色标')
           const span = posEl.nextElementSibling
           if (span) span.textContent = `${Math.round(posEl.valueAsNumber * 100)}%`
           updateBar(); scheduleEvaluate(true)
@@ -1295,6 +1398,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
           pts.sort((a, b) => a[0] - b[0])
           idx = pts.findIndex(pt => Math.abs(pt[0] - cx) < 0.01 && Math.abs(pt[1] - cy) < 0.01)
           if (idx < 0) idx = pts.length - 1
+          markDirtyDraft('调整曲线')
           redraw()
           scheduleEvaluate(true)
         }
@@ -1307,6 +1411,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
             const maxX = pts[idx + 1][0] - 0.03
             pts[idx] = [Number(Math.max(minX, Math.min(maxX, nx)).toFixed(3)), Number(ny.toFixed(3))]
           }
+          markDirtyDraft('调整曲线')
           redraw()
           scheduleEvaluate(true)
         }
@@ -1348,15 +1453,16 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
       const getPal = (): string[] => Array.isArray(node.params[pKey]) ? node.params[pKey] as string[] : ['#487c39', '#8fc14a']
       for (const colEl of palBox.querySelectorAll<HTMLInputElement>('[data-pal-col]')) {
         const idx = Number(colEl.dataset.palCol)
-        colEl.oninput = () => { const pal = getPal(); pal[idx] = colEl.value; scheduleEvaluate(true) }
+        colEl.oninput = () => { const pal = getPal(); if (idx >= 0 && idx < pal.length) { pal[idx] = colEl.value; markDirtyDraft('修改色板'); scheduleEvaluate(true) } }
         colEl.onchange = () => { commitCurrentGraph('修改色板'); scheduleEvaluate(false) }
       }
       for (const delBtn of palBox.querySelectorAll<HTMLButtonElement>('[data-pal-del]')) {
         const idx = Number(delBtn.dataset.palDel)
         delBtn.onclick = () => {
           const pal = [...getPal()]
-          if (pal.length <= 2) return
+          if (pal.length <= 2 || idx < 0 || idx >= pal.length) return
           pal.splice(idx, 1)
+          activePickTarget = undefined
           applyPatch([{ op: 'setParam', nodeId: node.id, key: pKey, value: pal }], '删除色块')
         }
       }
@@ -1413,7 +1519,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
           const r = inspectorEl.querySelector<HTMLInputElement>(`#${id}`)
           const n = inspectorEl.querySelector<HTMLInputElement>(`#${id}-n`)
           if (!r) return
-          r.oninput = () => { const v = r.valueAsNumber; if (n) n.value = String(v); applyVal(v); renderVectorOverlay(); scheduleEvaluate(true) }
+          r.oninput = () => { const v = r.valueAsNumber; if (n) n.value = String(v); applyVal(v); markDirtyDraft('微调叶片'); renderVectorOverlay(); scheduleEvaluate(true) }
           r.onchange = () => { commitCurrentGraph('微调叶片'); scheduleEvaluate(false) }
           if (n) n.onchange = () => { const v = n.valueAsNumber; if (!Number.isFinite(v)) return; r.value = String(v); applyVal(v); commitCurrentGraph('微调叶片'); renderVectorOverlay(); scheduleEvaluate(false) }
         }
@@ -1448,7 +1554,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
           const r = inspectorEl.querySelector<HTMLInputElement>(`#${id}`)
           const n = inspectorEl.querySelector<HTMLInputElement>(`#${id}-n`)
           if (!r) return
-          r.oninput = () => { const v = r.valueAsNumber; if (n) n.value = String(v); applyVal(v); scheduleEvaluate(true) }
+          r.oninput = () => { const v = r.valueAsNumber; if (n) n.value = String(v); applyVal(v); markDirtyDraft('调节枝条粗细'); scheduleEvaluate(true) }
           r.onchange = () => { commitCurrentGraph('调节枝条粗细'); scheduleEvaluate(false) }
           if (n) n.onchange = () => { const v = n.valueAsNumber; if (!Number.isFinite(v)) return; r.value = String(v); applyVal(v); commitCurrentGraph('调节枝条粗细'); scheduleEvaluate(false) }
         }
@@ -1525,15 +1631,38 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
     applyPatch([{ op: 'removeNode', nodeId: dropId, bridge: true }], `删除 ${target.id}`)
   }
 
+  function safeSampleReferencePixel(ref: ReferenceImageState, u: number, v: number): PickedRefColor | undefined {
+    if (!Number.isFinite(u) || !Number.isFinite(v)) return undefined
+    const w = ref.width, h = ref.height
+    if (!Number.isInteger(w) || !Number.isInteger(h) || w <= 0 || h <= 0) return undefined
+    const cu = Math.max(0, Math.min(1, u))
+    const cv = Math.max(0, Math.min(1, v))
+    const x = Math.max(0, Math.min(w - 1, Math.floor(cu * w)))
+    const y = Math.max(0, Math.min(h - 1, Math.floor(cv * h)))
+    if (x < 0 || x >= w || y < 0 || y >= h) return undefined
+    const idx = (y * w + x) * 4
+    if (!ref.rgba || idx < 0 || idx + 3 >= ref.rgba.length) return undefined
+    const picked = sampleReferencePixel(ref, cu, cv)
+    if (!Number.isFinite(picked.r) || !Number.isFinite(picked.g) || !Number.isFinite(picked.b) || !Number.isFinite(picked.a)) {
+      return undefined
+    }
+    return picked
+  }
+
   // ---- Preview Canvas Unified Pointer Handler (Wipe / Eyedropper / Lit / Direct Vector Edit) ---
   prevBox.addEventListener('pointerdown', e => {
     const r = prevBox.getBoundingClientRect()
-    const u = Math.max(0, Math.min(1, (e.clientX - r.left) / Math.max(1, r.width)))
-    const v = Math.max(0, Math.min(1, (e.clientY - r.top) / Math.max(1, r.height)))
+    if (r.width <= 0 || r.height <= 0) return
+    const u = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
+    const v = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height))
 
-    // 1. Reference Image Eyedropper (reads exact raw reference pixels!)
+    // 1. Reference Image Eyedropper (reads exact raw reference pixels with strict bounds checks!)
     if (refImage && compareMode === 'pick') {
-      const picked = sampleReferencePixel(refImage, u, v)
+      const picked = safeSampleReferencePixel(refImage, u, v)
+      if (!picked) {
+        host.message('吸管采样超出参考图有效范围', true)
+        return
+      }
       lastPicked = picked
       syncRefBarUi()
       if (activePickTarget) {
@@ -1541,9 +1670,13 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
         const n = graph.nodes.find(x => x.id === tgt.nodeId)
         if (n && Array.isArray(n.params[tgt.paramKey])) {
           const pal = [...(n.params[tgt.paramKey] as string[])]
-          pal[tgt.swatchIdx] = picked.hex
-          applyPatch([{ op: 'setParam', nodeId: tgt.nodeId, key: tgt.paramKey, value: pal }], '吸管更新色块')
-          host.message(`已从参考图吸取 ${picked.hex}（Alpha ${Math.round(picked.a * 100)}%）`)
+          if (Number.isInteger(tgt.swatchIdx) && tgt.swatchIdx >= 0 && tgt.swatchIdx < pal.length) {
+            pal[tgt.swatchIdx] = picked.hex
+            applyPatch([{ op: 'setParam', nodeId: tgt.nodeId, key: tgt.paramKey, value: pal }], '吸管更新色块')
+            host.message(`已从参考图吸取 ${picked.hex}（Alpha ${Math.round(picked.a * 100)}%）`)
+          } else {
+            host.message('目标色块已失效，请重新选择色块后再吸色', true)
+          }
         }
         activePickTarget = undefined
         setCompareMode('wipe')
@@ -1594,6 +1727,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
             const mv = (me.clientY - rect.top) / Math.max(1, rect.height)
             curLeaf.rot = Math.atan2(mu - curLeaf.x, -(mv - curLeaf.y))
             moved = true
+            markDirtyDraft(`旋转叶片 ${curLeaf.id}`)
             renderVectorOverlay()
             scheduleEvaluate(true)
           }
@@ -1619,6 +1753,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
             curLeaf.scaleX = Math.max(0.03, Math.min(0.6, origSx * factor))
             curLeaf.scaleY = Math.max(0.03, Math.min(0.6, origSy * factor))
             moved = true
+            markDirtyDraft(`缩放叶片 ${curLeaf.id}`)
             renderVectorOverlay()
             scheduleEvaluate(true)
           }
@@ -1659,6 +1794,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
             inst.x = Number(nx.toFixed(4))
             inst.y = Number(ny.toFixed(4))
             moved = true
+            markDirtyDraft(`拖拽叶片 ${inst.id}`)
             renderVectorOverlay()
             scheduleEvaluate(true)
           }
@@ -1686,6 +1822,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
           const mv = Math.max(0.01, Math.min(0.99, (me.clientY - rect.top) / Math.max(1, rect.height)))
           st.points[hit.pointIdx] = [Number(mu.toFixed(4)), Number(mv.toFixed(4))]
           moved = true
+          markDirtyDraft(`拖拽枝条 ${st.id}`)
           renderVectorOverlay()
           scheduleEvaluate(true)
         }
@@ -1768,9 +1905,10 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
     ctxMenu.style.top = `${Math.min(window.innerHeight - 360, e.clientY)}px`
     ctxMenu.hidden = false
   })
-  document.addEventListener('pointerdown', e => {
+  const onDocPointerDown = (e: PointerEvent) => {
     if (!ctxMenu.hidden && !(e.target as HTMLElement).closest('.tg-ctx-menu')) ctxMenu.hidden = true
-  })
+  }
+  document.addEventListener('pointerdown', onDocPointerDown)
   for (const btn of ctxMenu.querySelectorAll<HTMLButtonElement>('[data-ctx-node]')) {
     btn.onclick = () => { ctxMenu.hidden = true; addNode(btn.dataset.ctxNode as NodeType, ctxWorldPos[0], ctxWorldPos[1]) }
   }
@@ -1825,6 +1963,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
   const jsonText = jsonModal.querySelector<HTMLTextAreaElement>('#tg-json-text')!
   const jsonVerLabel = jsonModal.querySelector<HTMLElement>('#tg-json-ver')!
   function openJsonModal() {
+    flushDirtyDraft()
     const clean = normalizeGraphSchemaVersion(graph)
     jsonVerLabel.textContent = `schemaVersion: ${clean.schemaVersion} · rev ${history.revision}`
     jsonText.value = JSON.stringify(clean, null, 2)
@@ -1840,9 +1979,12 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
     try {
       const parsed = parseTextureGraph(JSON.parse(jsonText.value), { strict: true })
       graph = parsed
+      activeSavedId = undefined
       commitCurrentGraph('导入节点图 JSON')
       selectedNodeId = graph.nodes.find(n => n.type !== 'output_material')?.id ?? graph.nodes[0]?.id
       pinnedNodeId = undefined
+      lastPinnedBuffer = undefined
+      activePickTarget = undefined
       syncHeader()
       renderNodes()
       renderInspector()
@@ -1879,12 +2021,15 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
   }
 
   // ---- Agent-Native Reference Replication Bridge (Shared with Browser UI & Automation) ---
-  function commitAgentGraph(nextGraph: TextureGraph, label: string) {
+  function commitAgentGraph(nextGraph: TextureGraph, label: string, detachSavedId = false) {
+    if (detachSavedId) activeSavedId = undefined
     graph = normalizeGraphSchemaVersion(cloneGraph(nextGraph))
     commitCurrentGraph(label)
     const pref = graph.nodes.find(n => n.type === 'vector_layout' || n.type === 'painterly_bark' || n.type === 'branch_scatter')
     selectedNodeId = pref?.id ?? graph.nodes.find(n => n.type !== 'output_material')?.id ?? graph.nodes[0]?.id
     pinnedNodeId = undefined
+    lastPinnedBuffer = undefined
+    activePickTarget = undefined
     selectedLeafId = undefined
     selectedStemId = undefined
     tile2x2 = graph.targetSlot === 'bark'
@@ -1928,12 +2073,12 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
     applyPatch: (ops, label, baseRev) => applyPatch(ops, label, baseRev),
     async analyzeReference(src, opts = {}) {
       const { img, name } = await resolveRefPixels(src)
-      const res = coreAgent.analyzeReference(img, {
+      const res = await workerClient.analyzeReferenceAsync(img, {
         name: opts.name ?? name.replace(/\.[^.]+$/, ''),
         resolution: opts.resolution ?? graph.resolution,
       })
       if (opts.applyDraft !== false) {
-        commitAgentGraph(res.draftGraph, `参考图自动分析初稿 (${res.kind})`)
+        commitAgentGraph(res.draftGraph, `参考图自动分析初稿 (${res.kind})`, true)
         const initScore = coreAgent.scoreAgainstReference(img, res.scoreMode, 256)
         lastRefScoreText = formatScoreChip(initScore)
         syncRefBarUi()
@@ -1949,7 +2094,11 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
     },
     async optimizeAgainstReference(src, opts = {}) {
       const { img } = await resolveRefPixels(src)
-      const opt = coreAgent.optimizeAgainstReference(img, opts)
+      const beforeGraph = cloneGraph(graph)
+      const opt = await workerClient.optimizeReferenceAsync(beforeGraph, img, opts)
+      if (opt.improved && !opts.signal?.aborted) {
+        commitAgentGraph(opt.bestGraph, `参考图局部寻优 (+${(opt.bestScore256.totalScore - opt.initialScore256.totalScore).toFixed(1)}分)`)
+      }
       lastRefScoreText = formatScoreChip(opt.bestScore256)
       syncRefBarUi()
       return opt
@@ -1978,21 +2127,42 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
   refAnalyzeBtn.onclick = () => {
     if (!refImage) return
     refAnalyzeBtn.disabled = true
+    const origText = refAnalyzeBtn.textContent
+    refAnalyzeBtn.textContent = '⏳ 分析中…'
     void agentBridge.analyzeReference(undefined, { applyDraft: true }).then(res => {
       host.message(`已分析为「${res.kind}」（置信度 ${Math.round(res.confidence * 100)}%，${res.evidence.detectedLeaves} 叶 / ${res.evidence.detectedStems} 枝），可直接拖拽修改或 Ctrl+Z 撤销`)
-    }).catch(err => host.message(String(err), true)).finally(() => { refAnalyzeBtn.disabled = false })
+    }).catch(err => host.message(String(err), true)).finally(() => {
+      refAnalyzeBtn.disabled = false
+      refAnalyzeBtn.textContent = origText
+    })
   }
+  let optAbort: AbortController | undefined
   refOptimizeBtn.onclick = () => {
+    if (optAbort) {
+      optAbort.abort()
+      optAbort = undefined
+      return
+    }
     if (!refImage) return
-    refOptimizeBtn.disabled = true
-    host.message('正在运行缓存感知局部寻优…')
-    setTimeout(() => {
-      void agentBridge.optimizeAgainstReference(undefined, { maxEvals: 72 }).then(opt => {
-        host.message(opt.improved
-          ? `寻优完成：${opt.initialScore256.totalScore.toFixed(1)} → ${opt.bestScore256.totalScore.toFixed(1)} 分（${opt.telemetry.totalEvals} 次求值 · 命中率 ${Math.round(opt.telemetry.cacheHitRate * 100)}% · ${Math.round(opt.telemetry.wallMsTotal)} ms）`
-          : `当前初稿已接近局部最优（${opt.bestScore256.totalScore.toFixed(1)} 分 · ${opt.telemetry.totalEvals} 次求值）`)
-      }).catch(err => host.message(String(err), true)).finally(() => { refOptimizeBtn.disabled = false })
-    }, 16)
+    const ctrl = new AbortController()
+    optAbort = ctrl
+    const origText = refOptimizeBtn.textContent
+    refOptimizeBtn.textContent = '⏹ 取消寻优'
+    host.message('正在后台 Worker 运行缓存感知局部寻优（界面可流畅操作，随时可点取消）…')
+    void agentBridge.optimizeAgainstReference(undefined, { maxEvals: 72, signal: ctrl.signal }).then(opt => {
+      host.message(opt.improved
+        ? `寻优完成：${opt.initialScore256.totalScore.toFixed(1)} → ${opt.bestScore256.totalScore.toFixed(1)} 分（${opt.telemetry.totalEvals} 次求值 · 命中率 ${Math.round(opt.telemetry.cacheHitRate * 100)}% · ${Math.round(opt.telemetry.wallMsTotal)} ms）`
+        : `当前初稿已接近局部最优（${opt.bestScore256.totalScore.toFixed(1)} 分 · ${opt.telemetry.totalEvals} 次求值）`)
+    }).catch(err => {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        host.message('已取消寻优，保留原始节点图未变更')
+      } else {
+        host.message(String(err), true)
+      }
+    }).finally(() => {
+      if (optAbort === ctrl) optAbort = undefined
+      refOptimizeBtn.textContent = origText
+    })
   }
 
   q('#tg-ref-load').onclick = () => refFileInput.click()
@@ -2019,7 +2189,7 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
     syncUndoRedoButtons()
   }
 
-  nameInput.oninput = () => { graph.name = nameInput.value.trim() || '未命名贴图' }
+  nameInput.oninput = () => { graph.name = nameInput.value.trim() || '未命名贴图'; markDirtyDraft('改名') }
   nameInput.onchange = () => commitCurrentGraph('改名')
   slotSelect.onchange = () => {
     const slot = slotSelect.value as EditableTextureSlot
@@ -2042,28 +2212,51 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
     liveSyncBtn.setAttribute('aria-pressed', String(liveSync))
     if (liveSync && lastOutput) {
       const tex = materialOutputToThreeTexture(lastOutput, graph.targetSlot, graph.name)
+      const graphCopy = cloneGraph(graph)
+      attachTextureGraphSource(tex, { graph: graphCopy, savedId: activeSavedId })
       const grid = detectGraphAtlasGrid(graph)
       const regions = detectGraphAtlasRegions(graph)
-      const meta = (grid || regions) ? { atlasCols: grid?.cols, atlasRows: grid?.rows, atlasRegions: regions } : undefined
+      const meta: AppliedTextureMeta = {
+        ...(grid ? { atlasCols: grid.cols, atlasRows: grid.rows } : {}),
+        ...(regions ? { atlasRegions: regions } : {}),
+        graph: graphCopy,
+        savedId: activeSavedId,
+      }
       host.applyTexture(graph.targetSlot, tex, `◈ ${graph.name}`, meta)
       host.message('已开启实时同步 3D 树木')
     }
   }
   q('#tg-apply-now').onclick = () => {
+    flushDirtyDraft()
+    if (highResTimer) { clearTimeout(highResTimer); highResTimer = undefined }
     const baked = syncBakeEvaluator.evaluate(graph, graph.resolution)
     lastOutput = baked.output
     renderPreviewCanvas()
     const tex = materialOutputToThreeTexture(baked.output, graph.targetSlot, graph.name)
+    const graphCopy = cloneGraph(graph)
+    attachTextureGraphSource(tex, { graph: graphCopy, savedId: activeSavedId })
     const grid = detectGraphAtlasGrid(graph)
     const regions = detectGraphAtlasRegions(graph)
-    const meta = (grid || regions) ? { atlasCols: grid?.cols, atlasRows: grid?.rows, atlasRegions: regions } : undefined
+    const meta: AppliedTextureMeta = {
+      ...(grid ? { atlasCols: grid.cols, atlasRows: grid.rows } : {}),
+      ...(regions ? { atlasRegions: regions } : {}),
+      graph: graphCopy,
+      savedId: activeSavedId,
+    }
     host.applyTexture(graph.targetSlot, tex, `◈ ${graph.name}`, meta)
     host.message(`已将「${graph.name}」应用到 ${slotLabels[graph.targetSlot]}`)
   }
 
   async function saveToLibrary(overwrite = false): Promise<SavedTextureItem> {
     const cleanName = (nameInput.value.trim() || graph.name || '我的程序贴图').slice(0, 80)
-    graph = normalizeGraphSchemaVersion({ ...graph, name: cleanName })
+    if (graph.name !== cleanName) {
+      graph = normalizeGraphSchemaVersion({ ...graph, name: cleanName })
+      markDirtyDraft('改名')
+    } else {
+      graph = normalizeGraphSchemaVersion(graph)
+    }
+    flushDirtyDraft()
+    if (highResTimer) { clearTimeout(highResTimer); highResTimer = undefined }
     const baked = syncBakeEvaluator.evaluate(graph, graph.resolution)
     lastOutput = baked.output
     const pbr = materialOutputToPbrDataUrls(baked.output, graph.targetSlot)
@@ -2093,12 +2286,29 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
       activeSavedId = saved.id
       host.message(`已保存到实时贴图库「${saved.name}」（v${graph.schemaVersion} · 完整 PBR 通道落盘）`)
     }
+    if (liveSync) {
+      const tex = materialOutputToThreeTexture(baked.output, graph.targetSlot, saved.name)
+      const graphCopy = cloneGraph(graph)
+      attachTextureGraphSource(tex, { graph: graphCopy, savedId: saved.id })
+      const grid = detectGraphAtlasGrid(graph)
+      const meta: AppliedTextureMeta = {
+        ...(grid ? { atlasCols: grid.cols, atlasRows: grid.rows } : {}),
+        ...(atlasRegions ? { atlasRegions } : {}),
+        graph: graphCopy,
+        savedId: saved.id,
+      }
+      host.applyTexture(graph.targetSlot, tex, `◈ ${saved.name}`, meta)
+    }
     syncHeader()
     return saved
   }
 
-  q('#tg-save-new').onclick = () => { void saveToLibrary(false).catch(err => host.message(String(err), true)) }
-  saveOverBtn.onclick = () => { void saveToLibrary(true).catch(err => host.message(String(err), true)) }
+  q('#tg-save-new').onclick = () => {
+    void saveToLibrary(false).catch(err => host.message(err instanceof Error ? err.message : String(err), true))
+  }
+  saveOverBtn.onclick = () => {
+    void saveToLibrary(true).catch(err => host.message(err instanceof Error ? err.message : String(err), true))
+  }
 
   function exportPbrDataUrls() {
     const baked = syncBakeEvaluator.evaluate(graph, graph.resolution)
@@ -2175,17 +2385,14 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
       }
       // Only re-evaluate if the latest frame skipped PBR maps (fast drag preview)
       if ((previewChannel === 'normal' || previewChannel === 'roughness' || previewChannel === 'lit') && (!lastOutput || lastSkippedPbr)) {
-        void runEvaluateAsync(Math.min(256, graph.resolution), false, false)
+        void runEvaluateAsync(pinnedNodeId ? Math.min(256, graph.resolution) : graph.resolution, false, false)
       } else {
         renderPreviewCanvas()
       }
     }
   }
   prevPinBtn.onclick = () => {
-    if (pinnedNodeId) pinnedNodeId = undefined
-    else if (selectedNodeId) pinnedNodeId = selectedNodeId
-    syncNodeClasses()
-    void runEvaluateAsync(Math.min(256, graph.resolution), false, false)
+    setPinnedNode(pinnedNodeId ? undefined : selectedNodeId)
   }
   prevTileBtn.onclick = () => { tile2x2 = !tile2x2; renderPreviewCanvas() }
 
@@ -2205,38 +2412,42 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
   q('#tg-layout').onclick = () => autoLayout()
   q('#tg-del-node').onclick = () => deleteSelectedNode()
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts (capture phase so keys handled by TexGraph NEVER leak down to 3D CrownEditor!)
   const onKeyDown = (e: KeyboardEvent) => {
     if (!openState) return
     const tag = (e.target as HTMLElement | null)?.tagName
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
-      e.preventDefault(); undo()
+      e.preventDefault(); e.stopImmediatePropagation(); undo()
     } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
-      e.preventDefault(); redo()
+      e.preventDefault(); e.stopImmediatePropagation(); redo()
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
-      e.preventDefault(); duplicateNode()
+      e.preventDefault(); e.stopImmediatePropagation(); duplicateNode()
     } else if (e.key === 'Tab') {
-      e.preventDefault(); openSearchModal()
+      e.preventDefault(); e.stopImmediatePropagation(); openSearchModal()
     } else if (e.key.toLowerCase() === 'b' && !e.ctrlKey && !e.metaKey) {
       const n = graph.nodes.find(x => x.id === selectedNodeId)
-      if (n && n.type !== 'output_material') { e.preventDefault(); setBypass(n.id, !n.bypass) }
+      if (n && n.type !== 'output_material') { e.preventDefault(); e.stopImmediatePropagation(); setBypass(n.id, !n.bypass) }
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
-      e.preventDefault(); deleteSelectedNode()
+      e.preventDefault(); e.stopImmediatePropagation(); deleteSelectedNode()
     } else if (e.key === 'Escape') {
+      e.stopImmediatePropagation()
       if (!ctxMenu.hidden) ctxMenu.hidden = true
       if (!searchModal.hidden) searchModal.hidden = true
       if (!jsonModal.hidden) jsonModal.hidden = true
     }
   }
-  window.addEventListener('keydown', onKeyDown)
+  window.addEventListener('keydown', onKeyDown, { capture: true })
 
   // ---- Open / Close / Template Loading -------------------------------------
   function loadGraphInternal(next: TextureGraph, savedId?: string) {
+    dirtyDraft = false
+    activePickTarget = undefined
     graph = normalizeGraphSchemaVersion(cloneGraph(next))
     history.reset(graph, '载入节点图')
     activeSavedId = savedId
     pinnedNodeId = undefined
+    lastPinnedBuffer = undefined
     selectedLeafId = undefined
     selectedStemId = undefined
     // Auto-select vector_layout if present so direct canvas editing works immediately!
@@ -2271,6 +2482,9 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
 
     if (options.graph) {
       loadGraphInternal(options.graph, options.savedId)
+    } else if (options.savedId && host.store.get(options.savedId)) {
+      const saved = host.store.get(options.savedId)!
+      loadGraphInternal(saved.graph, saved.id)
     } else if (options.templateId && getTextureTemplate(options.templateId)) {
       loadGraphInternal(getTextureTemplate(options.templateId)!.build(), undefined)
     } else if (options.slot) {
@@ -2285,6 +2499,27 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
 
   function close() {
     if (!openState) return
+    const wasDirty = dirtyDraft
+    const hadPendingSync = Boolean(highResTimer || evalRaf)
+    if (evalRaf) { cancelAnimationFrame(evalRaf); evalRaf = 0; pendingHighRes = false }
+    if (highResTimer) { clearTimeout(highResTimer); highResTimer = undefined }
+    flushDirtyDraft()
+    if (!disposing && liveSync && (wasDirty || hadPendingSync)) {
+      const baked = syncBakeEvaluator.evaluate(graph, graph.resolution)
+      lastOutput = baked.output
+      const tex = materialOutputToThreeTexture(baked.output, graph.targetSlot, graph.name || '程序贴图')
+      const graphCopy = cloneGraph(graph)
+      attachTextureGraphSource(tex, { graph: graphCopy, savedId: activeSavedId })
+      const grid = detectGraphAtlasGrid(graph)
+      const regions = detectGraphAtlasRegions(graph)
+      const meta: AppliedTextureMeta = {
+        ...(grid ? { atlasCols: grid.cols, atlasRows: grid.rows } : {}),
+        ...(regions ? { atlasRegions: regions } : {}),
+        graph: graphCopy,
+        savedId: activeSavedId,
+      }
+      host.applyTexture(graph.targetSlot, tex, `◈ ${graph.name}`, meta)
+    }
     openState = false
     root.hidden = true
     ctxMenu.hidden = true
@@ -2319,13 +2554,16 @@ export function mountTextureEditor(host: TextureEditorHost): TextureEditorContro
     setReferenceImage,
     clearReferenceImage,
     setCompareMode,
-    sampleReferenceAt: (u, v) => (refImage ? sampleReferencePixel(refImage, u, v) : undefined),
+    sampleReferenceAt: (u, v) => (refImage ? safeSampleReferencePixel(refImage, u, v) : undefined),
     exportPbrDataUrls,
     getLastMetrics: () => (lastMetrics ? { ...lastMetrics } : undefined),
     agent: agentBridge,
     dispose() {
-      window.removeEventListener('keydown', onKeyDown)
-      if (highResTimer) clearTimeout(highResTimer)
+      disposing = true
+      window.removeEventListener('keydown', onKeyDown, { capture: true })
+      document.removeEventListener('pointerdown', onDocPointerDown)
+      if (evalRaf) { cancelAnimationFrame(evalRaf); evalRaf = 0 }
+      if (highResTimer) { clearTimeout(highResTimer); highResTimer = undefined }
       workerClient.dispose()
       close()
       root.remove()

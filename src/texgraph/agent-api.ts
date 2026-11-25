@@ -438,9 +438,10 @@ export function optimizeGraphAgainstReference(
   )
 
   // Final Verification @ 256px (and optional 512px ranking check!)
-  const best256 = evalAndScore(bestGraph, 256, true)
+  const wasAborted = Boolean(opts.signal?.aborted)
+  const best256 = wasAborted ? init256 : evalAndScore(bestGraph, 256, true)
   const gateRegression = init256.score.hardGatesPassed && !best256.score.hardGatesPassed
-  const netImproved = !gateRegression && best256.score.totalScore > init256.score.totalScore + 0.05
+  const netImproved = !wasAborted && !gateRegression && best256.score.totalScore > init256.score.totalScore + 0.05
 
   let finalGraph = netImproved ? bestGraph : initialGraph
   let finalScore256 = netImproved ? best256.score : init256.score

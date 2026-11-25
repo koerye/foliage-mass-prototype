@@ -4,6 +4,7 @@ import {
   defaultLeafNormalEdit, parseLeafNormalEdit,
   type LeafNormalEditSpec, type LeafNormalMode, type NormalBrushKind, type NormalBrushStroke,
 } from './leaf-normals'
+import { parseLeafEditSpec, type LeafEditSpec } from './leaf-edits'
 import {
   defaultTrunkSculpt, parseTrunkSculpt, woodSculptStyleMeta,
   type BarkUvMode, type TrunkSculptSpec, type WoodSculptStyleId,
@@ -13,15 +14,25 @@ export {
   type LeafNormalEditSpec, type LeafNormalMode, type NormalBrushKind, type NormalBrushStroke,
 } from './leaf-normals'
 export {
+  cloneLeafEditSpec, defaultLeafEditSpec, hasLeafEdits, parseLeafEditSpec,
+  type LeafBrushKind, type LeafBrushStroke, type LeafClumpEdit, type LeafEditSpec,
+} from './leaf-edits'
+export {
   barkUvModes, cloneTrunkSculpt, defaultTrunkSculpt, isWoodSculptActive, parseTrunkSculpt,
   woodSculptStyleIds, woodSculptStyleMeta,
   type BarkUvMode, type TrunkSculptSpec, type WoodSculptStyleId,
 } from './wood-sculpt'
 
-export const treeKinds = ['broadleaf', 'conifer', 'palm', 'grass', 'fern', 'flowerbed'] as const
+export const treeKinds = ['broadleaf', 'conifer', 'palm', 'bamboo', 'lotus', 'grass', 'fern', 'flowerbed'] as const
 export type TreeKind = typeof treeKinds[number]
-export const leafStyles = ['default', 'cloud', 'oak', 'sakura', 'maple', 'willow', 'bush', 'flower'] as const
+export const bambooStyles = ['realistic', 'chibi'] as const
+export type BambooStyle = typeof bambooStyles[number]
+export const leafStyles = ['default', 'cloud', 'oak', 'sakura', 'maple', 'willow', 'bush', 'flower', 'painted', 'feathery'] as const
 export type LeafStyle = typeof leafStyles[number]
+export const barkStyles = ['default', 'birch', 'driftwood', 'moss'] as const
+export type BarkStyle = typeof barkStyles[number]
+export const treeForms = ['free', 'meadow-birch'] as const
+export type TreeForm = typeof treeForms[number]
 export type XYZ = [number, number, number]
 
 export interface TrunkSpec {
@@ -36,6 +47,8 @@ export interface TrunkSpec {
   leanAngle?: number    // explicit lean azimuth in deg (0=+X right, 180=-X left; <0 = random from seed)
   gnarl?: number        // 0..1 organic bonsai/ancient elbow kinks & knot swells
   surfaceRoots?: number // 0..8 sculptural crawling ground roots emerging from trunk flare
+  barkStyle?: BarkStyle // unified bark appearance style ('default' | 'birch' | 'driftwood' | 'moss')
+  treeForm?: TreeForm   // unified skeleton form provider ('free' | 'meadow-birch')
   barkColor?: string    // custom bark base hex color (default #5b4636)
   barkScale?: number    // 3D procedural / triplanar bark projection density (0.25..4, default 1.0)
   barkDetail?: number   // 3D procedural bark relief/bump & grain strength (0..1.5, default 0.72)
@@ -288,16 +301,74 @@ export interface WishingAccentsSpec {
   sparkleColor: string   // starlight hex color
 }
 
-/** Stylized foliage look-dev shading: backlit SSS, cool shadow hue shift, sunlit rim & top warmth. */
+/** Stylized foliage look-dev shading: backlit SSS, cool shadow hue shift, sunlit rim, top warmth & painterly color-mass coherence. */
 export interface ShadingSpec {
-  leafStyle: LeafStyle    // built-in broadleaf foliage card silhouette (default/cloud/oak/sakura/maple/willow/bush/flower)
+  leafStyle: LeafStyle    // built-in broadleaf foliage card silhouette
   translucency: number   // 0..1 backlit subsurface scattering glow
   rimLight: number       // 0..1 soft sunward silhouette rim
   shadowShift: number    // 0..1 enrich shadow tint (cool violet/teal) instead of muddy gray
   topWarmth: number      // 0..1 three-zone sunlight warmth on crown top vs cool underside
+  colorMass?: number     // 0..1 coherent clump-level sunlit/shadow color-mass shading (Ghibli/hand-painted gouache mass)
   softSelfShadow: boolean // foliage casts shadows on trunk/floor without jagged card-on-card shadow triangles
   petals: number         // 0..60 lightweight floating falling petals / accent leaves around silhouette
   accent?: TreeAccent    // optional stylized decorative accents (e.g. mossy boulders + wishing ribbons/plaques)
+}
+
+/** Bamboo culms with narrow node rings and leaf cards along alternating shoots. */
+export interface BambooSpec {
+  style: BambooStyle       // slender living culms or a compact sculpted bamboo clump
+  culmCount: number        // 1..7 culms in the cluster
+  culmSpread: number       // 0..1.6 horizontal spread radius between culms (m)
+  segments: number         // 3..18 internode segments per culm
+  nodeBulge: number        // 0..0.65 flared node ring relief
+  nodeZigzag: number       // 0..0.45 alternating angular joint deflection
+  bend: number             // 0..2.2 overall graceful lean/arch (m)
+  hollowTop: boolean       // open cut hollow bamboo rim at culm apex (signature Q-version cut top)
+  culmColor: string        // base internode culm color
+  nodeColor: string        // pale creamy/lime node ring highlight color
+  canopyStart: number      // 0.15..0.85 height fraction where leaf clusters begin
+  tiers: number            // 1..6 staggered groups of foliage-bearing branches
+  branchLength: number     // 0.08..2.0 side bamboo branch reach (m)
+  leafCount: number        // 12..260 alpha bamboo leaf cards per culm
+  leafSize: number         // 0.2..1.6 bamboo leaf or spray card length (m)
+  leafDroop: number        // 0..1 natural arch/droop of leaf cards
+  tintInner: string        // shaded inner foliage color
+  tintOuter: string        // sunlit outer foliage color
+  tintVariance: number     // 0..0.5 per-card tint randomness
+  aoStrength: number       // 0..1 interior darkening
+  alphaCutoff: number      // 0.05..0.9 leaf card alpha test
+}
+
+/** Lotus & water-lily plant:
+ *  - withStems = true : curved emergent green stems + 3D cupped wavy radial lotus leaves + elevated multi-tier lotus blossoms & buds
+ *  - withStems = false: stemless floating water-lily pads (V-notched) + floating multi-tier lotus blossoms & buds */
+export interface LotusSpec {
+  withStems: boolean       // true = emergent stemmed lotus; false = floating stemless water-lily pads + lotus
+  spread: number           // 0.4..4.5 cluster radius (m)
+  leafCount: number        // 2..60 lotus pads
+  leafSize: number         // 0.15..1.4 base pad diameter (m)
+  leafSizeVariance: number // 0..0.75 big-medium-small size rhythm
+  leafCup: number          // 0..0.85 3D funnel cupping depth
+  leafWave: number         // 0..0.4 organic scalloped rim wave amplitude
+  leafNotch: number        // 0..1 floating slit probability; shallow rim tears on stemmed leaves
+  stemHeight: number       // 0.2..2.2 emergent stem height (m, stemmed mode)
+  stemRadius: number       // 0.006..0.045 stem radius (m)
+  stemCurve: number        // 0..1 graceful S-bend & outward fan lean
+  stemColor: string        // stem green tint
+  leafTintInner: string    // central hub / shaded leaf green
+  leafTintOuter: string    // sunlit margin leaf green
+  flowerCount: number      // 0..16 blooming multi-ring lotus flowers
+  budCount: number         // 0..12 plump unopened/half-open lotus buds
+  flowerSize: number       // 0.12..0.9 open lotus diameter (m)
+  petalRings: number       // 2..4 concentric staggered petal rings
+  petalsPerRing: number    // 5..12 petals per tier
+  flowerOpen: number       // 0.15..1.0 petal opening spread
+  flowerHeightBoost: number // -0.3..0.6 extra elevation of blooms above leaves (m, stemmed mode)
+  petalBaseColor: string   // luminous inner petal base color
+  petalTipColor: string    // radiant petal tip pigment
+  stamenColor: string      // golden seedpod & stamen color
+  tintVariance: number     // 0..0.4 per-pad organic hue/value variation
+  alphaCutoff: number      // 0.05..0.9 leaf/petal alpha cutoff
 }
 
 export interface TreeSpec {
@@ -312,11 +383,14 @@ export interface TreeSpec {
   fronds: FrondSpec
   ground: GroundSpec
   palm: PalmSpec
+  bamboo: BambooSpec
+  lotus: LotusSpec
   flowers: FlowerSpec
   flowerbed: FlowerBedSpec
   shading: ShadingSpec
   accents?: WishingAccentsSpec
   normalEdit?: LeafNormalEditSpec
+  leafEdits?: LeafEditSpec
   optimize: OptimizeSpec
   handles: CrownHandle[]
   branchEdits?: BranchEdit[]
@@ -345,6 +419,25 @@ const defaultPalm: PalmSpec = {
   spherize: .58, tintInner: '#4e8a38', tintOuter: '#eaffb8', tintVariance: .14, aoStrength: .4, alphaCutoff: .35,
 }
 
+export const defaultBamboo: BambooSpec = {
+  style: 'realistic',
+  culmCount: 1, culmSpread: .42, segments: 13, nodeBulge: .16, nodeZigzag: .05, bend: .43,
+  hollowTop: false, culmColor: '#4a713b', nodeColor: '#a5b371',
+  canopyStart: .43, tiers: 4, branchLength: 1.04, leafCount: 158, leafSize: .48, leafDroop: .36,
+  tintInner: '#2e513b', tintOuter: '#86aa57', tintVariance: .12, aoStrength: .34, alphaCutoff: .37,
+}
+
+export const defaultLotus: LotusSpec = {
+  withStems: true, spread: 1.42, leafCount: 11, leafSize: .70, leafSizeVariance: .46,
+  leafCup: .23, leafWave: .075, leafNotch: 0,
+  stemHeight: 1.15, stemRadius: .014, stemCurve: .58, stemColor: '#598149',
+  leafTintInner: '#427954', leafTintOuter: '#81b764',
+  flowerCount: 3, budCount: 2, flowerSize: .42, petalRings: 3, petalsPerRing: 7,
+  flowerOpen: .74, flowerHeightBoost: .24,
+  petalBaseColor: '#fff4f7', petalTipColor: '#ef6a98', stamenColor: '#ffd24a',
+  tintVariance: .14, alphaCutoff: .36,
+}
+
 export const defaultFlowers: FlowerSpec = {
   enabled: false, style: 'default', count: 75, sizeRatio: .8, sizeVariance: .28, outerShell: .76, surfaceOffset: .16,
   upBias: .5, clumping: .72, clusterCount: 7, cardType: 'quad', faceOutward: 1, cameraFacing: 0,
@@ -363,7 +456,7 @@ export const defaultOptimize: OptimizeSpec = {
 }
 
 export const defaultShading: ShadingSpec = {
-  leafStyle: 'default', translucency: .45, rimLight: .32, shadowShift: .34, topWarmth: .36, softSelfShadow: true, petals: 0, accent: 'none',
+  leafStyle: 'default', translucency: .45, rimLight: .32, shadowShift: .34, topWarmth: .36, colorMass: 0, softSelfShadow: true, petals: 0, accent: 'none',
 }
 
 export const defaultAccents: WishingAccentsSpec = {
@@ -473,6 +566,7 @@ export const presets = {
     trunk: {
       ...broadTrunk, height: 6.35, radius: .48, taper: 1.55, flare: 1.38, flareLobes: 6, flareHeight: 1.08,
       wobble: .08, lean: .12, barkRidges: 10, barkDepth: .082, forkHeight: .62,
+      barkStyle: 'driftwood',
       barkColor: '#b59a78', barkScale: .82, barkDetail: .46, barkTint: .10,
       barkMoss: .56, barkMossColor: '#5c9430', barkRootAO: .42,
       gnarl: .48, surfaceRoots: 7,
@@ -541,6 +635,67 @@ export const presets = {
       tintInner: '#365b34', tintOuter: '#9ec466', tintVariance: .16, leafSeed: 47,
     },
     shading: { leafStyle: 'cloud', translucency: .52, rimLight: .42, shadowShift: .34, topWarmth: .40, softSelfShadow: true, petals: 0 },
+  },
+  'broadleaf-poplar': {
+    kind: 'broadleaf', name: '乔木 · 羽叶高冠树', seed: 6412,
+    trunk: {
+      ...broadTrunk, height: 10.2, radius: .20, taper: 1.35, flare: .55, flareLobes: 5, flareHeight: .60,
+      wobble: .05, lean: .10, leanAngle: 15, gnarl: .06, surfaceRoots: 0,
+      barkColor: '#8d6445', barkScale: 1.15, barkDetail: .78, barkTint: .28, barkMoss: .28, barkMossColor: '#4c7e22',
+      barkRootAO: .46, barkRidges: 7, barkDepth: .05, forkHeight: .36,
+    },
+    crown: {
+      base: .20, top: 1, width: 2.25, depth: .90, roundness: 1.50, topBias: .56, coneShape: 1,
+      irregularity: .84, canopyLift: .18, padFlatten: .08,
+      profileCurve: [[0, .44], [.18, .92], [.44, 1.08], [.66, .84], [.80, .46], [.92, .22], [1, .15]],
+    },
+    branches: {
+      count: 13, perWhorl: 1, startHeight: .30, heightSpan: .64, azimuthOffset: 0,
+      angle: 56, angleTop: 76, reach: .98, lengthVariance: .46, curvature: .38, droop: .02,
+      tipCurl: 0, radiusRatio: .56, childCount: 4, childStart: .30, childAngle: 34, childLength: .48, childDroop: .06,
+      deadCount: 0, tierGradient: .45,
+    },
+    leaves: {
+      cardType: 'cross', leafSize: .86, leafSizeVariance: .44, leafTipScale: .80, leafAspect: 1.0, leafPivot: .34,
+      twigFrequency: 5.0, twigStart: .36, twigEnd: 1.0, twigLength: .62, leavesPerTwig: 6, leafStart: .38, tipLeaves: 2,
+      limbLeafFrequency: .8, leafJitter: .26, faceOutward: .68, upAlign: .22, randomRoll: 55, randomTilt: 24,
+      leafFold: .16, leafCurl: -.08, pruneOuter: 1.18, pruneInner: .28, normalSource: 'clumps', normalSpherize: .64,
+      clumpScale: 1.08, clumpFill: 2.2, clumpFillScale: 1.14, clumpFillDepth: .34, cameraFacing: 0,
+      tintInner: '#0c300e', tintOuter: '#94f03e', tintVariance: .20, aoStrength: .86, alphaCutoff: .44, leafSeed: 64,
+    },
+    shading: { leafStyle: 'feathery', colorMass: 0, translucency: .56, rimLight: .28, shadowShift: .36, topWarmth: .54, softSelfShadow: true, petals: 0 },
+  },
+  'broadleaf-bonsai-tier': {
+    kind: 'broadleaf', name: '盆景 · 卧枝云片古树', seed: 6494,
+    trunk: {
+      ...broadTrunk, height: 3.35, radius: .18, taper: 2.50, flare: .95, flareLobes: 5, flareHeight: .50,
+      wobble: .04, lean: 0, leanAngle: 180, gnarl: .36, surfaceRoots: 3,
+      barkColor: '#9a6e4b', barkScale: 1.20, barkDetail: .72, barkTint: .30, barkMoss: .34, barkMossColor: '#5c8a22',
+      barkRootAO: .52, barkRidges: 6, barkDepth: .04, forkHeight: .54,
+      spine: [
+        [0, 0, 0], [.20, .36, .04], [-.10, .72, .06], [-.82, .86, .04],
+        [-1.44, 1.14, .01], [-1.76, 1.66, -.02],
+      ],
+    },
+    crown: {
+      base: .34, top: 1, width: 2.30, depth: .86, roundness: 2.65, topBias: 1.38, coneShape: 1,
+      irregularity: .54, canopyLift: .62, padFlatten: .80,
+    },
+    branches: {
+      count: 6, perWhorl: 1, startHeight: .26, heightSpan: .70, azimuthOffset: 30,
+      angle: 18, angleTop: 52, reach: 1.06, lengthVariance: .34, curvature: .54, droop: .02,
+      tipCurl: 0, radiusRatio: .68, childCount: 5, childStart: .40, childAngle: 48, childLength: .42, childDroop: .02,
+      deadCount: 0, tierGradient: .45,
+    },
+    leaves: {
+      cardType: 'cross', leafSize: .56, leafSizeVariance: .30, leafTipScale: .88, leafAspect: 1.0, leafPivot: .42,
+      twigFrequency: 7.8, twigStart: .52, twigEnd: 1.0, twigLength: .30, leavesPerTwig: 8, leafStart: .58, tipLeaves: 2,
+      limbLeafFrequency: 0, leafJitter: .14, faceOutward: .58, upAlign: .64, randomRoll: 42, randomTilt: 16,
+      leafFold: .12, leafCurl: -.04, pruneOuter: 1.14, pruneInner: .24, normalSource: 'clumps', normalSpherize: .84,
+      clumpScale: 1.14, clumpFill: 14.0, clumpFillScale: 1.24, clumpFillDepth: .20, cameraFacing: 0,
+      tintInner: '#1c2d06', tintOuter: '#9cb82c', tintVariance: .16, aoStrength: .82, alphaCutoff: .42, leafSeed: 88,
+    },
+    shading: { leafStyle: 'feathery', colorMass: 0, translucency: .32, rimLight: .20, shadowShift: .28, topWarmth: .48, softSelfShadow: true, petals: 0 },
   },
   'conifer-standard': {
     kind: 'conifer', name: '松树 · 标准', seed: 1301, trunk: conTrunk,
@@ -685,6 +840,66 @@ export const presets = {
     branches: { ...stubBranches },
     flowerbed: { withStems: false, count: 34, spread: .68, height: .22, heightVariance: .42, flowerSize: .17, headTilt: 22, cardType: 'quad', tintInner: '#d64526', tintOuter: '#ff8a61' },
   },
+  'bamboo-realistic': {
+    kind: 'bamboo', name: '竹子 · 写实修长', seed: 5201,
+    trunk: { ...broadTrunk, height: 6.8, radius: .095, taper: .75, flare: .10, flareHeight: .25, wobble: .03, lean: .15, barkColor: '#5c9428' },
+    crown: { base: .34, top: 1, width: 1.85, depth: 1, roundness: 2, topBias: 1.25, coneShape: 1, irregularity: .25 },
+    branches: { ...stubBranches },
+    bamboo: {
+      style: 'realistic', culmCount: 3, culmSpread: .36, segments: 12, nodeBulge: .20, nodeZigzag: .03, bend: .32,
+      hollowTop: false, culmColor: '#5c9428', nodeColor: '#cde264',
+      canopyStart: .38, tiers: 5, branchLength: .82, leafCount: 144, leafSize: .92, leafDroop: .58,
+      tintInner: '#1c5d19', tintOuter: '#84c924', tintVariance: .14, aoStrength: .46, alphaCutoff: .36,
+    },
+    shading: { translucency: .32, rimLight: .18, shadowShift: .24, topWarmth: .24, colorMass: 0, softSelfShadow: true },
+  },
+  'bamboo-chibi': {
+    kind: 'bamboo', name: '竹子 · Q版卡通', seed: 5219,
+    trunk: { ...broadTrunk, height: 3.95, radius: .145, taper: .55, flare: .10, flareHeight: .25, wobble: .02, lean: .10, barkColor: '#6ea824' },
+    crown: { base: .24, top: 1, width: 1.75, depth: 1, roundness: 2, topBias: 1.15, coneShape: 1, irregularity: .25 },
+    branches: { ...stubBranches },
+    bamboo: {
+      style: 'chibi', culmCount: 3, culmSpread: .22, segments: 7, nodeBulge: .24, nodeZigzag: .03, bend: .14,
+      hollowTop: true, culmColor: '#6ea824', nodeColor: '#d9eb5b',
+      canopyStart: .34, tiers: 5, branchLength: .56, leafCount: 112, leafSize: 1.04, leafDroop: .58,
+      tintInner: '#1e6318', tintOuter: '#93d622', tintVariance: .14, aoStrength: .48, alphaCutoff: .36,
+    },
+    shading: { translucency: .34, rimLight: .20, shadowShift: .22, topWarmth: .28, colorMass: 0, softSelfShadow: true },
+  },
+  'lotus-stemmed': {
+    kind: 'lotus', name: '荷花 · 有杆挺水', seed: 6103,
+    trunk: { ...broadTrunk, height: 1.55, radius: .02, barkColor: '#3e8534' },
+    crown: { base: 0, top: 1, width: 1.55, depth: 1, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    lotus: {
+      withStems: true, spread: 1.32, leafCount: 11, leafSize: .83, leafSizeVariance: .44,
+      leafCup: .23, leafWave: .078, leafNotch: 0,
+      stemHeight: 1.18, stemRadius: .013, stemCurve: .64, stemColor: '#547d44',
+      leafTintInner: '#417952', leafTintOuter: '#82b161',
+      flowerCount: 3, budCount: 2, flowerSize: .66, petalRings: 3, petalsPerRing: 8,
+      flowerOpen: .72, flowerHeightBoost: .19,
+      petalBaseColor: '#fff0ed', petalTipColor: '#dc6398', stamenColor: '#eec25a',
+      tintVariance: .14, alphaCutoff: .36,
+    },
+    shading: { translucency: .38, rimLight: .2, shadowShift: .24, topWarmth: .24, softSelfShadow: true },
+  },
+  'lotus-floating': {
+    kind: 'lotus', name: '荷花 · 无杆浮水', seed: 6117,
+    trunk: { ...broadTrunk, height: .45, radius: .02, barkColor: '#3e8534' },
+    crown: { base: -.2, top: 1, width: 1.95, depth: 1, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    lotus: {
+      withStems: false, spread: 1.62, leafCount: 25, leafSize: .60, leafSizeVariance: .48,
+      leafCup: .025, leafWave: .018, leafNotch: .94,
+      stemHeight: .85, stemRadius: .016, stemCurve: .42, stemColor: '#3d8634',
+      leafTintInner: '#356f56', leafTintOuter: '#7eab5e',
+      flowerCount: 4, budCount: 2, flowerSize: .56, petalRings: 3, petalsPerRing: 8,
+      flowerOpen: .91, flowerHeightBoost: 0,
+      petalBaseColor: '#fff4f2', petalTipColor: '#d76d9a', stamenColor: '#eec25a',
+      tintVariance: .16, alphaCutoff: .36,
+    },
+    shading: { translucency: .37, rimLight: .2, shadowShift: .24, topWarmth: .24, softSelfShadow: true },
+  },
   'fern': {
     kind: 'fern', name: '蕨类', seed: 1212,
     trunk: { ...broadTrunk, height: .9, radius: .02 }, crown: { base: -.3, top: 1, width: 1.05, depth: 1, roundness: 2, topBias: 1, coneShape: 1, irregularity: .3 },
@@ -692,22 +907,29 @@ export const presets = {
     ground: { mode: 'card', count: 16, length: 1.05, lengthVariance: .2, width: .19, spread: .06, lean: 40, arch: .92, twist: 12, planes: 1, fold: 22,
       segments: 7, spherize: .55, tintBase: '#4b823c', tintTip: '#eaffcc', aoStrength: .45, alphaCutoff: .32 },
   },
-} as const satisfies Record<string, Partial<Omit<TreeSpec, 'branches' | 'leaves' | 'fronds' | 'ground' | 'palm' | 'flowers' | 'flowerbed' | 'shading' | 'accents'>> & { branches?: Partial<BranchSpec>; leaves?: Partial<LeafParams>; fronds?: Partial<FrondSpec>; ground?: Partial<GroundSpec>; palm?: Partial<PalmSpec>; flowers?: Partial<FlowerSpec>; flowerbed?: Partial<FlowerBedSpec>; shading?: Partial<ShadingSpec>; accents?: Partial<WishingAccentsSpec> }>
+} as const satisfies Record<string, Partial<Omit<TreeSpec, 'branches' | 'leaves' | 'fronds' | 'ground' | 'palm' | 'bamboo' | 'lotus' | 'flowers' | 'flowerbed' | 'shading' | 'accents'>> & { branches?: Partial<BranchSpec>; leaves?: Partial<LeafParams>; fronds?: Partial<FrondSpec>; ground?: Partial<GroundSpec>; palm?: Partial<PalmSpec>; bamboo?: Partial<BambooSpec>; lotus?: Partial<LotusSpec>; flowers?: Partial<FlowerSpec>; flowerbed?: Partial<FlowerBedSpec>; shading?: Partial<ShadingSpec>; accents?: Partial<WishingAccentsSpec> }>
 
 export type PresetId = keyof typeof presets
 export const presetIds = Object.keys(presets) as PresetId[]
 
 export function presetSpec(id: PresetId, seed?: number): TreeSpec {
-  const p = presets[id] as unknown as Partial<Omit<TreeSpec, 'branches'>> & { branches?: Partial<BranchSpec>; leaves?: Partial<LeafParams>; fronds?: Partial<FrondSpec>; ground?: Partial<GroundSpec>; palm?: Partial<PalmSpec>; flowers?: Partial<FlowerSpec>; flowerbed?: Partial<FlowerBedSpec>; shading?: Partial<ShadingSpec>; accents?: Partial<WishingAccentsSpec> }
+  const p = presets[id] as unknown as Partial<Omit<TreeSpec, 'branches'>> & { branches?: Partial<BranchSpec>; leaves?: Partial<LeafParams>; fronds?: Partial<FrondSpec>; ground?: Partial<GroundSpec>; palm?: Partial<PalmSpec>; bamboo?: Partial<BambooSpec>; lotus?: Partial<LotusSpec>; flowers?: Partial<FlowerSpec>; flowerbed?: Partial<FlowerBedSpec>; shading?: Partial<ShadingSpec>; accents?: Partial<WishingAccentsSpec> }
   return {
     schemaVersion: 2, kind: p.kind!, name: p.name!, seed: seed ?? p.seed!,
-    trunk: { ...broadTrunk, ...p.trunk!, sculpt: { ...defaultTrunkSculpt(), ...(p.trunk?.sculpt ?? {}) } },
+    trunk: {
+      ...broadTrunk,
+      ...p.trunk!,
+      ...(p.trunk?.spine ? { spine: p.trunk.spine.map(pt => [pt[0], pt[1], pt[2]] as XYZ) } : {}),
+      sculpt: { ...defaultTrunkSculpt(), ...(p.trunk?.sculpt ?? {}) },
+    },
     crown: { canopyLift: 0, padFlatten: 0, ...p.crown! },
     branches: { ...stubBranches, ...defaultBranchPlacement(p.kind!), ...(p.branches ?? {}) },
     leaves: parseLeafParams({ ...defaultLeafParams, ...(p.leaves ?? {}) }),
     fronds: { ...defaultFronds, ...(p.fronds ?? {}) },
     ground: { ...defaultGround, ...(p.ground ?? {}) },
     palm: { ...defaultPalm, ...(p.palm ?? {}) },
+    bamboo: { ...defaultBamboo, ...(p.bamboo ?? {}) },
+    lotus: { ...defaultLotus, ...(p.lotus ?? {}) },
     flowers: { ...defaultFlowers, ...(p.flowers ?? {}) },
     flowerbed: { ...defaultFlowerBed, ...(p.flowerbed ?? {}) },
     shading: { ...defaultShading, ...(p.shading ?? {}) },
@@ -724,7 +946,7 @@ export function parseTreeSpec(value: unknown): TreeSpec {
   const data = value as Partial<TreeSpec>
   if (data.schemaVersion !== 2) throw new Error('需要 schemaVersion 2 的树配置')
   if (!treeKinds.includes(data.kind as TreeKind)) throw new Error('未知树种类型')
-  const base = presetSpec(({ broadleaf: 'broadleaf-round', conifer: 'conifer-standard', palm: 'palm-tropical', grass: 'grass-clump', fern: 'fern', flowerbed: 'flowerbed-stemmed' } as const)[data.kind as TreeKind])
+  const base = presetSpec(({ broadleaf: 'broadleaf-round', conifer: 'conifer-standard', palm: 'palm-tropical', bamboo: 'bamboo-realistic', lotus: 'lotus-stemmed', grass: 'grass-clump', fern: 'fern', flowerbed: 'flowerbed-stemmed' } as const)[data.kind as TreeKind])
   const finite = (group: Record<string, unknown>, fallback: Record<string, unknown>) => {
     const out: Record<string, unknown> = { ...fallback }
     for (const [k, v] of Object.entries(group ?? {})) {
@@ -734,11 +956,18 @@ export function parseTreeSpec(value: unknown): TreeSpec {
     }
     return out
   }
-  const handles = Array.isArray(data.handles) ? data.handles.map((h, i) => {
-    const vec = (v: unknown) => Array.isArray(v) && v.length === 3 && v.every(n => Number.isFinite(n)) ? v as XYZ : [0, 0, 0] as XYZ
-    return { id: Number(h.id ?? i), kind: h.kind === 'bare' ? 'bare' : 'shape', anchor: vec(h.anchor), offset: vec(h.offset),
-      radius: Math.max(.05, Number(h.radius) || 1) } as CrownHandle
-  }) : []
+  const handles = Array.isArray(data.handles) ? data.handles
+    .filter((h): h is CrownHandle => Boolean(h && typeof h === 'object'))
+    .map((h, i) => {
+      const vec = (v: unknown) => Array.isArray(v) && v.length === 3 && v.every(n => Number.isFinite(n)) ? v as XYZ : [0, 0, 0] as XYZ
+      return {
+        id: Number.isFinite(Number(h.id)) ? Number(h.id) : i,
+        kind: h.kind === 'bare' ? 'bare' : 'shape',
+        anchor: vec(h.anchor),
+        offset: vec(h.offset),
+        radius: Math.min(20, Math.max(.05, Number(h.radius) || 1)),
+      } as CrownHandle
+    }) : []
   const clampNum = (v: unknown, lo: number, hi: number) => typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : undefined
   const branchEdits: BranchEdit[] = []
   if (Array.isArray(data.branchEdits)) {
@@ -775,6 +1004,18 @@ export function parseTreeSpec(value: unknown): TreeSpec {
   }
   const parsedTrunk = finite(data.trunk as never, base.trunk as never) as unknown as TrunkSpec
   parsedTrunk.sculpt = parseTrunkSculpt((data.trunk as Partial<TrunkSpec> | undefined)?.sculpt)
+  const rawBarkStyle = (data.trunk as Partial<TrunkSpec> | undefined)?.barkStyle
+  if (typeof rawBarkStyle === 'string' && (barkStyles as readonly string[]).includes(rawBarkStyle) && rawBarkStyle !== 'default') {
+    parsedTrunk.barkStyle = rawBarkStyle as BarkStyle
+  } else {
+    delete parsedTrunk.barkStyle
+  }
+  const rawTreeForm = (data.trunk as Partial<TrunkSpec> | undefined)?.treeForm
+  if (typeof rawTreeForm === 'string' && (treeForms as readonly string[]).includes(rawTreeForm) && rawTreeForm !== 'free') {
+    parsedTrunk.treeForm = rawTreeForm as TreeForm
+  } else {
+    delete parsedTrunk.treeForm
+  }
   const rawSpine = (data.trunk as Partial<TrunkSpec> | undefined)?.spine
   if (Array.isArray(rawSpine) && rawSpine.length >= 3) {
     const valid = rawSpine.filter(p => Array.isArray(p) && p.length === 3 && p.every(n => typeof n === 'number' && Number.isFinite(n))) as XYZ[]
@@ -789,24 +1030,210 @@ export function parseTreeSpec(value: unknown): TreeSpec {
       .sort((a, b) => a[0] - b[0])
     if (valid.length >= 2) parsedCrown.profileCurve = valid
   }
+  const clampIn = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Number.isFinite(v) ? v : lo))
+  parsedTrunk.height = clampIn(parsedTrunk.height, 0.3, 40)
+  parsedTrunk.radius = clampIn(parsedTrunk.radius, 0.015, 3)
+  parsedTrunk.taper = clampIn(parsedTrunk.taper, 0.05, 4.0)
+  parsedTrunk.forkHeight = clampIn(parsedTrunk.forkHeight, 0.02, 1.0)
+  parsedTrunk.flare = clampIn(parsedTrunk.flare, 0, 3)
+  parsedTrunk.flareHeight = clampIn(parsedTrunk.flareHeight, 0.02, 5.0)
+  parsedCrown.base = clampIn(parsedCrown.base, -0.5, 0.95)
+  parsedCrown.top = clampIn(parsedCrown.top, Math.min(1.6, parsedCrown.base + 0.05), 2.5)
+  parsedCrown.width = clampIn(parsedCrown.width, 0.15, 25)
+  parsedCrown.depth = clampIn(parsedCrown.depth, 0.2, 3)
+  parsedCrown.roundness = clampIn(parsedCrown.roundness, 0.2, 5)
+  parsedCrown.topBias = clampIn(parsedCrown.topBias, 0.25, 3)
+  parsedCrown.coneShape = clampIn(parsedCrown.coneShape, 0.2, 3)
+  parsedCrown.irregularity = clampIn(parsedCrown.irregularity, 0, 2)
+  if (typeof parsedCrown.canopyLift === 'number') parsedCrown.canopyLift = clampIn(parsedCrown.canopyLift, 0, 1)
+  if (typeof parsedCrown.padFlatten === 'number') parsedCrown.padFlatten = clampIn(parsedCrown.padFlatten, 0, 1)
+  const parsedBranches = finite(data.branches as never, base.branches as never) as unknown as BranchSpec
+  parsedBranches.count = Math.round(clampIn(parsedBranches.count, 0, 48))
+  parsedBranches.childCount = Math.round(clampIn(parsedBranches.childCount, 0, 16))
+  parsedBranches.heightSpan = clampIn(parsedBranches.heightSpan, 0.05, 1.0)
+  parsedBranches.startHeight = clampIn(parsedBranches.startHeight, 0.02, 0.96)
+  parsedBranches.radiusRatio = clampIn(parsedBranches.radiusRatio, 0.05, 1.0)
+  const parsedFronds = finite(data.fronds as never, base.fronds as never) as unknown as FrondSpec
+  if (!(frondModes as readonly string[]).includes(parsedFronds.mode)) parsedFronds.mode = base.fronds.mode
+  parsedFronds.start = clampIn(parsedFronds.start, 0.0, 0.85)
+  parsedFronds.cardsPerBranch = Math.round(clampIn(parsedFronds.cardsPerBranch, 1, 6))
+  parsedFronds.segments = Math.round(clampIn(parsedFronds.segments, 2, 12))
+  parsedFronds.cardAspect = clampIn(parsedFronds.cardAspect, 0.08, 3)
+  parsedFronds.overhang = clampIn(parsedFronds.overhang, 0, 1.5)
+  parsedFronds.arch = clampIn(parsedFronds.arch, -1, 2)
+  parsedFronds.cardCup = clampIn(parsedFronds.cardCup, -1, 1)
+  parsedFronds.drop = clampIn(parsedFronds.drop, 0.05, 4)
+  parsedFronds.drapeTilt = clampIn(parsedFronds.drapeTilt, -60, 85)
+  parsedFronds.drapeCurl = clampIn(parsedFronds.drapeCurl, -1, 2)
+  parsedFronds.drapeChildren = clampIn(parsedFronds.drapeChildren, 0, 2)
+  parsedFronds.width = clampIn(parsedFronds.width, 0.03, 3)
+  parsedFronds.fold = clampIn(parsedFronds.fold, 0, 85)
+  parsedFronds.cross = clampIn(parsedFronds.cross, 0, 2)
+  parsedFronds.childScale = clampIn(parsedFronds.childScale, 0.1, 2.5)
+  parsedFronds.spherize = clampIn(parsedFronds.spherize, 0, 1)
+  parsedFronds.tintVariance = clampIn(parsedFronds.tintVariance, 0, 1)
+  parsedFronds.aoStrength = clampIn(parsedFronds.aoStrength, 0, 1)
+  parsedFronds.alphaCutoff = clampIn(parsedFronds.alphaCutoff, 0.01, 0.99)
+  parsedFronds.tuft = clampIn(parsedFronds.tuft, 0, 3)
+  parsedFronds.twist = clampIn(parsedFronds.twist, 0, 180)
+  const parsedOptimize = finite(data.optimize as never, base.optimize as never) as unknown as OptimizeSpec
+  parsedOptimize.level = clampIn(parsedOptimize.level, 0, 1)
+  parsedOptimize.woodDetail = clampIn(parsedOptimize.woodDetail, 0.1, 1)
+  parsedOptimize.cardReduction = clampIn(parsedOptimize.cardReduction, 0, 0.85)
+  const parsedGround = finite(data.ground as never, base.ground as never) as unknown as GroundSpec
+  if (parsedGround.mode !== 'blade' && parsedGround.mode !== 'card') parsedGround.mode = base.ground.mode
+  parsedGround.count = Math.round(clampIn(parsedGround.count, 1, 400))
+  parsedGround.length = clampIn(parsedGround.length, 0.05, 5)
+  parsedGround.lengthVariance = clampIn(parsedGround.lengthVariance, 0, 0.95)
+  parsedGround.width = clampIn(parsedGround.width, 0.005, 1.5)
+  parsedGround.widthVariance = clampIn(parsedGround.widthVariance, 0, 0.95)
+  parsedGround.widthFullness = clampIn(parsedGround.widthFullness, 0.15, 4)
+  parsedGround.spread = clampIn(parsedGround.spread, 0, 6)
+  parsedGround.radialBias = clampIn(parsedGround.radialBias, 0.1, 6)
+  parsedGround.angleJitter = clampIn(parsedGround.angleJitter, 0, 180)
+  parsedGround.sideSwirl = clampIn(parsedGround.sideSwirl, -180, 180)
+  parsedGround.lean = clampIn(parsedGround.lean, 0, 89)
+  parsedGround.leanVariance = clampIn(parsedGround.leanVariance, 0, 90)
+  parsedGround.arch = clampIn(parsedGround.arch, -1.5, 3)
+  parsedGround.bendVariance = clampIn(parsedGround.bendVariance, 0, 1.5)
+  parsedGround.droop = clampIn(parsedGround.droop, -1, 2)
+  parsedGround.cup = clampIn(parsedGround.cup, -1, 1)
+  parsedGround.twist = clampIn(parsedGround.twist, 0, 360)
+  parsedGround.planes = Math.round(clampIn(parsedGround.planes, 1, 4))
+  parsedGround.across = Math.round(clampIn(parsedGround.across, 1, 8))
+  parsedGround.fold = clampIn(parsedGround.fold, 0, 85)
+  parsedGround.segments = Math.round(clampIn(parsedGround.segments, 2, 32))
+  parsedGround.spherize = clampIn(parsedGround.spherize, 0, 1)
+  parsedGround.tintVariance = clampIn(parsedGround.tintVariance, 0, 1)
+  parsedGround.aoStrength = clampIn(parsedGround.aoStrength, 0, 1)
+  parsedGround.alphaCutoff = clampIn(parsedGround.alphaCutoff, 0.01, 0.99)
+  const parsedPalm = finite(data.palm as never, base.palm as never) as unknown as PalmSpec
+  parsedPalm.bend = clampIn(parsedPalm.bend, 0, 5)
+  parsedPalm.sCurve = clampIn(parsedPalm.sCurve, 0, 3)
+  parsedPalm.ringCount = Math.round(clampIn(parsedPalm.ringCount, 2, 60))
+  parsedPalm.ringStep = clampIn(parsedPalm.ringStep, 0, 0.6)
+  parsedPalm.frondCount = Math.round(clampIn(parsedPalm.frondCount, 2, 48))
+  parsedPalm.frondLength = clampIn(parsedPalm.frondLength, 0.3, 12)
+  parsedPalm.frondLengthVariance = clampIn(parsedPalm.frondLengthVariance, 0, 0.9)
+  parsedPalm.frondWidth = clampIn(parsedPalm.frondWidth, 0.05, 3)
+  parsedPalm.frondArch = clampIn(parsedPalm.frondArch, 0, 4)
+  parsedPalm.frondPitch = clampIn(parsedPalm.frondPitch, -45, 85)
+  parsedPalm.frondFold = clampIn(parsedPalm.frondFold, 0, 80)
+  parsedPalm.frondTwist = clampIn(parsedPalm.frondTwist, 0, 180)
+  parsedPalm.segments = Math.round(clampIn(parsedPalm.segments, 2, 24))
+  parsedPalm.coconuts = Math.round(clampIn(parsedPalm.coconuts, 0, 12))
+  parsedPalm.spherize = clampIn(parsedPalm.spherize, 0, 1)
+  parsedPalm.tintVariance = clampIn(parsedPalm.tintVariance, 0, 1)
+  parsedPalm.aoStrength = clampIn(parsedPalm.aoStrength, 0, 1)
+  parsedPalm.alphaCutoff = clampIn(parsedPalm.alphaCutoff, 0.01, 0.99)
   const parsedFlowerBed = finite(data.flowerbed as never, base.flowerbed as never) as unknown as FlowerBedSpec
   if (!(flowerBedLayouts as readonly string[]).includes(parsedFlowerBed.layout)) parsedFlowerBed.layout = 'dome'
+  parsedFlowerBed.count = Math.round(clampIn(parsedFlowerBed.count, 1, 300))
+  parsedFlowerBed.spread = clampIn(parsedFlowerBed.spread, 0.08, 6)
+  parsedFlowerBed.height = clampIn(parsedFlowerBed.height, 0.05, 3)
+  parsedFlowerBed.heightVariance = clampIn(parsedFlowerBed.heightVariance, 0, 0.9)
+  parsedFlowerBed.lean = clampIn(parsedFlowerBed.lean, 0, 85)
+  parsedFlowerBed.bend = clampIn(parsedFlowerBed.bend, 0, 1.5)
+  parsedFlowerBed.stemRadius = clampIn(parsedFlowerBed.stemRadius, 0.002, 0.08)
+  parsedFlowerBed.stemLeaves = Math.round(clampIn(parsedFlowerBed.stemLeaves, 0, 8))
+  parsedFlowerBed.stemLeafSize = clampIn(parsedFlowerBed.stemLeafSize, 0.02, 1)
+  parsedFlowerBed.flowerSize = clampIn(parsedFlowerBed.flowerSize, 0.03, 1.5)
+  parsedFlowerBed.flowerSizeVariance = clampIn(parsedFlowerBed.flowerSizeVariance, 0, 0.9)
+  parsedFlowerBed.headTilt = clampIn(parsedFlowerBed.headTilt, 0, 90)
+  parsedFlowerBed.faceOutward = clampIn(parsedFlowerBed.faceOutward, 0, 1)
+  parsedFlowerBed.tintVariance = clampIn(parsedFlowerBed.tintVariance, 0, 1)
+  parsedFlowerBed.alphaCutoff = clampIn(parsedFlowerBed.alphaCutoff, 0.01, 0.99)
+  parsedFlowerBed.atlasCols = Math.round(clampIn(parsedFlowerBed.atlasCols, 1, 8))
+  parsedFlowerBed.atlasRows = Math.round(clampIn(parsedFlowerBed.atlasRows, 1, 8))
+  const parsedBamboo = finite(data.bamboo as never, base.bamboo as never) as unknown as BambooSpec
+  if (!(bambooStyles as readonly string[]).includes(parsedBamboo.style)) parsedBamboo.style = 'realistic'
+  parsedBamboo.culmCount = Math.round(clampIn(parsedBamboo.culmCount, 1, 16))
+  parsedBamboo.culmSpread = clampIn(parsedBamboo.culmSpread, 0, 4)
+  parsedBamboo.segments = Math.round(clampIn(parsedBamboo.segments, 2, 36))
+  parsedBamboo.nodeBulge = clampIn(parsedBamboo.nodeBulge, 0, 1)
+  parsedBamboo.nodeZigzag = clampIn(parsedBamboo.nodeZigzag, 0, 1)
+  parsedBamboo.bend = clampIn(parsedBamboo.bend, 0, 4)
+  parsedBamboo.canopyStart = clampIn(parsedBamboo.canopyStart, 0.05, 0.95)
+  parsedBamboo.tiers = Math.round(clampIn(parsedBamboo.tiers, 1, 12))
+  parsedBamboo.branchLength = clampIn(parsedBamboo.branchLength, 0.05, 4)
+  parsedBamboo.leafCount = Math.round(clampIn(parsedBamboo.leafCount, 4, 600))
+  parsedBamboo.leafSize = clampIn(parsedBamboo.leafSize, 0.05, 3)
+  parsedBamboo.leafDroop = clampIn(parsedBamboo.leafDroop, 0, 1.5)
+  parsedBamboo.tintVariance = clampIn(parsedBamboo.tintVariance, 0, 1)
+  parsedBamboo.aoStrength = clampIn(parsedBamboo.aoStrength, 0, 1)
+  parsedBamboo.alphaCutoff = clampIn(parsedBamboo.alphaCutoff, 0.01, 0.99)
+  const parsedLotus = finite(data.lotus as never, base.lotus as never) as unknown as LotusSpec
+  parsedLotus.spread = clampIn(parsedLotus.spread, 0.2, 8)
+  parsedLotus.leafCount = Math.round(clampIn(parsedLotus.leafCount, 1, 120))
+  parsedLotus.leafSize = clampIn(parsedLotus.leafSize, 0.08, 2.5)
+  parsedLotus.leafSizeVariance = clampIn(parsedLotus.leafSizeVariance, 0, 0.9)
+  parsedLotus.leafCup = clampIn(parsedLotus.leafCup, 0, 1)
+  parsedLotus.leafWave = clampIn(parsedLotus.leafWave, 0, 0.8)
+  parsedLotus.leafNotch = clampIn(parsedLotus.leafNotch, 0, 1)
+  parsedLotus.stemHeight = clampIn(parsedLotus.stemHeight, 0.1, 4)
+  parsedLotus.stemRadius = clampIn(parsedLotus.stemRadius, 0.003, 0.1)
+  parsedLotus.stemCurve = clampIn(parsedLotus.stemCurve, 0, 1.5)
+  parsedLotus.flowerCount = Math.round(clampIn(parsedLotus.flowerCount, 0, 32))
+  parsedLotus.budCount = Math.round(clampIn(parsedLotus.budCount, 0, 24))
+  parsedLotus.flowerSize = clampIn(parsedLotus.flowerSize, 0.05, 2)
+  parsedLotus.petalRings = Math.round(clampIn(parsedLotus.petalRings, 1, 6))
+  parsedLotus.petalsPerRing = Math.round(clampIn(parsedLotus.petalsPerRing, 3, 18))
+  parsedLotus.flowerOpen = clampIn(parsedLotus.flowerOpen, 0.05, 1.2)
+  parsedLotus.flowerHeightBoost = clampIn(parsedLotus.flowerHeightBoost, -0.8, 1.5)
+  parsedLotus.tintVariance = clampIn(parsedLotus.tintVariance, 0, 1)
+  parsedLotus.alphaCutoff = clampIn(parsedLotus.alphaCutoff, 0.01, 0.99)
+  const parsedFlowers = finite(data.flowers as never, base.flowers as never) as unknown as FlowerSpec
+  parsedFlowers.count = Math.round(clampIn(parsedFlowers.count, 0, 600))
+  parsedFlowers.sizeRatio = clampIn(parsedFlowers.sizeRatio, 0.1, 4)
+  parsedFlowers.sizeVariance = clampIn(parsedFlowers.sizeVariance, 0, 0.95)
+  parsedFlowers.outerShell = clampIn(parsedFlowers.outerShell, 0.1, 0.99)
+  parsedFlowers.surfaceOffset = clampIn(parsedFlowers.surfaceOffset, 0, 1.5)
+  parsedFlowers.upBias = clampIn(parsedFlowers.upBias, -1, 1)
+  parsedFlowers.clumping = clampIn(parsedFlowers.clumping, 0, 1)
+  parsedFlowers.clusterCount = Math.round(clampIn(parsedFlowers.clusterCount, 1, 48))
+  parsedFlowers.faceOutward = clampIn(parsedFlowers.faceOutward, 0, 1)
+  parsedFlowers.cameraFacing = clampIn(parsedFlowers.cameraFacing, 0, 1)
+  parsedFlowers.tintVariance = clampIn(parsedFlowers.tintVariance, 0, 1)
+  parsedFlowers.alphaCutoff = clampIn(parsedFlowers.alphaCutoff, 0.01, 0.99)
+  parsedFlowers.atlasCols = Math.round(clampIn(parsedFlowers.atlasCols, 1, 8))
+  parsedFlowers.atlasRows = Math.round(clampIn(parsedFlowers.atlasRows, 1, 8))
+  parsedFlowers.seed = Math.round(clampIn(parsedFlowers.seed, 0, 999999))
+  const parsedShading = finite(data.shading as never, base.shading as never) as unknown as ShadingSpec
+  parsedShading.translucency = clampIn(parsedShading.translucency, 0, 1)
+  parsedShading.rimLight = clampIn(parsedShading.rimLight, 0, 1)
+  parsedShading.shadowShift = clampIn(parsedShading.shadowShift, 0, 1)
+  parsedShading.topWarmth = clampIn(parsedShading.topWarmth, 0, 1)
+  parsedShading.petals = Math.round(clampIn(parsedShading.petals, 0, 120))
+  if (typeof parsedShading.colorMass === 'number') {
+    parsedShading.colorMass = clampIn(parsedShading.colorMass, 0, 1)
+  }
+  const parsedAccents = finite(data.accents as never, (base.accents ?? defaultAccents) as never) as unknown as WishingAccentsSpec
+  parsedAccents.rockCount = Math.round(clampIn(parsedAccents.rockCount, 0, 16))
+  parsedAccents.rockScale = clampIn(parsedAccents.rockScale, 0.2, 3)
+  parsedAccents.ribbonWraps = Math.round(clampIn(parsedAccents.ribbonWraps, 0, 8))
+  parsedAccents.plaqueCount = Math.round(clampIn(parsedAccents.plaqueCount, 0, 24))
+  parsedAccents.plaqueScale = clampIn(parsedAccents.plaqueScale, 0.3, 3)
+  parsedAccents.sparkleCount = Math.round(clampIn(parsedAccents.sparkleCount, 0, 80))
+  const parsedLeafEdits = parseLeafEditSpec(data.leafEdits)
   return {
     schemaVersion: 2, kind: data.kind as TreeKind, name: String(data.name ?? base.name),
     seed: Number.isInteger(data.seed) ? data.seed! : base.seed,
     trunk: parsedTrunk,
     crown: parsedCrown,
-    branches: finite(data.branches as never, base.branches as never) as unknown as BranchSpec,
+    branches: parsedBranches,
     leaves: parseLeafParams(data.leaves),
-    fronds: finite(data.fronds as never, base.fronds as never) as unknown as FrondSpec,
-    ground: finite(data.ground as never, base.ground as never) as unknown as GroundSpec,
-    palm: finite(data.palm as never, base.palm as never) as unknown as PalmSpec,
-    flowers: finite(data.flowers as never, base.flowers as never) as unknown as FlowerSpec,
+    fronds: parsedFronds,
+    ground: parsedGround,
+    palm: parsedPalm,
+    bamboo: parsedBamboo,
+    lotus: parsedLotus,
+    flowers: parsedFlowers,
     flowerbed: parsedFlowerBed,
-    shading: finite(data.shading as never, base.shading as never) as unknown as ShadingSpec,
-    accents: finite(data.accents as never, (base.accents ?? defaultAccents) as never) as unknown as WishingAccentsSpec,
+    shading: parsedShading,
+    accents: parsedAccents,
     normalEdit: parseLeafNormalEdit(data.normalEdit),
-    optimize: finite(data.optimize as never, base.optimize as never) as unknown as OptimizeSpec,
+    ...(parsedLeafEdits ? { leafEdits: parsedLeafEdits } : {}),
+    optimize: parsedOptimize,
     handles,
     ...(branchEdits.length ? { branchEdits } : {}),
   }

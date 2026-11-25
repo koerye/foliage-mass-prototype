@@ -6,10 +6,11 @@ import {
 } from 'three'
 import type { TrunkSpec } from './spec'
 import {
-  barkFlowTileU, buildTrunkFeaturePlan, evalBarkSculpt, evalFlowBarkMicroCpu,
-  flowTwistAngle, woodSculptLodParams,
-  type BarkHeightField, type SocketFlowHint, type TrunkFeaturePlan,
+  computeSculptedBarkBytes,
+  type BarkHeightField, type NormalMapConvention, type SculptedBarkBakeBuffers,
+  type SculptedBarkBakePayload, type SocketFlowHint, type TrunkFeaturePlan,
 } from './wood-sculpt'
+import type { BarkBakeWorkerRequest, BarkBakeWorkerResponse } from './bark-bake.worker'
 
 // ---------------------------------------------------------------------------
 // PART A: Crash-Proof Primary Branch Collar Topological Welding
@@ -474,7 +475,7 @@ export function bridgeWeldedCollar(
 // ---------------------------------------------------------------------------
 // PART B: High-Poly Sculpt -> Low-Poly Tangent-Space Normal & Cavity AO Baker
 // ---------------------------------------------------------------------------
-export type NormalMapConvention = 'opengl' | 'directx'
+export type { NormalMapConvention }
 
 export interface BakedBarkMaps {
   normalMap: Texture
@@ -485,6 +486,14 @@ export interface BakedBarkMaps {
   normalBytes: Uint8Array
   aoBytes: Uint8Array
   dispose(): void
+}
+
+export interface BakeSculptedBarkOptions {
+  size?: number
+  normalConvention?: NormalMapConvention
+  heightField?: BarkHeightField
+  baseNormalMap?: Texture
+  plan?: TrunkFeaturePlan
 }
 
 function makeLinearTexture(
@@ -544,38 +553,43 @@ function readTextureRgba(tex: Texture | undefined, size: number): Uint8ClampedAr
   }
 }
 
-/** Separable O(1)-per-pixel periodic box blur in U (wrapping) and clamped V (approximates low-poly mesh capture). */
-function lowPassHeightGrid(src: Float32Array, w: number, h: number, radU: number, radV: number): Float32Array {
-  const tmp = new Float32Array(w * h)
-  const dst = new Float32Array(w * h)
-  const rU = Math.max(0, Math.min(Math.floor(w / 4), Math.round(radU)))
-  const rV = Math.max(0, Math.min(Math.floor(h / 4), Math.round(radV)))
-  if (rU === 0 && rV === 0) {
-    dst.set(src)
-    return dst
+function wrapBakedBarkMaps(buf: SculptedBarkBakeBuffers): BakedBarkMaps {
+  const normalMap = makeLinearTexture(buf.normalBytes, buf.width, buf.height, 'BakedSculptBarkNormal', buf.repeatY, true)
+  const aoMap = makeLinearTexture(buf.aoBytes, buf.width, buf.height, 'BakedSculptBarkAO', buf.repeatY, true)
+  aoMap.channel = 0
+  return {
+    normalMap,
+    aoMap,
+    width: buf.width,
+    height: buf.height,
+    normalConvention: buf.normalConvention,
+    normalBytes: buf.normalBytes,
+    aoBytes: buf.aoBytes,
+    dispose() {
+      normalMap.dispose()
+      aoMap.dispose()
+    },
   }
-  const invU = 1 / (2 * rU + 1)
-  for (let y = 0; y < h; y++) {
-    const row = y * w
-    let sum = 0
-    for (let dx = -rU; dx <= rU; dx++) sum += src[row + wrapMod(dx, w)]
-    tmp[row] = sum * invU
-    for (let x = 1; x < w; x++) {
-      sum += src[row + wrapMod(x + rU, w)] - src[row + wrapMod(x - 1 - rU, w)]
-      tmp[row + x] = sum * invU
-    }
+}
+
+function buildBakePayload(
+  trunk: TrunkSpec,
+  seed: number,
+  woodDetail: number,
+  options: BakeSculptedBarkOptions,
+): SculptedBarkBakePayload {
+  const size = Math.max(64, Math.min(2048, Math.round(options.size ?? 512)))
+  const normalConvention: NormalMapConvention = options.normalConvention === 'directx' ? 'directx' : 'opengl'
+  return {
+    trunk,
+    seed,
+    woodDetail,
+    size,
+    normalConvention,
+    heightField: options.heightField,
+    baseNormRgba: readTextureRgba(options.baseNormalMap, size),
+    plan: options.plan,
   }
-  const invV = 1 / (2 * rV + 1)
-  for (let x = 0; x < w; x++) {
-    let sum = 0
-    for (let dy = -rV; dy <= rV; dy++) sum += tmp[Math.max(0, Math.min(h - 1, dy)) * w + x]
-    dst[x] = sum * invV
-    for (let y = 1; y < h; y++) {
-      sum += tmp[Math.min(h - 1, y + rV) * w + x] - tmp[Math.max(0, y - 1 - rV) * w + x]
-      dst[y * w + x] = sum * invV
-    }
-  }
-  return dst
 }
 
 /** Bakes a seamless glTF 2.0 Tangent-Space Normal Map (OpenGL +Y or DirectX -Y) + Cavity AO Map directly from
@@ -590,160 +604,75 @@ export function bakeSculptedBarkMaps(
   trunk: TrunkSpec,
   seed: number,
   woodDetail: number,
-  options: {
-    size?: number
-    normalConvention?: NormalMapConvention
-    heightField?: BarkHeightField
-    baseNormalMap?: Texture
-    plan?: TrunkFeaturePlan
-  } = {},
+  options: BakeSculptedBarkOptions = {},
 ): BakedBarkMaps {
-  const size = Math.max(64, Math.min(2048, Math.round(options.size ?? 512)))
-  const normalConvention: NormalMapConvention = options.normalConvention === 'directx' ? 'directx' : 'opengl'
-  const ySign = normalConvention === 'directx' ? -1 : 1
-  const sculpt = trunk.sculpt!
-  const phase = (seed % 997) / 997 * Math.PI * 2
-  const barkScale = trunk.barkScale ?? 1
-  const detailStrength = MathUtils.clamp(trunk.barkDetail ?? 0.72, 0.1, 1.5)
-  const hRef = Math.max(0.5, trunk.height)
-  const baseR = Math.max(0.08, trunk.radius)
-  const vSpan = 2.1 // matches evalBarkSculpt uvV = normS * 2.1
-  const uTile = barkFlowTileU(barkScale)
+  const payload = buildBakePayload(trunk, seed, woodDetail, options)
+  return wrapBakedBarkMaps(computeSculptedBarkBytes(payload))
+}
 
-  const plan = options.plan ?? buildTrunkFeaturePlan(
-    sculpt, seed, phase, trunk.flare, trunk.flareLobes, trunk.flareHeight,
-    trunk.height, trunk.height * (trunk.forkHeight ?? 0.6), [], [],
-  )
-  // Match the exact sculpted trunk mesh vertical UV range [0 .. maxTrunkUvV] so baked buttresses,
-  // wide ribs & branch sockets align 1:1 with geometry with zero vertical stretch or mid-trunk wrap seam!
-  const trunkArcLen = Math.max(0.4, plan.trunkArcLen || hRef * (trunk.forkHeight ?? 0.65))
-  const maxTrunkUvV = Math.max(0.5, (trunkArcLen / hRef) * vSpan)
-  const vTileInt = Math.max(1, Math.round(maxTrunkUvV * barkScale * 0.85))
+let barkBakeWorker: Worker | undefined
+let barkBakeWorkerFailed = false
+let barkBakeReqSeq = 0
+const pendingBarkBakeJobs = new Map<number, {
+  resolve: (buf: SculptedBarkBakeBuffers) => void
+  reject: (err: Error) => void
+}>()
 
-  const hiHeight = new Float32Array(size * size)
-  const cavGrid = new Float32Array(size * size)
-
-  // 1. Sample exact analytical high-poly surface height (meters) + procedural micro-fibers in Flow-UV space
-  for (let py = 0; py < size; py++) {
-    // Flip V for Canvas/glTF image top-down orientation (py = 0 -> v = 1 -> top of trunk!)
-    const vNorm = 1 - (py + 0.5) / size
-    const t = vNorm
-    const arcLen = vNorm * trunkArcLen
-    const y = arcLen
-    const rLocal = baseR * Math.pow(1 - t * 0.45, trunk.taper)
-    const vUv = vNorm * maxTrunkUvV
-    const twistAng = flowTwistAngle(arcLen / hRef, sculpt.twist)
-
-    for (let px = 0; px < size; px++) {
-      const uNorm = (px + 0.5) / size
-      // Invert Flow UV (uvU = (angle - twistAng) / 2PI) -> physical angle for exact surface alignment!
-      const angle = uNorm * Math.PI * 2 + twistAng
-      const res = evalBarkSculpt({
-        sculpt, angle, t, arcLen, y, baseRadius: rLocal, refHeight: hRef,
-        phase, concavity: 0, isTrunk: true, barkScale,
-        flare: trunk.flare * 0.45, flareLobes: trunk.flareLobes, flareHeight: trunk.flareHeight,
-        heightField: options.heightField, plan,
-      })
-      // Add procedural flow-bark micro-striations (so GPU onBeforeCompile fibers appear natively in external GLB viewers!)
-      const micro = evalFlowBarkMicroCpu(uNorm, vUv, barkScale)
-      const microMeters = (micro - 0.5) * baseR * 0.048 * detailStrength
-      hiHeight[py * size + px] = (res.finalRadius - rLocal) + microMeters
-      cavGrid[py * size + px] = MathUtils.clamp(res.cavity + (0.5 - micro) * 0.28 * detailStrength, 0, 1)
+function getBarkBakeWorker(): Worker | undefined {
+  if (barkBakeWorkerFailed || typeof Worker === 'undefined') return undefined
+  if (barkBakeWorker) return barkBakeWorker
+  try {
+    const w = new Worker(new URL('./bark-bake.worker.ts', import.meta.url), { type: 'module' })
+    w.onmessage = (ev: MessageEvent<BarkBakeWorkerResponse>) => {
+      const msg = ev.data
+      const job = pendingBarkBakeJobs.get(msg.id)
+      if (!job) return
+      pendingBarkBakeJobs.delete(msg.id)
+      if (msg.ok) job.resolve(msg.result)
+      else job.reject(new Error(msg.error || '树皮法线 Worker 烘焙失败'))
     }
-  }
-
-  // 2. Deduct low-frequency height already represented by the exported mesh's LOD subdivision!
-  //    At High LOD (woodDetail=1), mesh captures wide ribs -> small lowPass kernel leaves crisp crevices & micro-grain;
-  //    At Game/Mobile LOD (woodDetail=0.4..0.6), mesh is coarse -> wider lowPass kernel bakes full rib curvature into normal map!
-  const lod = woodSculptLodParams(woodDetail, sculpt)
-  const meshCaptureU = Math.max(2, Math.round((size / Math.max(8, lod.trunkSegs)) * 0.55))
-  const meshCaptureV = Math.max(2, Math.round((size / Math.max(8, lod.trunkRings)) * 0.55))
-  // Blend residual vs full relief cleanly: lower woodDetail keeps much more macro rib relief in the normal map!
-  const macroRetention = MathUtils.clamp((1.0 - woodDetail) * 1.15, 0.22, 0.92)
-  const lowHeight = lowPassHeightGrid(hiHeight, size, size, meshCaptureU, meshCaptureV)
-
-  const residual = new Float32Array(size * size)
-  for (let i = 0; i < residual.length; i++) {
-    residual[i] = (hiHeight[i] - lowHeight[i]) + lowHeight[i] * macroRetention
-  }
-
-  // 3. Compute exact centered-difference OpenGL Tangent-Space Normals (+X right, +Y up, +Z out)
-  const normalBytes = new Uint8Array(size * size * 4)
-  const aoBytes = new Uint8Array(size * size * 4)
-  const baseNormRgba = readTextureRgba(options.baseNormalMap, size)
-
-  const avgCircum = Math.PI * 2 * baseR * 0.85
-  const dSu = avgCircum / size
-  const dSv = trunkArcLen / size
-  const normalGain = 1.15 + (1 - woodDetail) * 0.45
-
-  for (let py = 0; py < size; py++) {
-    const yPrev = Math.max(0, py - 1)
-    const yNext = Math.min(size - 1, py + 1)
-    for (let px = 0; px < size; px++) {
-      const xPrev = (px - 1 + size) % size
-      const xNext = (px + 1) % size
-
-      const dhdu = (residual[py * size + xNext] - residual[py * size + xPrev]) / (2 * dSu)
-      // Image py increases downward while UV v increases upward -> negate d/dpy for OpenGL +Y up!
-      const dhdv = (residual[yPrev * size + px] - residual[yNext * size + px]) / (2 * dSv)
-
-      let nx = -dhdu * normalGain
-      let ny = -dhdv * normalGain
-      let nz = 1.0
-      const len = Math.hypot(nx, ny, nz)
-      nx /= len; ny /= len; nz /= len
-
-      // Reoriented Normal Mapping (RNM) blend if a Substance bark normalMap was already present (integer periodic V!)
-      if (baseNormRgba) {
-        const bx = wrapMod(Math.round(px * uTile), size)
-        const by = wrapMod(Math.round(py * vTileInt), size)
-        const bi = (by * size + bx) * 4
-        const tx = baseNormRgba[bi] / 127.5 - 1
-        const ty = baseNormRgba[bi + 1] / 127.5 - 1
-        const tz = Math.max(0.05, baseNormRgba[bi + 2] / 127.5 - 1)
-        // RNM: t = (nx, ny, nz + 1), u = (-tx, -ty, tz), r = t * dot(t, u) - u * t.z
-        const tZ = nz + 1
-        const dotTU = nx * (-tx) + ny * (-ty) + tZ * tz
-        let rx = nx * dotTU + tx * tZ
-        let ry = ny * dotTU + ty * tZ
-        let rz = tZ * dotTU - tz * tZ
-        const rLen = Math.hypot(rx, ry, rz)
-        if (rLen > 1e-5) { nx = rx / rLen; ny = ry / rLen; nz = Math.max(0.05, rz / rLen) }
+    w.onerror = () => {
+      barkBakeWorkerFailed = true
+      if (barkBakeWorker === w) barkBakeWorker = undefined
+      const err = new Error('树皮法线 Worker 运行异常，已回退至同步烘焙')
+      for (const [id, job] of pendingBarkBakeJobs) {
+        pendingBarkBakeJobs.delete(id)
+        job.reject(err)
       }
+      try { w.terminate() } catch { /* ignore */ }
+    }
+    barkBakeWorker = w
+    return w
+  } catch {
+    barkBakeWorkerFailed = true
+    return undefined
+  }
+}
 
-      const idx = (py * size + px) * 4
-      normalBytes[idx] = Math.round(MathUtils.clamp(nx * 0.5 + 0.5, 0, 1) * 255)
-      normalBytes[idx + 1] = Math.round(MathUtils.clamp((ny * ySign) * 0.5 + 0.5, 0, 1) * 255)
-      normalBytes[idx + 2] = Math.round(MathUtils.clamp(nz * 0.5 + 0.5, 0, 1) * 255)
-      normalBytes[idx + 3] = 255
-
-      const aoVal = Math.round(MathUtils.clamp(1 - cavGrid[py * size + px] * sculpt.creviceAO * 0.82, 0.16, 1) * 255)
-      aoBytes[idx] = aoVal
-      aoBytes[idx + 1] = aoVal
-      aoBytes[idx + 2] = aoVal
-      aoBytes[idx + 3] = 255
+/** Non-blocking Worker-accelerated version of `bakeSculptedBarkMaps` (prevents 2048² UI thread freezes).
+ *  Automatically falls back to synchronous `computeSculptedBarkBytes` in Node/Vitest or if Worker fails. */
+export async function bakeSculptedBarkMapsAsync(
+  trunk: TrunkSpec,
+  seed: number,
+  woodDetail: number,
+  options: BakeSculptedBarkOptions = {},
+): Promise<BakedBarkMaps> {
+  const payload = buildBakePayload(trunk, seed, woodDetail, options)
+  const worker = getBarkBakeWorker()
+  if (worker) {
+    try {
+      const buf = await new Promise<SculptedBarkBakeBuffers>((resolve, reject) => {
+        const id = ++barkBakeReqSeq
+        pendingBarkBakeJobs.set(id, { resolve, reject })
+        const req: BarkBakeWorkerRequest = { id, payload }
+        worker.postMessage(req)
+      })
+      return wrapBakedBarkMaps(buf)
+    } catch {
+      // Fallback transparently to main-thread synchronous compute so export never fails
     }
   }
-
-  const repeatY = 1 / maxTrunkUvV
-  const normalMap = makeLinearTexture(normalBytes, size, size, 'BakedSculptBarkNormal', repeatY, true)
-  const aoMap = makeLinearTexture(aoBytes, size, size, 'BakedSculptBarkAO', repeatY, true)
-  aoMap.channel = 0
-
-  return {
-    normalMap,
-    aoMap,
-    width: size,
-    height: size,
-    normalConvention,
-    normalBytes,
-    aoBytes,
-    dispose() {
-      normalMap.dispose()
-      aoMap.dispose()
-    },
-  }
+  return wrapBakedBarkMaps(computeSculptedBarkBytes(payload))
 }
 
 /** Encodes baked tangent-space normal & cavity AO RGBA grids into standalone PNG data URLs (browser download). */

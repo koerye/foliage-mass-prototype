@@ -297,14 +297,16 @@ function buildLeafCards(skeleton: Skeleton, spec: TreeSpec) {
   const segCount = Math.max(2, Math.round(fr.segments * (1 - opt.level * .55)))
   const spineFor = (b: Branch, from: number, lengthScale: number) => {
     const rows = Math.max(3, segCount + 1)
-    const span = (1 - from) * b.length
-    const total = Math.max(span * (1 + fr.overhang), env.height * .08) * lengthScale
+    const safeFrom = Math.min(0.95, Math.max(0, Number.isFinite(from) ? from : 0))
+    const span = Math.max(1e-4, (1 - safeFrom) * Math.max(1e-4, b.length))
+    const total = Math.max(span * (1 + fr.overhang), env.height * .08) * Math.max(0.05, lengthScale)
     const end = b.curve.getPoint(1), endT = b.curve.getTangent(1).normalize()
     const pts: Vector3[] = []
     for (let i = 0; i < rows; i++) {
       const s = i / (rows - 1)
       const d = s * total
-      const p = d <= span ? b.curve.getPoint(from + (1 - from) * d / span) : end.clone().addScaledVector(endT, d - span)
+      const u = Math.min(1, Math.max(0, safeFrom + (1 - safeFrom) * (d / span)))
+      const p = d <= span ? b.curve.getPoint(u) : end.clone().addScaledVector(endT, d - span)
       p.y -= fr.arch * total * .25 * s * s
       pts.push(p)
     }

@@ -46,6 +46,73 @@ export function drapeDown(tangent: Vector3, tiltDeg: number) {
 const golden = Math.PI * (3 - Math.sqrt(5))
 const polar = (theta: number) => new Vector3(Math.cos(theta), 0, Math.sin(theta))
 
+/** Fisher-Yates shuffled index permutation [0..count-1] using the supplied deterministic RNG (ez-tree inspired). */
+export function shuffledIndices(count: number, random: () => number): number[] {
+  const n = Math.max(0, Math.floor(count))
+  const indices = Array.from({ length: n }, (_, i) => i)
+  for (let i = n - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1))
+    const tmp = indices[i]
+    indices[i] = indices[j]
+    indices[j] = tmp
+  }
+  return indices
+}
+
+export interface StratifiedBranchSlot {
+  /** Stratified normalized socket position along parent branch in [start, end]. */
+  socket: number
+  /** Decorrelated stratified azimuth angle in radians paired via Fisher-Yates shuffle. */
+  azimuth: number
+  /** Angular sector index assigned to this height slot. */
+  sectorIndex: number
+}
+
+/**
+ * Opt-in stratified azimuth sampler (ez-tree style): partitions [0, 2π) into `count` equal
+ * sectors, applies intra-sector jitter, and decorrelates tier order with Fisher-Yates `shuffledIndices`.
+ * Opt-in helper for future climbing/vine/branch modes; does NOT alter default `buildSkeleton` RNG.
+ */
+export function sampleStratifiedAzimuths(
+  count: number,
+  random: () => number,
+  options: { phase?: number; jitter?: number } = {},
+): number[] {
+  const n = Math.max(0, Math.floor(count))
+  if (n === 0) return []
+  const phase = options.phase ?? 0
+  const jitter = MathUtils.clamp(options.jitter ?? 0.65, 0, 1)
+  const sectorSpan = (Math.PI * 2) / n
+  const order = shuffledIndices(n, random)
+  return order.map(sector => phase + (sector + 0.5 + (random() - 0.5) * jitter) * sectorSpan)
+}
+
+/**
+ * Opt-in stratified parent-branch socket + shuffled azimuth slot generator for future
+ * vine/climbing/decurrent branching modes (zero impact on existing preset RNG sequences).
+ */
+export function sampleStratifiedBranchSlots(
+  count: number,
+  random: () => number,
+  options: { start?: number; end?: number; phase?: number; socketJitter?: number; azimuthJitter?: number } = {},
+): StratifiedBranchSlot[] {
+  const n = Math.max(0, Math.floor(count))
+  if (n === 0) return []
+  const start = MathUtils.clamp(options.start ?? 0.2, 0, 1)
+  const end = MathUtils.clamp(options.end ?? 0.95, start, 1)
+  const span = end - start
+  const socketJitter = MathUtils.clamp(options.socketJitter ?? 0.5, 0, 1)
+  const azimuthJitter = MathUtils.clamp(options.azimuthJitter ?? 0.65, 0, 1)
+  const phase = options.phase ?? 0
+  const sectorSpan = (Math.PI * 2) / n
+  const order = shuffledIndices(n, random)
+  return order.map((sectorIndex, tier) => {
+    const socket = MathUtils.clamp(start + span * ((tier + 0.5 + (random() - 0.5) * socketJitter) / n), start, end)
+    const azimuth = phase + (sectorIndex + 0.5 + (random() - 0.5) * azimuthJitter) * sectorSpan
+    return { socket, azimuth, sectorIndex }
+  })
+}
+
 function anyPerpendicular(v: Vector3) {
   const a = Math.abs(v.y) < .9 ? UP : new Vector3(1, 0, 0)
   return new Vector3().crossVectors(v, a).normalize()
@@ -289,7 +356,7 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
   const explicitLean = T.leanAngle !== undefined && T.leanAngle >= 0
   const leanDir = polar(explicitLean ? MathUtils.degToRad(T.leanAngle!) : randLean)
   const ph = [random(), random(), random(), random()].map(x => x * Math.PI * 2)
-  const topY = conifer ? H : H * T.forkHeight
+  const topY = (conifer || spec.kind === 'bamboo') ? H : H * T.forkHeight
   const trunkSamples = 22
   const trunkPoints: Vector3[] = [], trunkRadii: number[] = []
   const gnarl = MathUtils.clamp(T.gnarl ?? 0, 0, 1)
@@ -337,9 +404,10 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
   const trunkCurve = makeCurve(trunkPoints)
   const trunkAtY = (y: number) => trunkCurve.getPoint(Math.min(1, Math.max(0, y / topY)))
   const axisPoint = conifer ? trunkAtY(H * (C.base + (1 - C.base) * .4)) : trunkPoints[trunkPoints.length - 1]
-  const ground = spec.kind === 'grass' || spec.kind === 'fern' || spec.kind === 'flowerbed'
+  const ground = spec.kind === 'grass' || spec.kind === 'fern' || spec.kind === 'flowerbed' || spec.kind === 'lotus'
+  const bamboo = spec.kind === 'bamboo'
   const env = new CrownEnvelope(spec, ground ? new Vector3() : axisPoint)
-  if (ground) return { branches: [trunk], trunk, envelope: env, clusters: [] }
+  if (ground || bamboo) return { branches: [trunk], trunk, envelope: env, clusters: [] }
   const trunkR = (t: number) => radiusAt(trunk, t)
 
   // ---- broadleaf: decurrent limbs aimed at the envelope ---------------------
@@ -524,10 +592,12 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
   for (const b of branches) {
     let w: number[]
     if (b.role === 'trunk') {
-      w = b.points.map(p => conifer ? smooth((p.y - env.y0) / (H - env.y0), .5, 1) : 0)
+      const denom = Math.max(0.05, H - env.y0)
+      w = b.points.map(p => conifer ? smooth((p.y - env.y0) / denom, .5, 1) : 0)
     } else {
       const root = weightAt(b.parentId!, b.socket!)
-      w = b.points.map((_, i) => root + (1 - root) * smooth(i / (b.points.length - 1), 0, .85))
+      const lastIdx = Math.max(1, b.points.length - 1)
+      w = b.points.map((_, i) => root + (1 - root) * smooth(i / lastIdx, 0, .85))
     }
     weights.set(b.id, w)
     b.points = b.points.map((p, i) => env.deform(p, w[i]))
@@ -598,12 +668,13 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
     // Big-Medium-Small rhythmic sizing when cloud pads are enabled
     const rhythm = padFlat > 0 ? MathUtils.lerp(1, rank, padFlat * .7) : 1
     const size = Math.min(finalEnv.width * .68, Math.max(.34, b.length * scale * rhythm))
+    const extraFlat = Math.max(0, (padFlat - .68) / .17)
     if (padFlat > 0) center.y += size * padFlat * .16
     clusters.push({
       center, direction,
-      width: size * (1.15 + padFlat * .38),
-      height: size * Math.max(.36, .75 - padFlat * .34),
-      depth: size * (1.05 + padFlat * .32),
+      width: size * (1.15 + padFlat * .38 + extraFlat * .18),
+      height: size * Math.max(.26, .75 - padFlat * .34 - extraFlat * .14),
+      depth: size * (1.05 + padFlat * .32 + extraFlat * .14),
     })
   }
   let limbIdx = 0
@@ -614,7 +685,8 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
     const rank = b.role === 'limb' ? (limbIdx++ % 3 === 0 ? 1.24 : limbIdx % 3 === 1 ? .96 : .76) : .88
     addCluster(b, .84, b.role === 'limb' ? .48 : .85, rank)
     // bridge mid-crown gaps on primary broadleaf limbs so foliage reads as cohesive clouds instead of isolated balls
-    if (!conifer && b.role === 'limb' && b.length > finalEnv.width * .4) addCluster(b, .56, .38, .92)
+    // (skip when padFlatten >= 0.72 so sculptural bonsai tiers keep clean architectural sky gaps & exposed limbs)
+    if (!conifer && b.role === 'limb' && padFlat < .72 && b.length > finalEnv.width * .4) addCluster(b, .56, .38, .92)
   }
   return { branches: finalBranches, trunk, envelope: finalEnv, clusters }
 }

@@ -5,15 +5,17 @@
 import './texgraph.css'
 import type { Texture } from 'three'
 import type { EditableTextureSlot } from '../studio/texture-slots'
+import type { TreeSpec } from '../tree/spec'
 import {
   dataUrlToThreeTexture, evaluateTextureGraph, materialOutputToDataUrl,
   materialOutputToThreeTexture,
 } from './engine'
+import { cloneGraph } from './nodes'
 import type { SavedTextureItem, TextureLibraryStore } from './store'
 import {
   detectGraphAtlasGrid, detectGraphAtlasRegions, getTextureTemplate, textureTemplates,
 } from './templates'
-import type { AtlasRegion, TextureCategory, TextureGraph } from './types'
+import type { AtlasRegion, TextureCategory, TextureGraph, TextureGraphSource } from './types'
 import { categoryLabels, defaultSlotForCategory, slotLabels } from './types'
 
 export type TextureLibraryTab = 'mine' | 'templates'
@@ -22,6 +24,91 @@ export interface AppliedTextureMeta {
   atlasCols?: number
   atlasRows?: number
   atlasRegions?: AtlasRegion[]
+  graph?: TextureGraph
+  savedId?: string
+  templateId?: string
+}
+
+/** Attach node-graph / library provenance onto a live Three.js Texture. */
+export function attachTextureGraphSource(texture: Texture, source?: TextureGraphSource): void {
+  if (!source || (!source.graph && !source.savedId && !source.templateId)) return
+  const ud = (texture.userData ??= {}) as Record<string, unknown>
+  ud.texGraphSource = {
+    ...(source.graph ? { graph: cloneGraph(source.graph) } : {}),
+    ...(source.savedId ? { savedId: source.savedId } : {}),
+    ...(source.templateId ? { templateId: source.templateId } : {}),
+  } satisfies TextureGraphSource
+}
+
+/** Read node-graph / library provenance from a live Three.js Texture. */
+export function readTextureGraphSource(texture?: Texture): TextureGraphSource | undefined {
+  if (!texture?.userData) return undefined
+  const raw = (texture.userData as Record<string, unknown>).texGraphSource as TextureGraphSource | undefined
+  if (!raw || typeof raw !== 'object') return undefined
+  if (!raw.graph && !raw.savedId && !raw.templateId) return undefined
+  return raw
+}
+
+/** Resolve the exact Texture Editor open options for a given slot so clicking「节点编辑」
+ *  always loads the currently active texture's node graph / library item / style template
+ *  instead of resetting to a generic default node graph. */
+export function resolveSlotEditorOptions(
+  slot: EditableTextureSlot,
+  customTex: Texture | undefined,
+  store: TextureLibraryStore,
+  spec?: Pick<TreeSpec, 'kind' | 'shading' | 'leaves' | 'trunk'>,
+): { slot: EditableTextureSlot; graph?: TextureGraph; savedId?: string; templateId?: string } {
+  // 1. Direct provenance attached to the currently active custom texture
+  const src = readTextureGraphSource(customTex)
+  if (src) {
+    if (src.graph) {
+      return { slot, graph: cloneGraph(src.graph), savedId: src.savedId, templateId: src.templateId }
+    }
+    if (src.savedId) {
+      const saved = store.get(src.savedId)
+      if (saved) return { slot, graph: cloneGraph(saved.graph), savedId: saved.id }
+    }
+    if (src.templateId && getTextureTemplate(src.templateId)) {
+      return { slot, templateId: src.templateId }
+    }
+  }
+
+  // 2. Legacy/persisted custom texture without embedded graph: match by name in Texture Library or Templates
+  if (customTex?.name) {
+    const cleanName = customTex.name.replace(/^[◈◆★]\s*/, '').trim()
+    if (cleanName) {
+      const allSaved = store.list()
+      const exactSlotMatch = allSaved.find(it => it.targetSlot === slot && it.name.trim() === cleanName)
+      const anySlotMatch = exactSlotMatch ?? allSaved.find(it => it.name.trim() === cleanName)
+      if (anySlotMatch) {
+        return { slot, graph: cloneGraph(anySlotMatch.graph), savedId: anySlotMatch.id }
+      }
+      const tplMatch = textureTemplates.find(t => t.name.trim() === cleanName)
+      if (tplMatch) {
+        return { slot, templateId: tplMatch.id }
+      }
+    }
+  }
+
+  // 3. No custom texture bound: match the currently active built-in style template on the tree
+  if (!customTex && spec) {
+    if (slot === 'leaf' && spec.kind === 'broadleaf') {
+      const ls = spec.shading.leafStyle
+      if (ls === 'oak') {
+        const isAtlas = (spec.leaves.atlasCols ?? 1) > 1 || (spec.leaves.atlasRows ?? 1) > 1
+        return { slot, templateId: isAtlas ? 'leaf-oak-atlas' : 'leaf-oak-painterly' }
+      }
+      if (ls === 'maple') return { slot, templateId: 'leaf-maple' }
+      if (ls === 'willow') return { slot, templateId: 'leaf-willow' }
+      if (ls === 'sakura' || ls === 'flower') return { slot, templateId: 'flower-sakura' }
+    }
+    if (slot === 'bark' && spec.trunk.barkStyle === 'moss') {
+      return { slot, templateId: 'bark-painterly-moss' }
+    }
+  }
+
+  // 4. Fallback to slot default template
+  return { slot }
 }
 
 export interface TextureLibraryHost<S> {
@@ -70,27 +157,19 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
   let tab: TextureLibraryTab = 'mine'
   let category: TextureCategory | 'all' = 'all'
   let searchQuery = ''
-  let hoverPreviewEnabled = true
   let activeAppliedId: string | undefined
-  let suppressHoverKey: string | undefined
   let editingNameId: string | undefined
   let confirmDeleteId: string | undefined
+  let loadingLibrary = false
+  let disposed = false
 
-  // Hover preview snapshot management
-  let previewSnap: S | undefined
-  let previewSnapSlot: EditableTextureSlot | undefined
-  let previewingId: string | undefined
-  let hoverTimer: ReturnType<typeof setTimeout> | undefined
-  let previewGen = 0
-
-  // Lazy cached thumbnails + baked dataUrls for built-in templates (zero startup cost!)
+  // Lazy cached thumbnails for built-in templates (zero startup cost, bounded cache)
   const templateThumbCache = new Map<string, string>()
-  const templateBakeCache = new Map<string, string>()
 
   const drawer = document.createElement('aside')
   drawer.className = 'tl-drawer'
   drawer.id = 'texture-library-drawer'
-  drawer.setAttribute('aria-label', '实时贴图库（支持悬停 3D 实时预览）')
+  drawer.setAttribute('aria-label', '实时贴图库（单击预览 · 双击应用并返回）')
   drawer.hidden = true
 
   drawer.innerHTML = `
@@ -115,17 +194,16 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
         <button type="button" data-tl-cat="bark" aria-pressed="false">树皮</button>
         <button type="button" data-tl-cat="needle" aria-pressed="false">针叶</button>
         <button type="button" data-tl-cat="flower" aria-pressed="false">花朵</button>
+        <button type="button" data-tl-cat="grass" aria-pressed="false">草蕨</button>
       </div>
       <div class="tl-search-row">
         <input id="tl-search" class="tl-search" type="search" placeholder="搜索贴图名称或槽位…">
-        <label class="tl-hover-toggle" title="鼠标悬停贴图卡片时，直接在左侧 3D 树木上实时预览效果">
-          <input id="tl-hover-cb" type="checkbox" checked>悬停实时 3D 预览
-        </label>
+        <span class="tl-hover-toggle" title="仅在单击卡片时载入并预览贴图，杜绝鼠标划过卡顿；双击直接应用并返回">单击预览 · 双击返回</span>
       </div>
     </div>
     <div class="tl-preview-bar" id="tl-preview-bar" hidden>
-      <span id="tl-preview-text">👁 正在实时预览</span>
-      <span>单击应用 · 移开恢复</span>
+      <span id="tl-preview-text">👁 已预览贴图</span>
+      <span>单击切换 · 双击应用并返回</span>
     </div>
     <div class="tl-scroll"><div class="tl-grid" id="tl-grid"></div></div>
     <footer class="tl-foot">
@@ -143,7 +221,6 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
   const mineCountEl = q('#tl-mine-count')
   const storagePill = q('#tl-storage-pill')
   const searchInput = q<HTMLInputElement>('#tl-search')
-  const hoverCb = q<HTMLInputElement>('#tl-hover-cb')
   const previewBar = q('#tl-preview-bar')
   const previewText = q('#tl-preview-text')
   const gridEl = q('#tl-grid')
@@ -183,96 +260,118 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
       : undefined
     // Evaluate full multi-channel PBR output for templates so 3D gets live Normal + Roughness + Height!
     const ev = evaluateTextureGraph(graph, 512)
-    if (!templateBakeCache.has(tplId)) {
-      templateBakeCache.set(tplId, materialOutputToDataUrl(ev.output, tpl.targetSlot))
-    }
     const texture = materialOutputToThreeTexture(ev.output, tpl.targetSlot, tpl.name)
     return { slot: tpl.targetSlot, name: tpl.name, texture, meta }
   }
 
-  function endHoverPreview(restore: boolean, applyingSlot?: EditableTextureSlot) {
-    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = undefined }
-    previewGen++
-    if (previewSnap !== undefined) {
-      const snap = previewSnap
-      const snapSlot = previewSnapSlot
-      previewSnap = undefined
-      previewSnapSlot = undefined
-      previewingId = undefined
-      previewBar.hidden = true
-      // Always restore if caller requested restore OR if applying to a DIFFERENT slot (prevents cross-slot UAF!)
-      if (restore || (applyingSlot !== undefined && snapSlot !== applyingSlot)) {
-        host.restoreSlot(snap)
-      }
+  let applySeq = 0
+  let pendingApply: { key: string; seq: number; promise: Promise<boolean> } | undefined
+  let lastApplied: { key: string; at: number } | undefined
+
+  function syncActiveCards() {
+    for (const card of gridEl.querySelectorAll<HTMLElement>('[data-saved-id]')) {
+      card.classList.toggle('is-active', card.dataset.savedId === activeAppliedId)
+    }
+    for (const card of gridEl.querySelectorAll<HTMLElement>('[data-tpl-id]')) {
+      card.classList.toggle('is-active', `tpl:${card.dataset.tplId}` === activeAppliedId)
     }
   }
 
-  function startHoverPreview(
-    key: string,
-    slot: EditableTextureSlot,
-    name: string,
-    loader: () => Promise<Texture | undefined>,
-    meta?: AppliedTextureMeta,
-  ) {
-    if (!hoverPreviewEnabled || suppressHoverKey === key) return
-    if (hoverTimer) clearTimeout(hoverTimer)
-    hoverTimer = setTimeout(async () => {
-      hoverTimer = undefined
-      if (!openState || previewingId === key) return
-      const gen = ++previewGen
-      try {
-        const tex = await loader()
-        if (!tex || gen !== previewGen || !openState) {
-          tex?.dispose()
-          return
-        }
-        // Restore any previous hover slot before snapshotting the new slot (strictly after await succeeds!)
-        if (previewSnap !== undefined) {
-          host.restoreSlot(previewSnap)
-          previewSnap = undefined
-          previewSnapSlot = undefined
-        }
-        const snap = host.snapshotSlot(slot)
-        previewSnap = snap
-        previewSnapSlot = slot
-        previewingId = key
-        previewText.textContent = `👁 正在 3D 预览「${name}」(${slotLabels[slot]})`
-        previewBar.hidden = false
-        host.applyTexture(slot, tex, `预览：${name}`, true, meta)
-      } catch {
-        // Ignore hover preview errors silently
-      }
-    }, 85)
-  }
-
   async function applySavedById(id: string): Promise<boolean> {
-    const item = host.store.get(id)
-    if (!item) return false
-    const tex = await resolveSavedTexture(item)
-    endHoverPreview(false, item.targetSlot)
-    suppressHoverKey = `saved:${id}`
-    const grid = detectGraphAtlasGrid(item.graph)
-    const regions = item.atlasRegions ?? detectGraphAtlasRegions(item.graph)
-    const meta: AppliedTextureMeta | undefined = (grid || regions)
-      ? { atlasCols: grid?.cols, atlasRows: grid?.rows, atlasRegions: regions }
-      : undefined
-    activeAppliedId = item.id
-    host.applyTexture(item.targetSlot, tex, item.name, false, meta)
-    host.message(`已应用贴图「${item.name}」到 ${slotLabels[item.targetSlot]}`)
-    render()
-    return true
+    const key = `saved:${id}`
+    if (pendingApply?.key === key && pendingApply.seq === applySeq) return pendingApply.promise
+    if (!pendingApply && lastApplied?.key === key && activeAppliedId === id && performance.now() - lastApplied.at < 450) {
+      return true
+    }
+    const seq = ++applySeq
+    const run = (async () => {
+      try {
+        await host.store.ensureLoaded?.()
+        if (seq !== applySeq || disposed) return false
+        const item = host.store.get(id)
+        if (!item) return false
+        const tex = await resolveSavedTexture(item)
+        if (seq !== applySeq || disposed) {
+          tex.dispose()
+          return false
+        }
+        const graphCopy = cloneGraph(item.graph)
+        attachTextureGraphSource(tex, { graph: graphCopy, savedId: item.id })
+        const grid = detectGraphAtlasGrid(item.graph)
+        const regions = item.atlasRegions ?? detectGraphAtlasRegions(item.graph)
+        const meta: AppliedTextureMeta = {
+          ...(grid ? { atlasCols: grid.cols, atlasRows: grid.rows } : {}),
+          ...(regions ? { atlasRegions: regions } : {}),
+          graph: graphCopy,
+          savedId: item.id,
+        }
+        activeAppliedId = item.id
+        lastApplied = { key, at: performance.now() }
+        host.applyTexture(item.targetSlot, tex, item.name, false, meta)
+        previewText.textContent = `👁 当前已应用「${item.name}」(${slotLabels[item.targetSlot]})`
+        previewBar.hidden = false
+        host.message(`已应用贴图「${item.name}」到 ${slotLabels[item.targetSlot]}`)
+        syncActiveCards()
+        return true
+      } catch (err) {
+        if (seq === applySeq && !disposed) {
+          host.message(`应用贴图失败：${err instanceof Error ? err.message : String(err)}`, true)
+        }
+        return false
+      }
+    })()
+    pendingApply = { key, seq, promise: run }
+    try {
+      return await run
+    } finally {
+      if (pendingApply?.promise === run) pendingApply = undefined
+    }
   }
 
   async function applyTemplateById(id: string): Promise<boolean> {
-    const resolved = await resolveTemplateTexture(id)
-    if (!resolved) return false
-    endHoverPreview(false, resolved.slot)
-    suppressHoverKey = `tpl:${id}`
-    activeAppliedId = `tpl:${id}`
-    host.applyTexture(resolved.slot, resolved.texture, resolved.name, false, resolved.meta)
-    host.message(`已应用模板贴图「${resolved.name}」到 ${slotLabels[resolved.slot]}`)
-    render()
-    return true
+    const key = `tpl:${id}`
+    if (pendingApply?.key === key && pendingApply.seq === applySeq) return pendingApply.promise
+    if (!pendingApply && lastApplied?.key === key && activeAppliedId === key && performance.now() - lastApplied.at < 450) {
+      return true
+    }
+    const seq = ++applySeq
+    const run = (async () => {
+      try {
+        const resolved = await resolveTemplateTexture(id)
+        if (!resolved) return false
+        if (seq !== applySeq || disposed) {
+          resolved.texture.dispose()
+          return false
+        }
+        const tpl = getTextureTemplate(id)
+        const graphCopy = tpl ? tpl.build() : undefined
+        attachTextureGraphSource(resolved.texture, { graph: graphCopy, templateId: id })
+        activeAppliedId = key
+        lastApplied = { key, at: performance.now() }
+        const meta: AppliedTextureMeta = {
+          ...(resolved.meta ?? {}),
+          ...(graphCopy ? { graph: graphCopy } : {}),
+          templateId: id,
+        }
+        host.applyTexture(resolved.slot, resolved.texture, resolved.name, false, meta)
+        previewText.textContent = `👁 当前已应用「${resolved.name}」(${slotLabels[resolved.slot]})`
+        previewBar.hidden = false
+        host.message(`已应用模板贴图「${resolved.name}」到 ${slotLabels[resolved.slot]}`)
+        syncActiveCards()
+        return true
+      } catch (err) {
+        if (seq === applySeq && !disposed) {
+          host.message(`应用模板贴图失败：${err instanceof Error ? err.message : String(err)}`, true)
+        }
+        return false
+      }
+    })()
+    pendingApply = { key, seq, promise: run }
+    try {
+      return await run
+    } finally {
+      if (pendingApply?.promise === run) pendingApply = undefined
+    }
   }
 
   function syncTabsAndFilters() {
@@ -282,7 +381,7 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
     for (const btn of drawer.querySelectorAll<HTMLButtonElement>('[data-tl-cat]')) {
       btn.setAttribute('aria-pressed', String(btn.dataset.tlCat === category))
     }
-    mineCountEl.textContent = String(host.store.list().length)
+    mineCountEl.textContent = String(host.store.count ?? host.store.list().length)
     storagePill.textContent = host.store.storageMode === 'file' ? '本地落盘' : '浏览器缓存'
   }
 
@@ -293,6 +392,10 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
     const qStr = searchQuery.trim().toLowerCase()
 
     if (tab === 'mine') {
+      if (loadingLibrary) {
+        gridEl.innerHTML = '<div class="tl-empty">正在载入本地贴图库…</div>'
+        return
+      }
       const allMine = host.store.list()
       const filtered = allMine.filter(item => {
         if (category !== 'all' && item.category !== category) return false
@@ -328,7 +431,7 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
         const pbrTag = item.normalDataUrl ? ' · PBR' : ''
         return `<article class="tl-card${active}" data-saved-id="${esc(item.id)}">
           <div class="tl-card-thumb">
-            <img src="${item.thumbnail || item.dataUrl}" alt="${esc(item.name)}">
+            <img src="${item.thumbnail || item.dataUrl}" alt="${esc(item.name)}" loading="lazy" decoding="async">
             <span class="tl-card-tag">${categoryLabels[item.category]}</span>
             <span class="tl-card-res">${item.resolution}px${atlasTag}${pbrTag}</span>
           </div>
@@ -364,7 +467,9 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
               try {
                 await host.store.rename(id, next)
                 host.message(`已重命名为「${next}」`)
-              } catch (err) { host.message(String(err), true) }
+              } catch (err) {
+                host.message(`重命名失败：${err instanceof Error ? err.message : String(err)}`, true)
+              }
             }
             render()
           }
@@ -376,26 +481,21 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
         }
       }
 
-      // Bind saved card hover & click
+      // Bind saved card click & double-click (click-only preview; no hover decoding/rebuilds)
       for (const card of gridEl.querySelectorAll<HTMLElement>('[data-saved-id]')) {
         const id = card.dataset.savedId!
         const item = host.store.get(id)
         if (!item) continue
-        card.addEventListener('pointerenter', () => {
-          const grid = detectGraphAtlasGrid(item.graph)
-          const regions = item.atlasRegions ?? detectGraphAtlasRegions(item.graph)
-          const meta: AppliedTextureMeta | undefined = (grid || regions)
-            ? { atlasCols: grid?.cols, atlasRows: grid?.rows, atlasRegions: regions }
-            : undefined
-          startHoverPreview(`saved:${id}`, item.targetSlot, item.name, () => resolveSavedTexture(item), meta)
-        })
-        card.addEventListener('pointerleave', () => {
-          if (suppressHoverKey === `saved:${id}`) suppressHoverKey = undefined
-          endHoverPreview(true)
-        })
         card.addEventListener('click', e => {
           if ((e.target as HTMLElement).closest('button, input')) return
           void applySavedById(id)
+        })
+        card.addEventListener('dblclick', async e => {
+          const target = e.target as HTMLElement
+          if (target.closest('input') || target.closest('button:not([data-act="apply"])')) return
+          e.preventDefault()
+          const ok = await applySavedById(id)
+          if (ok) close()
         })
       }
 
@@ -409,7 +509,6 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
           if (act === 'apply') {
             await applySavedById(id)
           } else if (act === 'edit') {
-            endHoverPreview(true)
             host.openEditor({ graph: item.graph, savedId: item.id })
           } else if (act === 'rename') {
             confirmDeleteId = undefined
@@ -428,9 +527,16 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
               return
             }
             confirmDeleteId = undefined
-            endHoverPreview(true)
-            await host.store.remove(id)
-            host.message(`已删除贴图「${item.name}」`)
+            try {
+              const removed = await host.store.remove(id)
+              if (removed) {
+                if (activeAppliedId === id) activeAppliedId = undefined
+                host.message(`已删除贴图「${item.name}」`)
+              }
+            } catch (err) {
+              host.message(`删除贴图失败：${err instanceof Error ? err.message : String(err)}`, true)
+              render()
+            }
           }
         }
       }
@@ -449,7 +555,7 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
       const active = activeAppliedId === `tpl:${tpl.id}` ? ' is-active' : ''
       return `<article class="tl-card${active}" data-tpl-id="${esc(tpl.id)}">
         <div class="tl-card-thumb">
-          <img src="${thumb}" alt="${esc(tpl.name)}">
+          <img src="${thumb}" alt="${esc(tpl.name)}" loading="lazy" decoding="async">
           <span class="tl-card-tag">${categoryLabels[tpl.category]}</span>
           <span class="tl-card-res">节点模板</span>
         </div>
@@ -466,24 +572,17 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
 
     for (const card of gridEl.querySelectorAll<HTMLElement>('[data-tpl-id]')) {
       const id = card.dataset.tplId!
-      const tpl = getTextureTemplate(id)
-      if (!tpl) continue
-      card.addEventListener('pointerenter', () => {
-        const g = tpl.build()
-        const grid = detectGraphAtlasGrid(g)
-        const regions = detectGraphAtlasRegions(g)
-        const meta: AppliedTextureMeta | undefined = (grid || regions)
-          ? { atlasCols: grid?.cols, atlasRows: grid?.rows, atlasRegions: regions }
-          : undefined
-        startHoverPreview(`tpl:${id}`, tpl.targetSlot, tpl.name, async () => (await resolveTemplateTexture(id))?.texture, meta)
-      })
-      card.addEventListener('pointerleave', () => {
-        if (suppressHoverKey === `tpl:${id}`) suppressHoverKey = undefined
-        endHoverPreview(true)
-      })
+      if (!getTextureTemplate(id)) continue
       card.addEventListener('click', e => {
         if ((e.target as HTMLElement).closest('button')) return
         void applyTemplateById(id)
+      })
+      card.addEventListener('dblclick', async e => {
+        const target = e.target as HTMLElement
+        if (target.closest('button:not([data-tpl-act="apply"])')) return
+        e.preventDefault()
+        const ok = await applyTemplateById(id)
+        if (ok) close()
       })
     }
 
@@ -495,7 +594,6 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
         if (act === 'apply') {
           await applyTemplateById(id)
         } else if (act === 'edit') {
-          endHoverPreview(true)
           host.openEditor({ templateId: id })
         }
       }
@@ -505,7 +603,6 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
   // ---- Controls Wiring -----------------------------------------------------
   for (const btn of drawer.querySelectorAll<HTMLButtonElement>('[data-tl-tab]')) {
     btn.onclick = () => {
-      endHoverPreview(true)
       tab = btn.dataset.tlTab as TextureLibraryTab
       confirmDeleteId = undefined
       editingNameId = undefined
@@ -519,27 +616,27 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
     }
   }
   searchInput.oninput = () => { searchQuery = searchInput.value; render() }
-  hoverCb.onchange = () => {
-    hoverPreviewEnabled = hoverCb.checked
-    if (!hoverPreviewEnabled) endHoverPreview(true)
-  }
   q('#tl-new').onclick = () => {
-    endHoverPreview(true)
     const slot = category === 'all' ? 'leaf' : defaultSlotForCategory(category)
     host.openEditor({ slot })
   }
   q('#tl-close').onclick = () => close()
 
-  q('#tl-export').onclick = () => {
-    const bundle = host.store.exportBundle()
-    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.download = `vegetation-textures-${bundle.items.length}.json`
-    link.href = url
-    link.click()
-    setTimeout(() => URL.revokeObjectURL(url), 4000)
-    host.message(`已导出 ${bundle.items.length} 张贴图到 JSON`)
+  q('#tl-export').onclick = async () => {
+    try {
+      await host.store.ensureLoaded?.()
+      const bundle = host.store.exportBundle()
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.download = `vegetation-textures-${bundle.items.length}.json`
+      link.href = url
+      link.click()
+      setTimeout(() => URL.revokeObjectURL(url), 4000)
+      host.message(`已导出 ${bundle.items.length} 张贴图到 JSON`)
+    } catch (err) {
+      host.message(`导出贴图库失败：${err instanceof Error ? err.message : String(err)}`, true)
+    }
   }
   q('#tl-import').onclick = () => importFile.click()
   importFile.onchange = async () => {
@@ -552,7 +649,7 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
       render()
       host.message(`已导入贴图库：新增 ${res.added} 项，更新 ${res.updated} 项`)
     } catch (err) {
-      host.message('导入贴图库失败：' + String(err), true)
+      host.message(`导入贴图库失败：${err instanceof Error ? err.message : String(err)}`, true)
     } finally {
       importFile.value = ''
     }
@@ -565,21 +662,36 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
 
   function open(nextTab?: TextureLibraryTab, filterCategory?: TextureCategory | 'all') {
     host.onOpen?.()
+    const totalCount = host.store.count ?? host.store.list().length
     if (nextTab) tab = nextTab
-    else if (host.store.list().length === 0) tab = 'templates'
+    else if (totalCount === 0) tab = 'templates'
     if (filterCategory) category = filterCategory
     openState = true
     drawer.hidden = false
     document.body.classList.add('tl-open')
     window.dispatchEvent(new Event('resize'))
-    render()
+    if (host.store.ensureLoaded && !host.store.isLoaded) {
+      loadingLibrary = true
+      render()
+      void host.store.ensureLoaded().catch(err => {
+        if (!disposed) host.message(`载入贴图库失败：${err instanceof Error ? err.message : String(err)}`, true)
+      }).finally(() => {
+        loadingLibrary = false
+        if (openState && !disposed) {
+          if (!nextTab && host.store.list().length === 0) tab = 'templates'
+          render()
+        }
+      })
+    } else {
+      render()
+    }
   }
 
   function close() {
     if (!openState) return
-    endHoverPreview(true)
     openState = false
     drawer.hidden = true
+    previewBar.hidden = true
     confirmDeleteId = undefined
     editingNameId = undefined
     document.body.classList.remove('tl-open')
@@ -594,10 +706,12 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
       else open(nextTab)
     },
     isOpen: () => openState,
-    isPreviewing: () => previewSnap !== undefined,
+    isPreviewing: () => false,
     applySavedById,
     applyTemplateById,
     dispose() {
+      disposed = true
+      applySeq++
       unsub()
       close()
       drawer.remove()

@@ -1,7 +1,8 @@
 // Browser-side leaf card material and a procedural placeholder leaf texture.
 // The user is expected to replace the texture with their own alpha leaf image.
 import {
-  CanvasTexture, Color, DoubleSide, MeshStandardMaterial, SRGBColorSpace, ShaderChunk, Texture, Vector2,
+  CanvasTexture, Color, DataTexture, DoubleSide, MeshStandardMaterial, RGBAFormat, SRGBColorSpace,
+  ShaderChunk, Texture, Vector2, Vector4,
 } from 'three'
 import { rng } from '../shape'
 import { analyzeTextureColor, RECOLOR_GLSL_HELPERS } from '../tree/color-recolor'
@@ -215,6 +216,34 @@ export const foliageNormalView = {
   uNormalDebug: { value: 0 },
 }
 
+// Shared Runtime Virtual Texture (RVT) uniforms for UE-style grass-to-terrain blending.
+// Default uRvtMode = 0 (off) so standalone Tree Studio / AI Mode stay 100% unaffected.
+const defaultRvtFallbackTex = (() => {
+  const tex = new DataTexture(new Uint8Array([88, 160, 74, 255]), 1, 1, RGBAFormat)
+  tex.colorSpace = SRGBColorSpace
+  tex.needsUpdate = true
+  return tex
+})()
+
+export const foliageRvt = {
+  uRvtMap: { value: defaultRvtFallbackTex as Texture },
+  uRvtHasMap: { value: 0 },
+  /** 0 = off, 1 = root-blend (UE RVT), 2 = full-tint (painterly meadow), 3 = normal-only */
+  uRvtMode: { value: 0 },
+  /** (minX, minZ, 1/sizeX, 1/sizeZ) in world meters */
+  uRvtBounds: { value: new Vector4(-5, -5, 0.1, 0.1) },
+  uRvtStrength: { value: 0.9 },
+  uRvtFadeHeight: { value: 0.26 },
+  uRvtNormalBlend: { value: 0.82 },
+  uRvtFallbackColor: { value: new Color('#4eb349') },
+  uRvtAffectPlaced: { value: 1 },
+}
+
+export function resetFoliageRvtTexture() {
+  foliageRvt.uRvtMap.value = defaultRvtFallbackTex
+  foliageRvt.uRvtHasMap.value = 0
+}
+
 export interface LeafStyleOptions {
   translucency?: number
   rimLight?: number
@@ -224,6 +253,16 @@ export interface LeafStyleOptions {
   shadowFrom?: string
   /** Force double-sided faces to keep custom sculpted vertex normals instead of flipping backfaces */
   keepNormal?: boolean
+  /** 0 = none (trees/shrubs/flowers), 1 = placed grass asset, 2 = brush instanced grass */
+  rvtChannel?: 0 | 1 | 2
+  /** Optional subtle matte sky-transmitted emissive floor for modeled 3D broadleaf blades */
+  emissiveFloor?: number
+  /** Optional override roughness (e.g. matte 0.94 for painterly modeled leaf blades) */
+  roughness?: number
+  /** Optional explicit Three.js material name (preserved in GLB export) */
+  materialName?: string
+  /** Mix in the painted vertex colors to keep large pigment blocks readable in shadow. */
+  paintedLight?: number
 }
 
 /** Derive a luminance-preserving cool shadow tint from the foliage's inner color so
@@ -257,12 +296,15 @@ export function makeLeafMaterial(
   const customNormal = map?.userData?.normalMap as Texture | undefined
   const customRoughness = map?.userData?.roughnessMap as Texture | undefined
   const material = new MeshStandardMaterial({
-    name: map ? 'LeafCards' : 'GrassBlades',
+    name: style.materialName ?? (map ? 'LeafCards' : 'GrassBlades'),
     ...(map ? { map, alphaTest: alphaCutoff } : {}),
     ...(customNormal ? { normalMap: customNormal, normalScale: new Vector2(0.48, 0.48) } : {}),
     ...(customRoughness ? { roughnessMap: customRoughness } : {}),
+    ...(style.emissiveFloor && style.emissiveFloor > 0
+      ? { emissive: new Color(style.shadowFrom || '#3c6051'), emissiveIntensity: style.emissiveFloor }
+      : {}),
     side: DoubleSide, vertexColors: true,
-    roughness: customRoughness ? 0.96 : (map ? .8 : .76), metalness: 0, alphaToCoverage: false,
+    roughness: style.roughness ?? (customRoughness ? 0.96 : (map ? .8 : .76)), metalness: 0, alphaToCoverage: false,
   })
   const texStats = analyzeTextureColor(map, 'foliage')
   const uniforms = {
@@ -277,12 +319,14 @@ export function makeLeafMaterial(
     uTexMeanS: { value: texStats.meanS },
     uTexMeanL: { value: texStats.meanL },
     uTexRecolor: { value: texStats.strength },
+    uRvtChannel: { value: style.rvtChannel ?? (!map ? 1 : 0) },
+    uPaintedLight: { value: style.paintedLight ?? 0 },
   }
   material.userData.leafUniforms = uniforms
-  material.customProgramCacheKey = () => map ? 'stylized-foliage-v6' : 'stylized-blade-v6'
+  material.customProgramCacheKey = () => map ? 'stylized-foliage-v8' : 'stylized-blade-v8'
   const isBladeMode = !map
   material.onBeforeCompile = shader => {
-    Object.assign(shader.uniforms, uniforms, foliageWind, foliageNormalView)
+    Object.assign(shader.uniforms, uniforms, foliageWind, foliageNormalView, foliageRvt)
     const chunk = ShaderChunk.normal_fragment_begin
     if (!chunk.includes(flip)) console.warn('normal_fragment_begin layout changed; back faces will flip normals')
     shader.fragmentShader =
@@ -297,8 +341,21 @@ uniform float uTexMeanH;
 uniform float uTexMeanS;
 uniform float uTexMeanL;
 uniform float uTexRecolor;
+uniform float uRvtChannel;
+uniform float uPaintedLight;
+uniform sampler2D uRvtMap;
+uniform float uRvtHasMap;
+uniform float uRvtMode;
+uniform vec4 uRvtBounds;
+uniform float uRvtStrength;
+uniform float uRvtFadeHeight;
+uniform float uRvtNormalBlend;
+uniform vec3 uRvtFallbackColor;
+uniform float uRvtAffectPlaced;
 varying vec3 vLeafWorldNormal;
 varying vec3 vLeafObjPos;
+varying vec2 vRvtWorldXZ;
+varying float vRvtLocalY;
 ${RECOLOR_GLSL_HELPERS}
 float leafProcHash(vec3 p) {
   p = fract(p * vec3(0.1031, 0.1030, 0.0973));
@@ -339,21 +396,52 @@ float leafProcNoise(vec3 x) {
             diffuseColor.rgb *= leafTgtCol;
           #endif
           {
-            // 3D object-space procedural tonal & micro-grain variation (zero UV tiling repetition)
+            // 3D object-space procedural tonal & micro-grain variation (smoothly attenuated as uPaintedLight rises
+            // so hand-painted gouache color masses stay silky and cohesive without speckled noise!)
             float macroN = leafProcNoise(vLeafObjPos * 1.45) * 0.65 + leafProcNoise(vLeafObjPos * 3.8 + vec3(4.1, 2.3, 6.7)) * 0.35;
             ${isBladeMode
               ? `float veinN = leafProcNoise(vec3(vLeafObjPos.x * 28.0, vLeafObjPos.y * 4.5, vLeafObjPos.z * 28.0));
-                 diffuseColor.rgb *= (0.91 + 0.18 * macroN) * (0.94 + 0.12 * veinN);`
-              : `diffuseColor.rgb *= (0.93 + 0.14 * macroN);`}
+                 diffuseColor.rgb *= mix((0.91 + 0.18 * macroN) * (0.94 + 0.12 * veinN), 1.0, uPaintedLight * 0.85);`
+              : `diffuseColor.rgb *= mix(0.93 + 0.14 * macroN, 1.0, uPaintedLight * 0.85);`}
+          }
+          float rvtActive = step( 0.5, uRvtMode ) * max( step( 1.5, uRvtChannel ), step( 0.5, uRvtChannel ) * step( 0.5, uRvtAffectPlaced ) );
+          float rvtRootFactor = 0.0;
+          if ( rvtActive > 0.5 ) {
+            vec2 rvtUv = vec2(
+              ( vRvtWorldXZ.x - uRvtBounds.x ) * uRvtBounds.z,
+              1.0 - ( vRvtWorldXZ.y - uRvtBounds.y ) * uRvtBounds.w
+            );
+            float inBounds = step( 0.0, rvtUv.x ) * step( rvtUv.x, 1.0 ) * step( 0.0, rvtUv.y ) * step( rvtUv.y, 1.0 );
+            vec3 rvtGround = mix( uRvtFallbackColor, texture2D( uRvtMap, clamp( rvtUv, 0.002, 0.998 ) ).rgb, inBounds * uRvtHasMap );
+            float hNorm = clamp( vRvtLocalY / max( 0.04, uRvtFadeHeight ), 0.0, 1.0 );
+            rvtRootFactor = 1.0 - smoothstep( 0.0, 1.0, pow( hNorm, 0.82 ) );
+            // Keep bright cream/yellow wildflower petals atop clover tufts crisp
+            float petalProtect = smoothstep( 0.58, 0.80, diffuseColor.r ) * smoothstep( 0.50, 0.74, diffuseColor.g ) * step( 0.13, vRvtLocalY );
+            if ( uRvtMode < 1.5 ) {
+              // Mode 1: UE RVT Root-to-Tip seamless fusion (roots match ground pixel-for-pixel)
+              float w = rvtRootFactor * uRvtStrength * ( 1.0 - petalProtect );
+              diffuseColor.rgb = mix( diffuseColor.rgb, rvtGround, w );
+            } else if ( uRvtMode < 2.5 ) {
+              // Mode 2: Full-Height Terrain Harmony (painterly Ghibli/Genshin unified grass meadow)
+              vec3 tipHarmony = rvtGround * mix( vec3( 1.0 ), vec3( 1.24, 1.28, 1.08 ), smoothstep( 0.22, 1.0, hNorm ) );
+              vec3 targetCol = mix( tipHarmony, rvtGround, rvtRootFactor );
+              float w = mix( uRvtStrength * 0.78, uRvtStrength, rvtRootFactor ) * ( 1.0 - petalProtect );
+              diffuseColor.rgb = mix( diffuseColor.rgb, targetCol, w );
+            }
           }`)
         .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
           {
             float rN = leafProcNoise(vLeafObjPos * 3.1 + vec3(1.7, 5.2, 3.9));
             roughnessFactor = clamp(roughnessFactor + (rN - 0.5) * 0.14, 0.48, 0.98);
+            if ( rvtActive > 0.5 ) {
+              roughnessFactor = mix( roughnessFactor, 0.92, rvtRootFactor * uRvtNormalBlend * 0.85 );
+            }
           }`)
         .replace('#include <normal_fragment_begin>',
           chunk.replace(flip, 'normal *= mix(faceDirection, 1.0, uLeafKeepNormal);'))
         .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
+          {
+            float rvtShadowSoft = rvtActive > 0.5 ? ( 1.0 - rvtRootFactor * uRvtNormalBlend * 0.78 ) : 1.0;
           #if NUM_DIR_LIGHTS > 0
             vec3 leafL = normalize( directionalLights[0].direction );
             float leafNdL = dot( geometryNormal, leafL );
@@ -361,40 +449,68 @@ float leafProcNoise(vec3 x) {
             // Backlit subsurface scattering translucency
             float leafBack = pow( clamp( dot( geometryViewDir, -leafL ), 0.0, 1.0 ), 2.2 ) * 0.55
                            + clamp( ( -leafNdL ) * 0.5 + 0.5, 0.0, 1.0 ) * 0.45;
-            reflectedLight.directDiffuse += diffuseColor.rgb * directionalLights[0].color * leafBack * uLeafSSS * 0.36;
+            reflectedLight.directDiffuse += diffuseColor.rgb * directionalLights[0].color * leafBack * uLeafSSS * 0.36 * rvtShadowSoft;
             // Cool shadow hue enrichment (luminance-preserving so shaded clumps stay luminous, never black)
             float leafDark = 1.0 - smoothstep( -0.15, 0.55, leafNdL );
             reflectedLight.indirectDiffuse = mix(
               reflectedLight.indirectDiffuse,
               reflectedLight.indirectDiffuse * uShadowTint,
-              leafDark * uShadowShift
+              leafDark * uShadowShift * rvtShadowSoft
             );
             // Soft sunlit silhouette rim
             float leafRim = pow( 1.0 - clamp( dot( geometryNormal, geometryViewDir ), 0.0, 1.0 ), 2.4 );
-            reflectedLight.directDiffuse += diffuseColor.rgb * directionalLights[0].color * leafRim * ( 0.35 + 0.65 * leafWrap ) * uLeafRim * 0.34;
+            reflectedLight.directDiffuse += diffuseColor.rgb * directionalLights[0].color * leafRim * ( 0.35 + 0.65 * leafWrap ) * uLeafRim * 0.34 * rvtShadowSoft;
           #endif
           // Three-zone vertical sunlight gradient (warm crown top -> cool airy underside)
           float leafTop = clamp( normalize( vLeafWorldNormal ).y * 0.5 + 0.5, 0.0, 1.0 );
           vec3 leafTintBias = mix( vec3( 0.94, 0.95, 1.07 ), vec3( 1.08, 1.03, 0.94 ), smoothstep( 0.25, 0.85, leafTop ) );
-          reflectedLight.directDiffuse *= mix( vec3( 1.0 ), leafTintBias, uTopWarmth );
-          reflectedLight.indirectDiffuse *= mix( vec3( 1.0 ), leafTintBias, uTopWarmth * 0.6 );
+          reflectedLight.directDiffuse *= mix( vec3( 1.0 ), leafTintBias, uTopWarmth * rvtShadowSoft );
+          reflectedLight.indirectDiffuse *= mix( vec3( 1.0 ), leafTintBias, uTopWarmth * 0.6 * rvtShadowSoft );
+          }
         `)
+        .replace('#include <opaque_fragment>', `
+          outgoingLight = mix( outgoingLight, diffuseColor.rgb * 1.1, uPaintedLight );
+          #include <opaque_fragment>`)
         .replace('#include <dithering_fragment>', `#include <dithering_fragment>
           if ( uNormalDebug > 0.5 ) {
             vec3 dbgN = normalize( vLeafWorldNormal ) * 0.5 + 0.5;
             gl_FragColor = vec4( dbgN, diffuseColor.a );
           }`)
-    // Camera-facing blend + gentle live breeze sway + world normal & object-pos pass-through.
-    shader.vertexShader = 'uniform float uLeafFacing;\nuniform float uWindTime;\nuniform float uWindStrength;\nattribute vec3 leafCenter;\nattribute vec2 leafCorner;\nvarying vec3 vLeafWorldNormal;\nvarying vec3 vLeafObjPos;\n' +
+    // Camera-facing blend + gentle live breeze sway + RVT root-normal terrain alignment (instancing-safe).
+    shader.vertexShader = 'uniform float uLeafFacing;\nuniform float uWindTime;\nuniform float uWindStrength;\nuniform float uRvtChannel;\nuniform float uRvtMode;\nuniform float uRvtFadeHeight;\nuniform float uRvtNormalBlend;\nuniform float uRvtAffectPlaced;\nattribute vec3 leafCenter;\nattribute vec2 leafCorner;\nvarying vec3 vLeafWorldNormal;\nvarying vec3 vLeafObjPos;\nvarying vec2 vRvtWorldXZ;\nvarying float vRvtLocalY;\n' +
       shader.vertexShader
         .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
-          vLeafWorldNormal = normalize( mat3( modelMatrix ) * objectNormal );
-          vLeafObjPos = position;`)
+          float vRvtActive = step( 0.5, uRvtMode ) * max( step( 1.5, uRvtChannel ), step( 0.5, uRvtChannel ) * step( 0.5, uRvtAffectPlaced ) );
+          vRvtLocalY = max( 0.0, position.y );
+          if ( vRvtActive > 0.5 ) {
+            float rvtNMask = ( 1.0 - smoothstep( 0.0, max( 0.05, uRvtFadeHeight * 1.15 ), vRvtLocalY ) ) * uRvtNormalBlend;
+            objectNormal = normalize( mix( objectNormal, vec3( 0.0, 1.0, 0.0 ), rvtNMask ) );
+          }
+          vec3 leafInstNormal = objectNormal;
+          #ifdef USE_INSTANCING
+            leafInstNormal = mat3( instanceMatrix ) * leafInstNormal;
+          #endif
+          vLeafWorldNormal = normalize( mat3( modelMatrix ) * leafInstNormal );
+          #ifdef USE_INSTANCING
+            vLeafObjPos = ( instanceMatrix * vec4( position, 1.0 ) ).xyz;
+          #else
+            vLeafObjPos = position;
+          #endif`)
         .replace('#include <project_vertex>', `
-          vec3 windPos = transformed;
+          vec4 leafLocalPos = vec4( transformed, 1.0 );
+          #ifdef USE_INSTANCING
+            leafLocalPos = instanceMatrix * leafLocalPos;
+          #endif
+          vec4 rvtWp = modelMatrix * leafLocalPos;
+          vRvtWorldXZ = rvtWp.xz;
+          vec3 windPos = leafLocalPos.xyz;
           if ( uWindStrength > 0.0 ) {
-            vec4 wp = modelMatrix * vec4( transformed, 1.0 );
-            float swayMask = clamp( wp.y * 0.28, 0.0, 1.6 );
+            vec4 wp = rvtWp;
+            #ifdef USE_INSTANCING
+              float swayMask = clamp( max( 0.0, transformed.y ) * 1.55, 0.0, 1.35 );
+            #else
+              float swayMask = clamp( max( 0.0, wp.y - 0.08 ) * 0.34 + length( transformed.xz ) * 0.10, 0.0, 1.6 );
+            #endif
             float wave = sin( uWindTime * 1.55 + wp.x * 1.3 + wp.z * 1.15 )
                        + 0.45 * sin( uWindTime * 2.9 + wp.y * 2.1 + wp.x * 1.9 );
             windPos.x += wave * uWindStrength * swayMask;
@@ -402,8 +518,9 @@ float leafProcNoise(vec3 x) {
           }
           vec4 mvPosition = modelViewMatrix * vec4( windPos, 1.0 );
           if ( uLeafFacing > 0.0 ) {
-            vec4 mvCenter = modelViewMatrix * vec4( leafCenter + ( windPos - transformed ), 1.0 );
-            vec4 facingPosition = mvCenter + vec4( leafCorner, 0.0, 0.0 );
+            vec4 mvCenter = modelViewMatrix * vec4( leafCenter + ( windPos - leafLocalPos.xyz ), 1.0 );
+            vec2 mvScale = vec2( length( modelViewMatrix[0].xyz ), length( modelViewMatrix[1].xyz ) );
+            vec4 facingPosition = mvCenter + vec4( leafCorner * mvScale, 0.0, 0.0 );
             mvPosition = mix( mvPosition, facingPosition, uLeafFacing );
           }
           gl_Position = projectionMatrix * mvPosition;`)

@@ -1,18 +1,24 @@
 import { describe, expect, it } from 'vitest'
+import { Texture } from 'three'
+import { parseSavedTextureMap } from '../src/studio/texture-serialize'
 import {
-  bufferToRgbaBytes, evaluateTextureGraph, TextureGraphEvaluator,
+  bufferToRgbaBytes, evaluateTextureGraph, TextureGraphEvaluator, toRgba,
 } from '../src/texgraph/engine'
+import {
+  attachTextureGraphSource, readTextureGraphSource, resolveSlotEditorOptions,
+} from '../src/texgraph/library-ui'
+import { presetSpec } from '../src/tree/spec'
 import {
   arePortsCompatible, cloneGraph, createNode, parseTextureGraph,
   validateTextureGraph, wouldCreateCycle,
 } from '../src/texgraph/nodes'
-import { buildCurveLut, hitTestVectorLayout } from '../src/texgraph/nodes-v2'
+import { buildCurveLut, evalAtlasCompose, evalVectorLayout, hitTestVectorLayout } from '../src/texgraph/nodes-v2'
 import {
   createTextureLibraryStore, type StorageLike,
 } from '../src/texgraph/store'
 import { defaultTemplateForSlot, detectGraphAtlasGrid, getTextureTemplate, textureTemplates } from '../src/texgraph/templates'
 import { applyGraphPatch, GraphHistory } from '../src/texgraph/transaction'
-import type { LabelBuffer, RgbaBuffer, VectorLeafInstance, VectorStem } from '../src/texgraph/types'
+import type { GrayBuffer, LabelBuffer, RgbaBuffer, VectorLeafInstance, VectorStem } from '../src/texgraph/types'
 
 function memoryStorage(): StorageLike {
   const map = new Map<string, string>()
@@ -256,6 +262,103 @@ describe('Real-Time Texture Library Store', () => {
     expect(await store3.remove(copy.id)).toBe(true)
     expect(store3.list().length).toBe(1)
   })
+
+  it('sends PUT + application/json and rolls back in-memory state on disk/network write failure', async () => {
+    let remoteBody = JSON.stringify({ schemaVersion: 1, items: [] })
+    let failMode: 'none' | 'http500' | 'network' = 'none'
+    const writeHeaders: { method?: string; contentType: string | null }[] = []
+
+    const mockFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method && init.method !== 'GET') {
+        const hdrs = new Headers(init.headers)
+        writeHeaders.push({ method: init.method, contentType: hdrs.get('content-type') })
+        if (failMode === 'network') throw new TypeError('Failed to fetch')
+        if (failMode === 'http500') {
+          return new Response(JSON.stringify({ error: 'ENOSPC disk full' }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        remoteBody = String(init.body)
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response(remoteBody, {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'X-Persisted': '1' },
+      })
+    }) as typeof fetch
+
+    const store = createTextureLibraryStore({ storage: memoryStorage(), apiUrl: '/api/textures', fetcher: mockFetch })
+    await store.ready()
+    expect(store.storageMode).toBe('file')
+
+    const oak = defaultTemplateForSlot('bark')
+    const initial = await store.saveNew({
+      name: '初始橡木皮',
+      targetSlot: 'bark',
+      resolution: 512,
+      dataUrl: samplePng,
+      thumbnail: samplePng,
+      graph: oak,
+    })
+    expect(store.list().length).toBe(1)
+    expect(store.count).toBe(1)
+
+    // Simulate HTTP 500 disk write failure across every mutating method
+    failMode = 'http500'
+    await expect(store.saveNew({
+      name: '应回滚的新贴图',
+      targetSlot: 'leaf',
+      dataUrl: samplePng,
+      thumbnail: samplePng,
+      graph: defaultTemplateForSlot('leaf'),
+    })).rejects.toThrow(/ENOSPC/)
+    expect(store.list().length).toBe(1)
+    expect(store.count).toBe(1)
+
+    await expect(store.rename(initial.id, '应回滚的名字')).rejects.toThrow(/ENOSPC/)
+    expect(store.get(initial.id)?.name).toBe('初始橡木皮')
+
+    const nextGraph = cloneGraph(oak)
+    nextGraph.resolution = 1024
+    await expect(store.overwrite(initial.id, { resolution: 1024, graph: nextGraph })).rejects.toThrow(/ENOSPC/)
+    expect(store.get(initial.id)?.resolution).toBe(512)
+
+    await expect(store.duplicate(initial.id)).rejects.toThrow(/ENOSPC/)
+    expect(store.list().length).toBe(1)
+
+    await expect(store.remove(initial.id)).rejects.toThrow(/ENOSPC/)
+    expect(store.list().length).toBe(1)
+    expect(store.get(initial.id)?.name).toBe('初始橡木皮')
+
+    await expect(store.importBundle({
+      schemaVersion: 1,
+      items: [{ ...initial, id: 'tex-imported-fail', name: '导入失败项' }],
+    })).rejects.toThrow(/ENOSPC/)
+    expect(store.list().length).toBe(1)
+    expect(store.get('tex-imported-fail')).toBeUndefined()
+
+    // Simulate network rejection and verify rollback too
+    failMode = 'network'
+    await expect(store.rename(initial.id, '断网改名')).rejects.toThrow(/Failed to fetch/)
+    expect(store.get(initial.id)?.name).toBe('初始橡木皮')
+
+    // Recover disk service and verify writeChain continues functioning cleanly
+    failMode = 'none'
+    const renamed = await store.rename(initial.id, '恢复后改名成功')
+    expect(renamed.name).toBe('恢复后改名成功')
+    expect(store.get(initial.id)?.name).toBe('恢复后改名成功')
+
+    // Every write request strictly used PUT + application/json
+    expect(writeHeaders.length).toBeGreaterThanOrEqual(8)
+    for (const req of writeHeaders) {
+      expect(req.method).toBe('PUT')
+      expect(req.contentType?.toLowerCase().startsWith('application/json')).toBe(true)
+    }
+  })
 })
 
 describe('TexGraph v2 Contract, Transactions, 6 Core Nodes & Persistence', () => {
@@ -467,5 +570,149 @@ describe('TexGraph v2 Contract, Transactions, 6 Core Nodes & Persistence', () =>
     const r128b = ev.evaluate(loaded.graph, 128)
     expect(r128b.cacheHits).toBeGreaterThan(0)
     expect(ev.cachedBytes).toBeLessThanOrEqual(48 * 1024 * 1024)
+  })
+
+  it('resolves active slot texture provenance for node-editing (direct graph, savedId, legacy name & built-in style) and round-trips through SavedTextureMap', async () => {
+    const store = createTextureLibraryStore({ storage: memoryStorage(), apiUrl: null })
+    const oakGraph = getTextureTemplate('leaf-oak-painterly')!.build()
+    oakGraph.name = '手绘厚涂橡叶叠簇'
+    const saved = await store.saveNew({
+      name: oakGraph.name,
+      category: 'leaf',
+      targetSlot: 'leaf',
+      resolution: 512,
+      seamless: false,
+      dataUrl: samplePng,
+      thumbnail: samplePng,
+      graph: oakGraph,
+    })
+
+    // 1. Direct texGraphSource attached on live texture (edited graph + savedId)
+    const edited = cloneGraph(oakGraph)
+    edited.name = '我的改版橡叶'
+    const texWithGraph = new Texture()
+    texWithGraph.name = '◈ 我的改版橡叶'
+    attachTextureGraphSource(texWithGraph, { graph: edited, savedId: saved.id })
+    expect(readTextureGraphSource(texWithGraph)?.savedId).toBe(saved.id)
+    const optDirect = resolveSlotEditorOptions('leaf', texWithGraph, store, presetSpec('broadleaf-round'))
+    expect(optDirect.savedId).toBe(saved.id)
+    expect(optDirect.graph?.name).toBe('我的改版橡叶')
+
+    // 2. Legacy/persisted texture without embedded graph resolves by stripped name against Texture Library
+    const legacyTex = new Texture()
+    legacyTex.name = '◆ 手绘厚涂橡叶叠簇'
+    const optLegacy = resolveSlotEditorOptions('leaf', legacyTex, store, presetSpec('broadleaf-round'))
+    expect(optLegacy.savedId).toBe(saved.id)
+    expect(optLegacy.graph?.name).toBe('手绘厚涂橡叶叠簇')
+
+    // 3. No custom texture bound: resolves to active tree's built-in style (oak 2x2 atlas, maple, willow)
+    const optWishing = resolveSlotEditorOptions('leaf', undefined, store, presetSpec('broadleaf-wishing'))
+    expect(optWishing.templateId).toBe('leaf-oak-atlas')
+    const optMaple = resolveSlotEditorOptions('leaf', undefined, store, presetSpec('broadleaf-maple'))
+    expect(optMaple.templateId).toBe('leaf-maple')
+    const optWillow = resolveSlotEditorOptions('leaf', undefined, store, presetSpec('broadleaf-willow'))
+    expect(optWillow.templateId).toBe('leaf-willow')
+
+    // 4. SavedTextureMap preserves savedId, templateId & graph cleanly
+    const parsedMap = parseSavedTextureMap({
+      leaf: { name: '◈ 我的改版橡叶', dataUrl: samplePng, savedId: saved.id, graph: edited },
+    })
+    expect(parsedMap?.leaf?.savedId).toBe(saved.id)
+    expect(parsedMap?.leaf?.graph?.name).toBe('我的改版橡叶')
+  })
+
+  it('auto-converts gray outputs to rgba (r=g=b=gray, a=1) across toRgba, vector_layout, atlas_compose, and output_material', () => {
+    const grayVal = 0.72
+    const grayBuf: GrayBuffer = {
+      kind: 'gray',
+      width: 32,
+      height: 32,
+      data: new Float32Array(32 * 32).fill(grayVal),
+    }
+
+    // 1. Direct toRgba helper
+    const direct = toRgba(grayBuf, 32, 32)
+    expect(direct.kind).toBe('rgba')
+    expect(direct.data[0]).toBeCloseTo(grayVal, 5)
+    expect(direct.data[1]).toBeCloseTo(grayVal, 5)
+    expect(direct.data[2]).toBeCloseTo(grayVal, 5)
+    expect(direct.data[3]).toBeCloseTo(1, 5)
+
+    // 2. vector_layout accepts gray input on leafA instead of ignoring it & falling back to green procedural leaf
+    const vecOut = evalVectorLayout(
+      {
+        paletteStrength: 0,
+        lightStrength: 0,
+        depthShade: 0,
+        layerShadow: 0,
+        stems: [],
+        instances: [{ id: 'g-1', x: 0.5, y: 0.5, rot: 0, scaleX: 0.5, scaleY: 0.5, variant: 0, colorIdx: 0, z: 0.5 }],
+      },
+      { leafA: grayBuf },
+      64,
+      64,
+    )
+    const vecRgba = vecOut.rgba as RgbaBuffer
+    const centerOff = (32 * 64 + 32) * 4
+    expect(vecRgba.data[centerOff + 3]).toBeCloseTo(1, 3)
+    expect(vecRgba.data[centerOff]).toBeCloseTo(grayVal, 2)
+    expect(vecRgba.data[centerOff + 1]).toBeCloseTo(grayVal, 2)
+    expect(vecRgba.data[centerOff + 2]).toBeCloseTo(grayVal, 2)
+
+    // 3. atlas_compose accepts gray input on slotA instead of ignoring it & falling back to green leaf
+    const atlasOut = evalAtlasCompose(
+      { layout: 'grid_2x2', paddingPx: 2, colorVar: 0, seed: 1 },
+      { slotA: grayBuf },
+      64,
+      64,
+    )
+    const atlasRgba = atlasOut.rgba as RgbaBuffer
+    let grayMatches = 0
+    for (let i = 0; i < atlasRgba.data.length; i += 4) {
+      if (atlasRgba.data[i + 3] > 0.9) {
+        expect(Math.abs(atlasRgba.data[i] - atlasRgba.data[i + 1])).toBeLessThan(0.02)
+        expect(Math.abs(atlasRgba.data[i + 1] - atlasRgba.data[i + 2])).toBeLessThan(0.02)
+        expect(atlasRgba.data[i]).toBeCloseTo(grayVal, 2)
+        grayMatches++
+      }
+    }
+    expect(grayMatches).toBeGreaterThan(500)
+
+    // 4. Full graph wiring gray perlin_noise -> vector_layout.leafA -> output_material.baseColor evaluates cleanly
+    const noise = createNode('perlin_noise', 0, 0, 'n_gray', { scaleX: 4, scaleY: 4, seed: 42 })
+    const vec = createNode('vector_layout', 220, 0, 'v_lay', {
+      paletteStrength: 0,
+      lightStrength: 0,
+      depthShade: 0,
+      layerShadow: 0,
+      stems: [],
+      instances: [{ id: 'g-1', x: 0.5, y: 0.5, rot: 0, scaleX: 0.6, scaleY: 0.6, variant: 0, colorIdx: 0, z: 0.5 }],
+    })
+    const out = createNode('output_material', 460, 0, 'out')
+    const graph = {
+      schemaVersion: 2 as const,
+      name: 'gray-to-rgba-test',
+      category: 'leaf' as const,
+      targetSlot: 'leaf' as const,
+      resolution: 256 as const,
+      seamless: false,
+      nodes: [noise, vec, out],
+      edges: [
+        { id: 'e1', fromNode: 'n_gray', fromPort: 'out', toNode: 'v_lay', toPort: 'leafA' },
+        { id: 'e2', fromNode: 'v_lay', fromPort: 'rgba', toNode: 'out', toPort: 'baseColor' },
+      ],
+    }
+    expect(validateTextureGraph(graph).ok).toBe(true)
+    const ev = evaluateTextureGraph(graph, 64)
+    const d = ev.output.baseColor.data
+    let opaqueNeutralPixels = 0
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] > 0.9) {
+        expect(Math.abs(d[i] - d[i + 1])).toBeLessThan(0.02)
+        expect(Math.abs(d[i + 1] - d[i + 2])).toBeLessThan(0.02)
+        if (d[i] > 0.05) opaqueNeutralPixels++
+      }
+    }
+    expect(opaqueNeutralPixels).toBeGreaterThan(200)
   })
 })

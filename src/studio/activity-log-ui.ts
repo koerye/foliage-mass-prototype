@@ -309,9 +309,16 @@ export function mountActivityLogDrawer(options: ActivityLogDrawerOptions): Activ
 
   const syncDrawerTop = () => {
     const header = document.querySelector<HTMLElement>('header.bar')
-    if (!header) return
-    const bottom = Math.round(header.getBoundingClientRect().bottom)
-    if (bottom > 0) drawer.style.top = `${bottom + 12}px`
+    const banner = document.getElementById('scene-edit-banner')
+    const headerBottom = header ? header.getBoundingClientRect().bottom : 0
+    const bannerBottom = banner && !banner.hidden ? banner.getBoundingClientRect().bottom : 0
+    const bottom = Math.round(Math.max(headerBottom, bannerBottom))
+    if (bottom > 0) {
+      const gap = window.innerWidth >= 960 ? 12 : 0
+      drawer.style.top = `${bottom + gap}px`
+    } else {
+      drawer.style.removeProperty('top')
+    }
   }
 
   const onResize = () => { if (!drawer.hidden) syncDrawerTop() }

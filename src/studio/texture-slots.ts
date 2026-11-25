@@ -7,17 +7,17 @@ import { loadBarkTexture, makeProceduralBarkPreview } from '../tree/bark-materia
 import { makeOakLeafAtlasTexture, makeOakLeafCardTexture } from '../texgraph/templates'
 import { activityLog } from './activity-log'
 import {
-  makeBushSprigTexture, makeCloudLeafTexture, makeDrapeTexture, makeFernTexture, makeFlowerTexture, makeGrassTexture,
-  makeMapleTexture, makeNeedleTexture, makeNeutralGrassTexture, makePalmTexture,
+  makeBambooLeafTexture, makeBushSprigTexture, makeCloudLeafTexture, makeDrapeTexture, makeFeatherySprayTexture, makeFernTexture, makeFlowerTexture, makeGrassTexture,
+  makeLotusLeafTexture, makeLotusPetalTexture, makeMapleTexture, makeNeedleTexture, makeNeutralGrassTexture, makePaintedClusterTexture, makePalmTexture,
   makeSakuraTexture, makeSingleFlowerTexture, makeStemLeafTexture, makeWildRoseTexture, makeWillowTexture,
 } from '../tree/textures'
 
-export const editableTextureSlots = ['bark', 'leaf', 'needle', 'drape', 'palm', 'grass', 'fern', 'flower', 'blossom', 'stemLeaf'] as const
+export const editableTextureSlots = ['bark', 'leaf', 'needle', 'drape', 'palm', 'bamboo', 'lotusLeaf', 'lotusPetal', 'grass', 'fern', 'flower', 'blossom', 'stemLeaf'] as const
 export type EditableTextureSlot = typeof editableTextureSlots[number]
 
 export const allTextureSlots = [
   ...editableTextureSlots,
-  'grassTint', 'sakura', 'cloud', 'oak', 'oakAtlas', 'maple', 'willow', 'bush', 'wildrose',
+  'grassTint', 'painted', 'feathery', 'sakura', 'cloud', 'oak', 'oakAtlas', 'maple', 'willow', 'bush', 'wildrose',
 ] as const
 export type AllTextureSlot = typeof allTextureSlots[number]
 
@@ -29,12 +29,17 @@ const defaultFactories: TextureFactories = {
   needle: () => makeNeedleTexture(),
   drape: () => makeDrapeTexture(),
   palm: () => makePalmTexture(),
+  bamboo: () => makeBambooLeafTexture(),
+  lotusLeaf: () => makeLotusLeafTexture(),
+  lotusPetal: () => makeLotusPetalTexture(),
   grass: () => makeGrassTexture(),
   grassTint: () => makeNeutralGrassTexture(),
   fern: () => makeFernTexture(),
   flower: () => makeFlowerTexture(),
   blossom: () => makeSingleFlowerTexture(),
   stemLeaf: () => makeStemLeafTexture(),
+  painted: () => makePaintedClusterTexture(),
+  feathery: () => makeFeatherySprayTexture(),
   sakura: () => makeSakuraTexture(),
   cloud: () => makeCloudLeafTexture(),
   oak: () => makeOakLeafCardTexture(),
@@ -161,8 +166,16 @@ export function bindTextureSlots(registry: TextureRegistry, opts: BindTextureSlo
     const tex = ext?.texture ?? registry.get(slot)
     const g = canvas.getContext('2d')!
     g.clearRect(0, 0, canvas.width, canvas.height)
-    const image = tex.image as CanvasImageSource | undefined
-    if (image) g.drawImage(image, 0, 0, canvas.width, canvas.height)
+    const rawImg = tex.image as { data?: ArrayLike<number>; width?: number; height?: number } | CanvasImageSource | undefined
+    if (rawImg && typeof rawImg === 'object' && 'data' in rawImg && rawImg.data && rawImg.width && rawImg.height) {
+      const tmp = document.createElement('canvas')
+      tmp.width = rawImg.width
+      tmp.height = rawImg.height
+      tmp.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(rawImg.data), rawImg.width, rawImg.height), 0, 0)
+      g.drawImage(tmp, 0, 0, canvas.width, canvas.height)
+    } else if (rawImg) {
+      g.drawImage(rawImg as CanvasImageSource, 0, 0, canvas.width, canvas.height)
+    }
     nameEl.textContent = ext?.label ?? (registry.isCustom(slot) ? (tex.name || '自定义贴图') : defaultLabel)
   }
 

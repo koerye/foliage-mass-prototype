@@ -806,7 +806,10 @@ export function initStudioLogging(options: StudioLoggingOptions): { dispose(): v
     if (!(target instanceof HTMLElement)) return
 
     if (target instanceof HTMLInputElement) {
+      if (target.dataset.logIgnore === 'true') return
       const label = findControlLabel(target)
+      const isSecret = target.type === 'password'
+        || /key|token|secret|password/i.test(`${target.id} ${target.name} ${target.autocomplete || ''}`)
       if (target.type === 'file') {
         const files = target.files ? [...target.files].map(f => ({
           name: f.name,
@@ -832,10 +835,11 @@ export function initStudioLogging(options: StudioLoggingOptions): { dispose(): v
       }
       const path = target.dataset.path || target.dataset.r || target.dataset.n || target.dataset.c || target.dataset.k || target.id || undefined
       const cat: LogCategory = target.id.startsWith('glb') ? 'export' : 'param'
-      store.action(`调整「${label}」→ ${target.value}`, {
+      const safeValue = isSecret ? '[REDACTED]' : target.value
+      store.action(`调整「${label}」→ ${safeValue}`, {
         path,
         type: target.type,
-        value: target.value,
+        value: safeValue,
       }, cat)
       return
     }

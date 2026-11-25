@@ -18,7 +18,7 @@
 
 /* ---- Right-Docked Real-Time Texture Library Drawer (light Vegetation Studio palette) ---- */
 .tl-drawer {
-  position: fixed; top: 70px; right: 0; bottom: 0; width: min(410px, 94vw);
+  position: fixed; top: var(--studio-top, 70px); right: 0; bottom: 0; width: min(410px, 94vw);
   z-index: 41; display: flex; flex-direction: column; overflow: hidden;
   background: #fafaf4; border-left: 1px solid #d5dacb;
   box-shadow: -10px 0 32px rgba(28, 44, 32, .12);
@@ -28,7 +28,7 @@
     grid-template-columns: minmax(0, 1fr) 410px !important;
   }
   .tl-drawer {
-    top: 83px; right: 17px; bottom: 13px; width: 410px;
+    top: calc(var(--studio-top, 70px) + 13px); right: 17px; bottom: 13px; width: 410px;
     border: 1px solid #d5dacb; border-radius: 10px;
     box-shadow: 0 8px 28px rgba(28, 44, 32, .10);
   }
@@ -213,12 +213,12 @@
 
 /* Split mode (default): live 3D tree visible on left ~38%, Node Studio docked cleanly on right ~62% */
 .tg-studio.is-split {
-  top: 70px; right: 0; bottom: 0; width: min(64vw, 1080px); min-width: min(680px, 100vw);
+  top: var(--studio-top, 70px); right: 0; bottom: 0; width: min(64vw, 1080px); min-width: min(680px, 100vw);
   border-radius: 10px 0 0 0;
 }
 /* Fullscreen mode: full workspace canvas below top bar */
 .tg-studio.is-full {
-  top: 70px; left: 0; right: 0; bottom: 0; width: auto;
+  top: var(--studio-top, 70px); left: 0; right: 0; bottom: 0; width: auto;
   border-radius: 0; border-left: 0; border-right: 0; border-bottom: 0;
 }
 @media (min-width: 1100px) {

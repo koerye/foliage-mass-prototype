@@ -12,12 +12,13 @@ import {
   type OptimizeSpec, type PresetId, type TreeKind, type TreeSpec, type XYZ,
 } from '../tree/spec'
 
-export const leafTextureSources = ['auto', 'leaf', 'oak', 'oakAtlas', 'cloud', 'bush', 'sakura', 'maple', 'willow', 'flower', 'wildrose', 'blossom', 'needle', 'drape', 'palm', 'grass', 'grassTint', 'fern'] as const
+export const leafTextureSources = ['auto', 'leaf', 'feathery', 'oak', 'oakAtlas', 'cloud', 'bush', 'sakura', 'maple', 'willow', 'flower', 'wildrose', 'blossom', 'needle', 'drape', 'palm', 'grass', 'grassTint', 'fern'] as const
 export type LeafTextureSource = typeof leafTextureSources[number]
 
 export const leafTextureLabels: Record<LeafTextureSource, string> = {
   auto: '自动（随植物类型/叶型）',
   leaf: '阔叶叶片',
+  feathery: '羽叶细枝（高冠/盆景）',
   oak: '手绘厚涂橡叶叠簇',
   oakAtlas: '手绘厚涂橡叶 2×2 图集',
   cloud: '厚涂圆云叶（吉卜力）',
@@ -64,6 +65,8 @@ const defaultPresetForKind: Record<TreeKind, PresetId> = {
   broadleaf: 'broadleaf-round',
   conifer: 'conifer-standard',
   palm: 'palm-tropical',
+  bamboo: 'bamboo-realistic',
+  lotus: 'lotus-stemmed',
   grass: 'grass-clump',
   fern: 'fern',
   flowerbed: 'flowerbed-stemmed',
@@ -119,6 +122,8 @@ function texturesForPart(
     case 'broadleaf': setOwn('leaf'); break
     case 'conifer': setOwn('needle'); setOwn('drape'); break
     case 'palm': setOwn('palm'); break
+    case 'bamboo': setOwn('bamboo'); break
+    case 'lotus': setOwn('lotusLeaf'); break
     case 'grass': setOwn('grass'); break
     case 'fern': setOwn('fern'); break
     case 'flowerbed': setOwn('blossom'); break
@@ -191,6 +196,11 @@ export function buildAiScene(scene: AiSceneSpec, textures: TreeTextures, partTex
 
   for (const part of scene.parts) {
     if (!part.enabled) continue
+    const prev = partAssets.get(part.id)
+    if (prev) {
+      group.remove(prev.group)
+      prev.dispose()
+    }
     const built = buildTree(effectiveSpecForPart(part), texturesForPart(part, textures, partTextures?.get(part.id)))
     applyPartTransformToGroup(built.group, part)
     group.add(built.group)
@@ -286,6 +296,7 @@ export function parseAiScene(value: unknown): AiSceneSpec {
     }
   }
   if (!Array.isArray(raw.parts)) throw new Error('需要包含 parts 数组的 AI 场景配置，或 schemaVersion 2 单植物配置')
+  const seenIds = new Set<string>()
   const parts: AiPart[] = raw.parts.map((entry, idx) => {
     const p = (entry ?? {}) as Record<string, unknown>
     const spec = parseTreeSpec(p.spec)
@@ -293,8 +304,16 @@ export function parseAiScene(value: unknown): AiSceneSpec {
       ? p.position as XYZ : [0, 0, 0] as XYZ
     const tex = typeof p.leafTexture === 'string' && leafTextureSources.includes(p.leafTexture as LeafTextureSource)
       ? p.leafTexture as LeafTextureSource : 'auto'
+    const baseId = typeof p.id === 'string' && p.id.trim() ? p.id.trim() : `part-${idx + 1}`
+    let uniqueId = baseId
+    if (seenIds.has(uniqueId)) {
+      let suffix = 2
+      while (seenIds.has(`${baseId}-${suffix}`)) suffix++
+      uniqueId = `${baseId}-${suffix}`
+    }
+    seenIds.add(uniqueId)
     return {
-      id: typeof p.id === 'string' && p.id ? p.id : `part-${idx + 1}`,
+      id: uniqueId,
       label: typeof p.label === 'string' && p.label ? p.label : spec.name,
       enabled: p.enabled !== false,
       position: vec,
@@ -390,7 +409,24 @@ export function solveSceneForTriangleBudget(
   return { optimize: best.opt, before: base.triangles, after: best.triangles, reached: true }
 }
 
-const fieldByPath = new Map(sections.flatMap(s => s.fields).map(f => [f.path, f]))
+const fieldsByPath = new Map<string, { kinds?: TreeKind[]; field: (typeof sections)[number]['fields'][number] }[]>()
+for (const sec of sections) {
+  for (const f of sec.fields) {
+    const list = fieldsByPath.get(f.path) ?? []
+    list.push({ kinds: f.kinds ?? sec.kinds, field: f })
+    fieldsByPath.set(f.path, list)
+  }
+}
+function fieldForPart(path: string, kind: TreeKind) {
+  const list = fieldsByPath.get(path)
+  if (!list?.length) return undefined
+  return (list.find(x => x.kinds?.includes(kind)) ?? list.find(x => !x.kinds) ?? list[0]).field
+}
+function snapToStep(v: number, step?: number): number {
+  if (!step || step <= 0) return Number(v.toFixed(4))
+  if (step >= 1) return Math.round(v / step) * step
+  return Number(v.toFixed(4))
+}
 
 const stylePalettes: Record<string, [string, string]> = {
   default: ['#5c7a3c', '#f4ffd8'],
@@ -461,6 +497,8 @@ export function wholeSyncTargets(scene: AiSceneSpec, lead: AiPart, path: string,
   }
   if (path.startsWith('fronds.')) return scene.parts.filter(p => p.spec.kind === 'conifer')
   if (path.startsWith('palm.')) return scene.parts.filter(p => p.spec.kind === 'palm')
+  if (path.startsWith('bamboo.')) return scene.parts.filter(p => p.spec.kind === 'bamboo')
+  if (path.startsWith('lotus.')) return scene.parts.filter(p => p.spec.kind === 'lotus')
   if (path.startsWith('flowerbed.')) return scene.parts.filter(p => p.spec.kind === 'flowerbed')
   // ground.*, flowers.*, trunk.* (non-bark), crown.*, branches.* sync across all parts sharing the lead kind
   const sameKind = scene.parts.filter(p => p.spec.kind === lead.spec.kind)
@@ -566,7 +604,6 @@ export function applySceneParam(
   }
 
   const prevLead = getPath(lead.spec, path)
-  const field = fieldByPath.get(path)
   const isProportional = scope === 'whole' && PROPORTIONAL_PATHS.has(path)
   const isDelta = scope === 'whole' && DELTA_PATHS.has(path)
 
@@ -574,17 +611,19 @@ export function applySceneParam(
     let nextVal: unknown = value
     if (part.id !== lead.id && typeof value === 'number' && typeof prevLead === 'number') {
       const otherPrev = getPath(part.spec, path)
+      const partField = fieldForPart(path, part.spec.kind)
       if (typeof otherPrev === 'number') {
-        const lo = field?.min !== undefined ? Math.min(field.min, otherPrev) : -Infinity
-        const hi = field?.max !== undefined ? Math.max(field.max, otherPrev) : Infinity
+        const lo = partField?.min !== undefined ? Math.min(partField.min, otherPrev) : -Infinity
+        const hi = partField?.max !== undefined ? Math.max(partField.max, otherPrev) : Infinity
         if (isProportional) {
           if (value <= 0) nextVal = 0
-          else if (prevLead > 1e-4 && otherPrev > 1e-4) nextVal = MathUtils.clamp(otherPrev * (value / prevLead), Math.max(lo, 1e-4), hi)
-          else nextVal = value
+          else if (otherPrev <= 1e-4) nextVal = 0
+          else if (prevLead > 1e-4) nextVal = MathUtils.clamp(otherPrev * (value / prevLead), Math.max(lo, 1e-4), hi)
+          else nextVal = MathUtils.clamp(value, lo, hi)
         } else if (isDelta) {
           nextVal = MathUtils.clamp(otherPrev + (value - prevLead), lo, hi)
         }
-        if (field?.step === 1 && typeof nextVal === 'number') nextVal = Math.round(nextVal)
+        if (typeof nextVal === 'number') nextVal = snapToStep(nextVal, partField?.step)
       }
     }
     part.spec = setPath(part.spec, path, nextVal)

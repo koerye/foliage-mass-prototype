@@ -1,18 +1,27 @@
 import {
-  Box3, BufferAttribute, BufferGeometry, Color, Group, Matrix3, Matrix4, Mesh, MeshStandardMaterial,
-  Texture, Vector3, type Material, type Object3D,
+  Box3, BufferAttribute, BufferGeometry, Color, Group, InstancedMesh, Matrix3, Matrix4, Mesh, MeshStandardMaterial,
+  ShadowMaterial, Texture, Vector3, type Material, type Object3D,
 } from 'three'
+import { exportSceneToFbxBundle } from './export-fbx'
+import { createZipArchive, textureToPngBytes, type ExportArchiveFile } from './export-zip'
 import { activityLog, inspectGlbBinary } from './studio/activity-log'
+import {
+  bakeGrassBladeGradientMap, bakeProceduralBarkMaps,
+  type BakedGrassGradientResult, type BakedProceduralBarkResult, type ProceduralBarkUniformLike,
+} from './tree/bark-bake'
 import type { TrunkSpec } from './tree/spec'
 import { isWoodSculptActive, type BarkHeightField, type TrunkFeaturePlan } from './tree/wood-sculpt'
 import {
-  bakedBarkMapsToPngDataUrls, bakeSculptedBarkMaps,
+  bakedBarkMapsToPngDataUrls, bakeSculptedBarkMaps, bakeSculptedBarkMapsAsync,
   type BakedBarkMaps, type NormalMapConvention,
 } from './tree/wood-weld'
 
 export type BakeResolution = 512 | 1024 | 2048
+export type ExportFileFormat = 'glb' | 'gltf-split' | 'fbx'
 
 export interface ExportGlbOptions {
+  /** Output format / packaging mode: 'glb' (single embedded file), 'gltf-split' (glTF + bin + textures/*.png), or 'fbx' (FBX 7.4 Binary + textures/*.png). */
+  exportFormat?: ExportFileFormat
   /** 'merged' = bake transforms & combine into one single multi-material Mesh (distinct material slots
    *  for bark, foliage, flowers, grass, other); 'separate' = preserve independent parts & sub-meshes. */
   mode?: 'merged' | 'separate'
@@ -21,13 +30,18 @@ export interface ExportGlbOptions {
   /** Bake 3D world-space upward moss & root grounding from procedural-bark-v3 directly into wood vertex colors
    *  so external PBR engines (Blender / Unity / Unreal) reproduce the mossy trunk without custom GLSL shaders. */
   bakeBarkMoss?: boolean
+  /** Bake default procedural bark (when no custom bark bitmap is bound) into seamless BaseColor + Normal PNG maps
+   *  so every default tree exports with real bark textures for Blender / Unity / Unreal. */
+  bakeProceduralBark?: boolean
   /** Bake analytical High-Poly Sculpted Bark -> glTF 2.0 Tangent-Space NormalMap + Cavity AO Map
    *  so low-poly / game LOD exports preserve crisp carved wide-rib relief & crevices in Blender / Unity / UE. */
   bakeBarkNormal?: boolean
-  /** Resolution of baked sculpted bark Normal + AO maps (default 512). */
+  /** Resolution of baked sculpted / procedural bark maps (default 512). */
   bakeBarkNormalSize?: BakeResolution
   /** Normal map green-channel convention: 'opengl' (+Y, glTF/Blender/Unity) or 'directx' (-Y, Unreal/3dsMax). */
   bakeBarkNormalConvention?: NormalMapConvention
+  /** Bake a lightweight 64x256 gradient + vein BaseColor PNG for modeled 3D grass blades (vertex-color only by default). */
+  bakeGrassTexture?: boolean
   /** Export engine-ready vertex wind weights into standard glTF TEXCOORD_1 (uv1):
    *  u1 = primary height/trunk sway weight [0..1], v1 = leaf-edge / twig flutter weight [0..1]. */
   exportWindUv?: boolean
@@ -40,13 +54,28 @@ export interface GlbExportPreview {
   excludedDecorations: number
   mossBakedMeshes: number
   normalBakedMeshes: number
+  proceduralBarkMeshes: number
+  grassBakedMeshes: number
+  hasModeledGrass: boolean
+  hasProceduralBark: boolean
+  vertexColorOnlyMaterials: string[]
   windUvMeshes: number
+}
+
+export interface ExportBundleResult {
+  format: 'gltf-split' | 'fbx'
+  primaryFilename: string
+  files: ExportArchiveFile[]
+  textureFiles: string[]
+  meshCount: number
+  materialCount: number
+  toZipBlob(): Blob
 }
 
 const PREVIEW_ONLY_ATTRIBUTES = new Set(['leafCenter', 'leafCorner', 'shadeWeight', 'windWeight', 'pivotPos', 'barkMetric', 'rockData'])
 const PREVIEW_ONLY_USERDATA = new Set(['leafUniforms', 'barkUniforms', 'procUniforms', 'barkMap', 'windUniforms', 'rockUniforms'])
 
-const ALWAYS_DECOR_RE = /ambient\s*petal|petal|particle|spark|dust|rock|stone|pebble|碎石|石头|石块|粒子|飘落|落瓣|装饰/i
+const ALWAYS_DECOR_RE = /ambient\s*petal|drift(?:ing)?\s*petal|falling\s*petal|particle|spark|dust|rock|stone|pebble|碎石|石头|石块|粒子|飘落|落瓣|装饰/i
 const GROUND_DECOR_NAME_RE = /grass|flower\s*stems|flower\s*blossoms|根部草|根梢|草丛|草簇|小草|点缀小花|ground/i
 
 /** Generates fallback triplanar-projected UVs strictly for exported glTF meshes that
@@ -123,14 +152,9 @@ function barkFbm3Cpu(px: number, py: number, pz: number) {
   return v
 }
 
-interface BarkUniformBundle {
+interface BarkUniformBundle extends ProceduralBarkUniformLike {
   uUseBarkMap?: { value: number }
-  uBarkScale?: { value: number }
   uBarkTint?: { value: number }
-  uBarkBaseLum?: { value: number }
-  uBarkMoss?: { value: number }
-  uBarkMossColor?: { value: Color }
-  uBarkRootAO?: { value: number }
 }
 
 function hasActiveBarkMoss(mat: Material | undefined): BarkUniformBundle | undefined {
@@ -139,6 +163,48 @@ function hasActiveBarkMoss(mat: Material | undefined): BarkUniformBundle | undef
   const moss = Number(u.uBarkMoss?.value ?? 0)
   const rootAO = Number(u.uBarkRootAO?.value ?? 0)
   return (moss > 0.001 || rootAO > 0.001) ? u : undefined
+}
+
+function isProceduralBarkMaterial(mat: Material | undefined): BarkUniformBundle | undefined {
+  if (!mat || !(mat instanceof MeshStandardMaterial)) return undefined
+  const u = mat.userData?.barkUniforms as BarkUniformBundle | undefined
+  if (!u) return undefined
+  const useMap = Number(u.uUseBarkMap?.value ?? 0) > 0.5 || Boolean(mat.userData?.barkMap) || Boolean(mat.map)
+  return useMap ? undefined : u
+}
+
+function isModeledGrassMesh(node: Mesh, mat: Material | undefined): boolean {
+  if (!mat || !(mat instanceof MeshStandardMaterial)) return false
+  if (mat.map || !mat.vertexColors) return false
+  if (!node.geometry.getAttribute('uv') || !node.geometry.getAttribute('color')) return false
+  const mName = (node.name || '').toLowerCase()
+  const matName = (mat.name || '').toLowerCase()
+  return mName.includes('grass') || matName.includes('grass') || matName.includes('blade') || Boolean(node.userData?.isPaintedGrass)
+}
+
+/** Resolves whether wood vertex colors need CPU baking before glTF export:
+ *  - When `bakeBarkMoss` is true and moss/rootAO > 0: full moss + rootAO + map AO normalization.
+ *  - Whenever a bark texture (`uUseBarkMap > 0.5`, custom `barkMap`, OR newly baked procedural bark map)
+ *    is active on a vertex-colored wood material: ALWAYS normalize the dark-brown base vertex color into
+ *    neutral AO (prevents pitch-black trunks in Blender/UE/Unity!). */
+function resolveBarkColorBake(
+  mat: Material | undefined,
+  bakeBarkMoss: boolean,
+  hasBakedProceduralMap = false,
+): { u: BarkUniformBundle; includeMoss: boolean } | undefined {
+  const u = mat?.userData?.barkUniforms as BarkUniformBundle | undefined
+  if (!u) return undefined
+  if (hasBakedProceduralMap && mat instanceof MeshStandardMaterial && mat.vertexColors) {
+    // When procedural bark BaseColor PNG already contains the bark color (and moss if enabled),
+    // normalize vertex color into neutral AO so texture * vertexColor never double-darkens!
+    return { u, includeMoss: bakeBarkMoss && Boolean(hasActiveBarkMoss(mat)) }
+  }
+  if (bakeBarkMoss && hasActiveBarkMoss(mat)) return { u, includeMoss: true }
+  const useMap = Number(u.uUseBarkMap?.value ?? 0) > 0.5 || Boolean(mat?.userData?.barkMap)
+  if (useMap && mat instanceof MeshStandardMaterial && mat.vertexColors) {
+    return { u, includeMoss: false }
+  }
+  return undefined
 }
 
 interface SculptBakeInfo {
@@ -161,17 +227,19 @@ function bakeBarkMossToColorAttr(
   geo: BufferGeometry,
   u: BarkUniformBundle,
   matrixWorld: Matrix4,
+  includeMoss = true,
+  forceNormalizeForMap = false,
 ): BufferAttribute | undefined {
   const pos = geo.getAttribute('position')
   const norm = geo.getAttribute('normal')
   if (!pos) return undefined
   const colAttr = geo.getAttribute('color') as BufferAttribute | undefined
-  const mossAmt = clamp01(Number(u.uBarkMoss?.value ?? 0))
-  const rootAoAmt = clamp01(Number(u.uBarkRootAO?.value ?? 0))
+  const mossAmt = includeMoss ? clamp01(Number(u.uBarkMoss?.value ?? 0)) : 0
+  const rootAoAmt = includeMoss ? clamp01(Number(u.uBarkRootAO?.value ?? 0)) : 0
   const scale = Math.max(0.15, Number(u.uBarkScale?.value ?? 1))
-  const useMap = Number(u.uUseBarkMap?.value ?? 0) > 0.5
+  const useMap = forceNormalizeForMap || Number(u.uUseBarkMap?.value ?? 0) > 0.5
   const baseLum = Math.max(0.03, Number(u.uBarkBaseLum?.value ?? 0.12))
-  const tint = clamp01(Number(u.uBarkTint?.value ?? 0.45))
+  const tint = forceNormalizeForMap ? 0 : clamp01(Number(u.uBarkTint?.value ?? 0.45))
   const mc = u.uBarkMossColor?.value instanceof Color ? u.uBarkMossColor.value : new Color('#5d9132')
   const nMat = new Matrix3().getNormalMatrix(matrixWorld)
   const wn = new Vector3()
@@ -425,7 +493,14 @@ function semanticMaterialName(mesh: Mesh, mat: Material): string {
     ? sanitizeMatToken((mat.userData.barkMap as { name: string }).name)
     : ''
 
-  if (mName.includes('ambient petal') || matName.includes('petal')) return 'Mat_Decor_Petals'
+  if (mName.includes('lotus petal') || matName === 'lotuspetals') return 'Mat_Lotus_Petals'
+  if (mName.includes('lotus center') || matName === 'lotuscenters') return 'Mat_Lotus_Center'
+  if (mName.includes('lotus leaf') || mName.includes('lotus leaves') || matName === 'lotusleaves') return 'Mat_Lotus_Leaves'
+  if (mName.includes('lotus stem') || matName === 'lotusstems') return 'Mat_Lotus_Stems'
+  if (mName.includes('bamboo culm') || matName === 'bambooculm') return 'Mat_Bamboo_Culm'
+  if (mName.includes('bamboo leaf') || mName.includes('bamboo leaves') || matName === 'bambooleaves') return 'Mat_Foliage_Bamboo'
+  if (mName.includes('ambient petal') || matName.includes('ambientpetal')) return 'Mat_Decor_Petals'
+  if (mName.includes('stem leave') || matName === 'flowerstemleaves') return 'Mat_Plant_StemLeaves'
   if (mName.includes('flower stem') || matName.includes('flowerstem')) return 'Mat_Plant_Stems'
   if (mName.includes('flower') || matName.includes('flower')) {
     return mapName ? `Mat_Flowers_${mapName}` : 'Mat_Flowers'
@@ -490,22 +565,47 @@ function hasWoodyTreeInScene(root: Object3D): boolean {
   root.traverse(o => {
     if (found) return
     const kind = (o.userData?.spec as { kind?: string } | undefined)?.kind
-    if (kind === 'broadleaf' || kind === 'conifer' || kind === 'palm') { found = true; return }
-    if (o instanceof Mesh && (o.name === 'Trunk and branches' || o.name === 'Leaf cards' || o.name === 'Needle fronds' || o.name === 'Palm fronds')) {
+    if (kind === 'broadleaf' || kind === 'conifer' || kind === 'palm' || kind === 'bamboo') { found = true; return }
+    if (o instanceof Mesh && (o.name === 'Trunk and branches' || o.name === 'Leaf cards' || o.name === 'Needle fronds' || o.name === 'Palm fronds' || o.name === 'Bamboo culms')) {
       found = true
     }
   })
   return found
 }
 
+function isEffectivelyVisible(node: Object3D, root: Object3D): boolean {
+  let cur: Object3D | null = node
+  while (cur) {
+    if (!cur.visible) return false
+    if (cur === root) break
+    cur = cur.parent
+  }
+  return true
+}
+
+function isExportIgnoredMesh(node: Mesh): boolean {
+  if (node.userData?.exportIgnore === true) return true
+  if (node.name === 'StudioShadowFloor') return true
+  const mats = Array.isArray(node.material) ? node.material : [node.material]
+  if (mats.length > 0 && mats.every(m => m instanceof ShadowMaterial)) return true
+  return false
+}
+
 function isDecorativeNode(node: Object3D, root: Object3D, hasTree: boolean): boolean {
+  // Never classify the scene diorama base or explicit user-placed Scene Assembly hero rocks as tree decorations
+  let pCheck: Object3D | null = node
+  while (pCheck && pCheck !== root) {
+    if (pCheck.userData?.isGround === true && pCheck.userData?.exportIgnore !== true) return false
+    if (pCheck.userData?.assemblyItemId && (pCheck.userData?.assemblyCategory === 'rock' || (pCheck.userData?.spec as { preset?: string } | undefined)?.preset)) return false
+    pCheck = pCheck.parent
+  }
   const check = (o: Object3D): boolean => {
     const role = o.userData?.role
     if (role === 'particle' || role === 'decoration') return true
     if (o.name && ALWAYS_DECOR_RE.test(o.name)) return true
     if (hasTree) {
       const kind = (o.userData?.spec as { kind?: string } | undefined)?.kind
-      if (kind === 'grass' || kind === 'fern' || kind === 'flowerbed') return true
+      if (kind === 'grass' || kind === 'fern' || kind === 'flowerbed' || kind === 'lotus') return true
       if (o instanceof Mesh && (o.name === 'GrassBlades' || o.name === 'FernFronds' || o.name === 'Flower stems and leaves' || o.name === 'Flower blossoms')) {
         return true
       }
@@ -525,23 +625,86 @@ interface CleanMaterialFactory {
   get(mesh: Mesh, mat: Material, useSemanticName: boolean): Material
 }
 
-function createMaterialDeduper(): CleanMaterialFactory {
+function isBrokenTexture(val: unknown): boolean {
+  if (!val || typeof val !== 'object' || !(val as { isTexture?: boolean }).isTexture) return false
+  const img = (val as Texture).image as { width?: number; height?: number; complete?: boolean; naturalWidth?: number } | null | undefined
+  if (!img) return true
+  if (typeof HTMLImageElement !== 'undefined' && img instanceof HTMLImageElement) {
+    return !img.complete || img.naturalWidth === 0
+  }
+  return false
+}
+
+function hasBrokenTextureOnMaterial(mat: Material): boolean {
+  const rec = mat as unknown as Record<string, unknown>
+  for (const key of Object.keys(rec)) {
+    if (key === 'userData') continue
+    if (isBrokenTexture(rec[key])) return true
+  }
+  const barkTex = mat.userData?.barkMap as Texture | undefined
+  if (barkTex) {
+    if (isBrokenTexture(barkTex) || isBrokenTexture(barkTex.userData?.normalMap) || isBrokenTexture(barkTex.userData?.roughnessMap)) {
+      return true
+    }
+  }
+  return false
+}
+
+function stripBrokenTexturesOnMaterial(mat: Material): string[] {
+  const stripped: string[] = []
+  const rec = mat as unknown as Record<string, unknown>
+  for (const key of Object.keys(rec)) {
+    if (key === 'userData') continue
+    const val = rec[key]
+    if (isBrokenTexture(val)) {
+      const texName = (val as Texture).name || '(unnamed)'
+      rec[key] = null
+      stripped.push(`${key}(${texName})`)
+    }
+  }
+  if (stripped.length > 0) {
+    activityLog.warn(
+      'export',
+      `材质 ${mat.name || '(unnamed)'} 包含未加载或损坏的贴图，导出前已自动剥离：${stripped.join('、')}`,
+      { material: mat.name || '(unnamed)', stripped },
+    )
+  }
+  return stripped
+}
+
+function createMaterialDeduper(
+  stripBrokenTextures = false,
+  tempDisposables?: { dispose(): void }[],
+): CleanMaterialFactory {
   const cache = new Map<string, Material>()
+  const nonStdCache = new Map<Material, Material>()
   return {
     get(mesh: Mesh, mat: Material, useSemanticName: boolean): Material {
       const semantic = useSemanticName ? semanticMaterialName(mesh, mat) : undefined
       const key = materialKey(mat, semantic)
-      if (!key) return mat
+      if (!key) {
+        if (!stripBrokenTextures || !hasBrokenTextureOnMaterial(mat)) return mat
+        const hit = nonStdCache.get(mat)
+        if (hit) return hit
+        const cloned = mat.clone()
+        stripBrokenTexturesOnMaterial(cloned)
+        nonStdCache.set(mat, cloned)
+        tempDisposables?.push(cloned)
+        return cloned
+      }
       const existing = cache.get(key)
       if (existing) return existing
+      const barkTex = mat.userData?.barkMap as Texture | undefined
       const hasCustomData = Boolean(mat.userData && Object.keys(mat.userData).some(k => PREVIEW_ONLY_USERDATA.has(k)))
-      const needsClone = hasCustomData || (semantic !== undefined && semantic !== mat.name)
+      const hasBroken = stripBrokenTextures && hasBrokenTextureOnMaterial(mat)
+      const hasPotentialRoughness = mat instanceof MeshStandardMaterial && Boolean(mat.roughnessMap || barkTex?.userData?.roughnessMap)
+      const needsMetalRoughAlias = mat instanceof MeshStandardMaterial && mat.metalness === 0 && hasPotentialRoughness && !mat.metalnessMap
+      const needsClone = hasCustomData || (semantic !== undefined && semantic !== mat.name) || hasBroken || needsMetalRoughAlias
       let clean = mat
       if (needsClone) {
         clean = mat.clone()
         if (semantic) clean.name = semantic
-        if (clean instanceof MeshStandardMaterial && mat.userData.barkMap) {
-          const barkTex = mat.userData.barkMap as Texture
+        if (clean instanceof MeshStandardMaterial && barkTex) {
           if (!clean.map) clean.map = barkTex
           if (!clean.normalMap && barkTex.userData?.normalMap instanceof Texture) {
             clean.normalMap = barkTex.userData.normalMap
@@ -556,6 +719,16 @@ function createMaterialDeduper(): CleanMaterialFactory {
           if (!PREVIEW_ONLY_USERDATA.has(k)) ud[k] = v
         }
         clean.userData = ud
+        if (stripBrokenTextures) {
+          stripBrokenTexturesOnMaterial(clean)
+        }
+        // Zero-reencode optimization (ez-tree inspired): when metalness === 0 and roughnessMap is set
+        // without a separate metalnessMap, alias metalnessMap = roughnessMap so GLTFExporter skips CPU
+        // metallicRoughness PNG compositing and avoids console merge warnings.
+        if (clean instanceof MeshStandardMaterial && clean.metalness === 0 && clean.roughnessMap && !clean.metalnessMap) {
+          clean.metalnessMap = clean.roughnessMap
+        }
+        tempDisposables?.push(clean)
       }
       cache.set(key, clean)
       return clean
@@ -728,6 +901,135 @@ function mergeEntriesIntoSingleMesh(entries: MergeEntry[], name: string): Mesh {
   return mesh
 }
 
+/** Bakes a Three.js `InstancedMesh` (e.g. UE-style painted grass clusters) into a standard
+ *  non-instanced `BufferGeometry` in local mesh space, applying every instance matrix & color
+ *  so Blender, Unity, Unreal, and glTF viewers open painted foliage 1:1 without extensions. */
+function bakeInstancedMeshGeometry(instMesh: InstancedMesh): BufferGeometry | undefined {
+  const count = instMesh.count
+  const src = instMesh.geometry
+  const posAttr = src.getAttribute('position')
+  if (count <= 0 || !posAttr) return undefined
+
+  const vPerInst = posAttr.count
+  const idxAttr = src.index
+  const iPerInst = idxAttr ? idxAttr.count : vPerInst
+  const totalVerts = vPerInst * count
+  const totalIndices = iPerInst * count
+
+  const normAttr = src.getAttribute('normal')
+  const colAttr = src.getAttribute('color') as BufferAttribute | undefined
+  const uvAttr = src.getAttribute('uv') as BufferAttribute | undefined
+  const hasInstColor = Boolean(instMesh.instanceColor)
+  const wantColor = Boolean(colAttr || hasInstColor)
+
+  const positions = new Float32Array(totalVerts * 3)
+  const normals = new Float32Array(totalVerts * 3)
+  const colors = wantColor ? new Float32Array(totalVerts * 3) : undefined
+  const uvs = uvAttr ? new Float32Array(totalVerts * 2) : undefined
+  const windWeights = new Float32Array(totalVerts)
+  const indices = totalVerts > 65535 ? new Uint32Array(totalIndices) : new Uint16Array(totalIndices)
+
+  // Compute instance-local Y range so grass roots stay strictly 0 regardless of terrain hill elevation
+  let instMinY = Infinity, instMaxY = -Infinity
+  for (let i = 0; i < vPerInst; i++) {
+    const ly = posAttr.getY(i)
+    if (ly < instMinY) instMinY = ly
+    if (ly > instMaxY) instMaxY = ly
+  }
+  const instInvSpan = 1 / Math.max(0.05, instMaxY - instMinY)
+  const localWind = new Float32Array(vPerInst)
+  for (let i = 0; i < vPerInst; i++) {
+    localWind[i] = clamp01((posAttr.getY(i) - instMinY) * instInvSpan)
+  }
+
+  const mat4 = new Matrix4()
+  const normMat = new Matrix3()
+  const instCol = new Color(1, 1, 1)
+  const v = new Vector3()
+  const n = new Vector3()
+  let vCursor = 0
+  let iCursor = 0
+
+  for (let k = 0; k < count; k++) {
+    instMesh.getMatrixAt(k, mat4)
+    normMat.getNormalMatrix(mat4)
+    const flip = mat4.determinant() < 0
+    if (hasInstColor) instMesh.getColorAt(k, instCol)
+    else instCol.setRGB(1, 1, 1)
+
+    const baseVertex = vCursor
+    for (let i = 0; i < vPerInst; i++) {
+      v.fromBufferAttribute(posAttr, i).applyMatrix4(mat4)
+      positions[(vCursor + i) * 3] = v.x
+      positions[(vCursor + i) * 3 + 1] = v.y
+      positions[(vCursor + i) * 3 + 2] = v.z
+
+      if (normAttr) {
+        n.fromBufferAttribute(normAttr, i).applyMatrix3(normMat)
+        if (n.lengthSq() > 1e-10) n.normalize()
+        else n.set(0, 1, 0)
+      } else {
+        n.set(0, 1, 0)
+      }
+      normals[(vCursor + i) * 3] = n.x
+      normals[(vCursor + i) * 3 + 1] = n.y
+      normals[(vCursor + i) * 3 + 2] = n.z
+
+      if (colors) {
+        const cr = colAttr ? colAttr.getX(i) : 1
+        const cg = colAttr ? colAttr.getY(i) : 1
+        const cb = colAttr ? colAttr.getZ(i) : 1
+        colors[(vCursor + i) * 3] = Math.min(1, Math.max(0, cr * instCol.r))
+        colors[(vCursor + i) * 3 + 1] = Math.min(1, Math.max(0, cg * instCol.g))
+        colors[(vCursor + i) * 3 + 2] = Math.min(1, Math.max(0, cb * instCol.b))
+      }
+
+      if (uvs && uvAttr) {
+        uvs[(vCursor + i) * 2] = uvAttr.getX(i)
+        uvs[(vCursor + i) * 2 + 1] = uvAttr.getY(i)
+      }
+      windWeights[vCursor + i] = localWind[i]
+    }
+
+    if (idxAttr) {
+      for (let i = 0; i < iPerInst; i += 3) {
+        const a = baseVertex + idxAttr.getX(i)
+        const b = baseVertex + idxAttr.getX(i + 1)
+        const c = baseVertex + idxAttr.getX(i + 2)
+        if (flip) {
+          indices[iCursor++] = a; indices[iCursor++] = c; indices[iCursor++] = b
+        } else {
+          indices[iCursor++] = a; indices[iCursor++] = b; indices[iCursor++] = c
+        }
+      }
+    } else {
+      for (let i = 0; i < vPerInst; i += 3) {
+        const a = baseVertex + i
+        const b = baseVertex + i + 1
+        const c = baseVertex + i + 2
+        if (flip) {
+          indices[iCursor++] = a; indices[iCursor++] = c; indices[iCursor++] = b
+        } else {
+          indices[iCursor++] = a; indices[iCursor++] = b; indices[iCursor++] = c
+        }
+      }
+    }
+    vCursor += vPerInst
+  }
+
+  const out = new BufferGeometry()
+  out.name = src.name || instMesh.name || 'InstancedBaked'
+  out.setAttribute('position', new BufferAttribute(positions, 3))
+  out.setAttribute('normal', new BufferAttribute(normals, 3))
+  if (colors) out.setAttribute('color', new BufferAttribute(colors, 3))
+  if (uvs) out.setAttribute('uv', new BufferAttribute(uvs, 2))
+  out.setAttribute('windWeight', new BufferAttribute(windWeights, 1))
+  out.setIndex(new BufferAttribute(indices, 1))
+  out.computeBoundingBox()
+  out.computeBoundingSphere()
+  return out
+}
+
 /** Builds a lightweight, non-mutating clone of `root` optimized for standard glTF 2.0 export:
  *  - Strips preview-only shader attributes (`leafCenter`, `leafCorner`, `shadeWeight`)
  *  - Quantizes linear vertex colors (`COLOR_0`) to core glTF 2.0 normalized `UNSIGNED_SHORT`
@@ -739,22 +1041,128 @@ export function prepareGlbScene(root: Object3D, options: ExportGlbOptions = {}):
   return prepareGlbSceneInternal(root, options)
 }
 
+/** Slices a sub-range `[start, start+count)` of an indexed or non-indexed BufferGeometry
+ *  and compacts vertex attributes so multi-material merges never duplicate unreferenced vertices. */
+function sliceGeometryGroup(src: BufferGeometry, start: number, count: number): BufferGeometry {
+  const out = new BufferGeometry()
+  out.name = src.name
+  const pos = src.getAttribute('position')
+  if (!pos || count <= 0) return out
+  if (src.index) {
+    const idxArr = src.index.array
+    const end = Math.min(idxArr.length, start + count)
+    const remap = new Map<number, number>()
+    const used: number[] = []
+    const newIdx = new Uint32Array(Math.max(0, end - start))
+    for (let i = start; i < end; i++) {
+      const oldV = idxArr[i]
+      let nv = remap.get(oldV)
+      if (nv === undefined) {
+        nv = used.length
+        remap.set(oldV, nv)
+        used.push(oldV)
+      }
+      newIdx[i - start] = nv
+    }
+    for (const [name, attr] of Object.entries(src.attributes)) {
+      if (!(attr instanceof BufferAttribute)) continue
+      const itemSize = attr.itemSize
+      const Ctor = attr.array.constructor as new (len: number) => Float32Array | Uint16Array | Uint8Array | Uint32Array
+      const nextArr = new Ctor(used.length * itemSize)
+      for (let i = 0; i < used.length; i++) {
+        const srcOff = used[i] * itemSize
+        const dstOff = i * itemSize
+        for (let k = 0; k < itemSize; k++) nextArr[dstOff + k] = attr.array[srcOff + k]
+      }
+      out.setAttribute(name, new BufferAttribute(nextArr, itemSize, attr.normalized))
+    }
+    const finalIdx = used.length <= 65535 ? new Uint16Array(newIdx) : newIdx
+    out.setIndex(new BufferAttribute(finalIdx, 1))
+  } else {
+    const end = Math.min(pos.count, start + count)
+    const n = Math.max(0, end - start)
+    for (const [name, attr] of Object.entries(src.attributes)) {
+      if (!(attr instanceof BufferAttribute)) continue
+      const itemSize = attr.itemSize
+      const Ctor = attr.array.constructor as new (len: number) => Float32Array | Uint16Array | Uint8Array | Uint32Array
+      const nextArr = new Ctor(n * itemSize)
+      nextArr.set(attr.array.subarray(start * itemSize, end * itemSize))
+      out.setAttribute(name, new BufferAttribute(nextArr, itemSize, attr.normalized))
+    }
+  }
+  return out
+}
+
+async function prebakeSculptedBarkMapsAsync(
+  root: Object3D,
+  options: ExportGlbOptions,
+  tempDisposables: { dispose(): void }[],
+): Promise<Map<BufferGeometry, BakedBarkMaps>> {
+  const prebaked = new Map<BufferGeometry, BakedBarkMaps>()
+  if (!options.bakeBarkNormal) return prebaked
+  const excludeDecorations = Boolean(options.excludeDecorations)
+  const hasTree = excludeDecorations ? hasWoodyTreeInScene(root) : false
+  const size: BakeResolution = options.bakeBarkNormalSize === 1024 || options.bakeBarkNormalSize === 2048 ? options.bakeBarkNormalSize : 512
+  const normalConvention: NormalMapConvention = options.bakeBarkNormalConvention === 'directx' ? 'directx' : 'opengl'
+
+  const jobs: {
+    geometry: BufferGeometry
+    info: NonNullable<ReturnType<typeof getSculptBakeInfo>>
+    baseNormalMap?: Texture
+  }[] = []
+  const seen = new Set<BufferGeometry>()
+
+  root.traverse(node => {
+    if (!(node instanceof Mesh) || seen.has(node.geometry)) return
+    if (!isEffectivelyVisible(node, root) || isExportIgnoredMesh(node)) return
+    if (excludeDecorations && isDecorativeNode(node, root, hasTree)) return
+    const info = getSculptBakeInfo(node)
+    if (!info) return
+    const mats = Array.isArray(node.material) ? node.material : [node.material]
+    const stdMat = mats.find(m => m instanceof MeshStandardMaterial)
+    if (!stdMat) return
+    seen.add(node.geometry)
+    const barkNormFallback = (stdMat.userData?.barkMap as Texture | undefined)?.userData?.normalMap
+    const baseNormalMap = stdMat.normalMap
+      ?? (barkNormFallback instanceof Texture ? barkNormFallback : undefined)
+    jobs.push({ geometry: node.geometry, info, baseNormalMap: baseNormalMap ?? undefined })
+  })
+
+  for (const job of jobs) {
+    const baked = await bakeSculptedBarkMapsAsync(job.info.trunk, job.info.seed, job.info.detail, {
+      size,
+      normalConvention,
+      heightField: job.info.heightField,
+      baseNormalMap: job.baseNormalMap,
+      plan: job.info.plan,
+    })
+    prebaked.set(job.geometry, baked)
+    tempDisposables.push(baked)
+  }
+  return prebaked
+}
+
 function prepareGlbSceneInternal(
   root: Object3D,
   options: ExportGlbOptions = {},
   tempDisposables?: { dispose(): void }[],
+  stripBrokenTextures = false,
+  prebakedNormals?: Map<BufferGeometry, BakedBarkMaps>,
 ): Object3D {
   const mode = options.mode ?? 'separate'
   const excludeDecorations = Boolean(options.excludeDecorations)
   const bakeBarkMoss = Boolean(options.bakeBarkMoss)
   const bakeBarkNormal = Boolean(options.bakeBarkNormal)
+  const bakeProceduralBark = Boolean(options.bakeProceduralBark)
+  const bakeGrassTexture = Boolean(options.bakeGrassTexture)
   const bakeBarkNormalSize: BakeResolution = options.bakeBarkNormalSize === 1024 || options.bakeBarkNormalSize === 2048 ? options.bakeBarkNormalSize : 512
   const bakeBarkNormalConvention: NormalMapConvention = options.bakeBarkNormalConvention === 'directx' ? 'directx' : 'opengl'
   const exportWindUv = Boolean(options.exportWindUv)
   const hasTree = excludeDecorations ? hasWoodyTreeInScene(root) : false
   const hasRootAiScene = Boolean(root.userData && 'aiScene' in root.userData)
-  const deduper = createMaterialDeduper()
-  const bakedNormalCache = new Map<BufferGeometry, BakedBarkMaps>()
+  const deduper = createMaterialDeduper(stripBrokenTextures, tempDisposables)
+  const bakedNormalCache = new Map<BufferGeometry, BakedBarkMaps>(prebakedNormals)
+  const bakedProcBarkCache = new Map<string, BakedProceduralBarkResult>()
   const bakedMaterialCache = new Map<string, Material>()
 
   root.updateWorldMatrix(true, true)
@@ -767,6 +1175,7 @@ function prepareGlbSceneInternal(
     const pt = new Vector3()
     root.traverse(node => {
       if (!(node instanceof Mesh)) return
+      if (!isEffectivelyVisible(node, root) || isExportIgnoredMesh(node)) return
       if (excludeDecorations && isDecorativeNode(node, root, hasTree)) return
       const pos = node.geometry.getAttribute('position')
       if (!pos) return
@@ -782,37 +1191,96 @@ function prepareGlbSceneInternal(
     }
   }
 
-  const maybeAttachBakedNormal = (node: Mesh, rawMat: Material, cleanMat: Material): Material => {
-    if (!bakeBarkNormal || !(cleanMat instanceof MeshStandardMaterial)) return cleanMat
-    const bakeInfo = getSculptBakeInfo(node)
-    if (!bakeInfo) return cleanMat
-    const cacheKey = `${node.geometry.uuid}|${cleanMat.uuid}|${bakeBarkNormalSize}|${bakeBarkNormalConvention}`
-    const cachedMat = bakedMaterialCache.get(cacheKey)
-    if (cachedMat) return cachedMat
-    let baked = bakedNormalCache.get(node.geometry)
-    if (!baked) {
-      const barkNormFallback = (rawMat.userData?.barkMap as Texture | undefined)?.userData?.normalMap
-      const baseNormalMap = (cleanMat instanceof MeshStandardMaterial ? cleanMat.normalMap : undefined)
-        ?? (rawMat instanceof MeshStandardMaterial ? rawMat.normalMap : undefined)
-        ?? (barkNormFallback instanceof Texture ? barkNormFallback : undefined)
-      baked = bakeSculptedBarkMaps(bakeInfo.trunk, bakeInfo.seed, bakeInfo.detail, {
-        size: bakeBarkNormalSize,
-        normalConvention: bakeBarkNormalConvention,
-        heightField: bakeInfo.heightField,
-        baseNormalMap: baseNormalMap ?? undefined,
-        plan: bakeInfo.plan,
-      })
-      bakedNormalCache.set(node.geometry, baked)
-      tempDisposables?.push(baked)
+  const maybeAttachBakedNormal = (
+    node: Mesh,
+    rawMat: Material,
+    cleanMat: Material,
+  ): { material: Material; hasProceduralColorMap: boolean } => {
+    if (!(cleanMat instanceof MeshStandardMaterial)) {
+      return { material: cleanMat, hasProceduralColorMap: false }
     }
+    const bakeInfo = bakeBarkNormal ? getSculptBakeInfo(node) : undefined
+    const procUniforms = bakeProceduralBark ? isProceduralBarkMaterial(rawMat) : undefined
+    if (!bakeInfo && !procUniforms) {
+      return { material: cleanMat, hasProceduralColorMap: false }
+    }
+
+    const procKey = procUniforms
+      ? `${procUniforms.uBarkTargetColor?.value?.getHexString?.() ?? '5b4636'}|${Number(procUniforms.uBarkScale?.value ?? 1).toFixed(2)}|${Number(procUniforms.uBarkDetail?.value ?? 0.72).toFixed(2)}|${bakeBarkMoss ? Number(procUniforms.uBarkMoss?.value ?? 0).toFixed(2) : 0}|${bakeBarkNormalSize}|${bakeBarkNormalConvention}`
+      : ''
+    const cacheKey = `${bakeInfo ? node.geometry.uuid : 'nosc'}|${cleanMat.uuid}|${procKey}|${bakeBarkNormalSize}|${bakeBarkNormalConvention}`
+    const cachedMat = bakedMaterialCache.get(cacheKey)
+    if (cachedMat) {
+      return { material: cachedMat, hasProceduralColorMap: Boolean(procUniforms) }
+    }
+
     const matWithBaked = cleanMat.clone()
-    matWithBaked.normalMap = baked.normalMap
-    matWithBaked.normalScale.set(1, 1)
-    matWithBaked.aoMap = baked.aoMap
-    matWithBaked.aoMapIntensity = 0.85
+
+    if (bakeInfo) {
+      let baked = bakedNormalCache.get(node.geometry)
+      if (!baked) {
+        const barkNormFallback = (rawMat.userData?.barkMap as Texture | undefined)?.userData?.normalMap
+        const baseNormalMap = (cleanMat instanceof MeshStandardMaterial ? cleanMat.normalMap : undefined)
+          ?? (rawMat instanceof MeshStandardMaterial ? rawMat.normalMap : undefined)
+          ?? (barkNormFallback instanceof Texture ? barkNormFallback : undefined)
+        baked = bakeSculptedBarkMaps(bakeInfo.trunk, bakeInfo.seed, bakeInfo.detail, {
+          size: bakeBarkNormalSize,
+          normalConvention: bakeBarkNormalConvention,
+          heightField: bakeInfo.heightField,
+          baseNormalMap: baseNormalMap ?? undefined,
+          plan: bakeInfo.plan,
+        })
+        bakedNormalCache.set(node.geometry, baked)
+        tempDisposables?.push(baked)
+      }
+      matWithBaked.normalMap = baked.normalMap
+      matWithBaked.normalScale.set(1, 1)
+      matWithBaked.aoMap = baked.aoMap
+      matWithBaked.aoMapIntensity = 0.85
+    }
+
+    if (procUniforms) {
+      let procBaked = bakedProcBarkCache.get(procKey)
+      if (!procBaked) {
+        procBaked = bakeProceduralBarkMaps(procUniforms, {
+          size: bakeBarkNormalSize,
+          normalConvention: bakeBarkNormalConvention,
+          includeMoss: bakeBarkMoss,
+        })
+        bakedProcBarkCache.set(procKey, procBaked)
+        tempDisposables?.push(procBaked)
+      }
+      if (!matWithBaked.map) {
+        matWithBaked.map = procBaked.colorMap
+      }
+      // Attach procedural bark normal map whenever sculpted normal map is not already present
+      if (!matWithBaked.normalMap) {
+        matWithBaked.normalMap = procBaked.normalMap
+        matWithBaked.normalScale.set(0.85, 0.85)
+      }
+    }
+
     bakedMaterialCache.set(cacheKey, matWithBaked)
     tempDisposables?.push(matWithBaked)
-    return matWithBaked
+    return { material: matWithBaked, hasProceduralColorMap: Boolean(procUniforms) }
+  }
+
+  const maybeBakeGrassMaterial = (
+    node: Mesh,
+    geoForSample: BufferGeometry,
+    rawMat: Material,
+    cleanMat: Material,
+  ): { material: Material; normalizedColors?: BufferAttribute } => {
+    if (!bakeGrassTexture || !(cleanMat instanceof MeshStandardMaterial) || !isModeledGrassMesh(node, rawMat)) {
+      return { material: cleanMat }
+    }
+    const baked: BakedGrassGradientResult | undefined = bakeGrassBladeGradientMap(geoForSample, { width: 64, height: 256 })
+    if (!baked) return { material: cleanMat }
+    tempDisposables?.push(baked)
+    const matWithGrass = cleanMat.clone()
+    matWithGrass.map = baked.colorMap
+    tempDisposables?.push(matWithGrass)
+    return { material: matWithGrass, normalizedColors: baked.normalizedColors }
   }
 
   if (mode === 'merged') {
@@ -820,34 +1288,53 @@ function prepareGlbSceneInternal(
 
     root.traverse(node => {
       if (!(node instanceof Mesh)) return
+      if (!isEffectivelyVisible(node, root) || isExportIgnoredMesh(node)) return
       if (excludeDecorations && isDecorativeNode(node, root, hasTree)) return
       const relMatrix = invRoot.clone().multiply(node.matrixWorld)
       const normalMatrix = new Matrix3().getNormalMatrix(relMatrix)
       const flipWinding = relMatrix.determinant() < 0
+
+      if (node instanceof InstancedMesh) {
+        const bakedInst = bakeInstancedMeshGeometry(node)
+        if (!bakedInst) return
+        tempDisposables?.push(bakedInst)
+        const rawMat = Array.isArray(node.material) ? node.material[0] : node.material
+        if (!rawMat) return
+        const { material: barkMat } = maybeAttachBakedNormal(node, rawMat, deduper.get(node, rawMat, true))
+        const grassRes = maybeBakeGrassMaterial(node, bakedInst, rawMat, barkMat)
+        const windUv1 = exportWindUv ? synthesizeWindUv1(bakedInst, node, relMatrix, windYMin, windHeightSpan) : undefined
+        const geo = cleanGeometry(bakedInst, grassRes.normalizedColors, windUv1)
+        entries.push({ geometry: geo, material: grassRes.material, matrix: relMatrix, normalMatrix, flipWinding })
+        return
+      }
+
       const windUv1 = exportWindUv ? synthesizeWindUv1(node.geometry, node, relMatrix, windYMin, windHeightSpan) : undefined
 
       if (Array.isArray(node.material) && node.geometry.groups.length > 0) {
         for (const g of node.geometry.groups) {
           const rawMat = node.material[g.materialIndex ?? 0]
           if (!rawMat) continue
-          const mat = maybeAttachBakedNormal(node, rawMat, deduper.get(node, rawMat, true))
-          const barkU = bakeBarkMoss ? hasActiveBarkMoss(rawMat) : undefined
-          const bakedCol = barkU ? bakeBarkMossToColorAttr(node.geometry, barkU, node.matrixWorld) : undefined
-          const sub = cleanGeometry(node.geometry, bakedCol, windUv1)
-          if (sub.index) {
-            const slice = sub.index.array.slice(g.start, g.start + g.count)
-            sub.setIndex(new BufferAttribute(slice, 1))
-          }
-          entries.push({ geometry: sub, material: mat, matrix: relMatrix, normalMatrix, flipWinding })
+          const { material: barkMat, hasProceduralColorMap } = maybeAttachBakedNormal(node, rawMat, deduper.get(node, rawMat, true))
+          const grassRes = maybeBakeGrassMaterial(node, node.geometry, rawMat, barkMat)
+          const barkBake = resolveBarkColorBake(rawMat, bakeBarkMoss, hasProceduralColorMap)
+          const bakedCol = grassRes.normalizedColors ?? (barkBake
+            ? bakeBarkMossToColorAttr(node.geometry, barkBake.u, node.matrixWorld, barkBake.includeMoss, hasProceduralColorMap)
+            : undefined)
+          const cleanAll = cleanGeometry(node.geometry, bakedCol, windUv1)
+          const sub = sliceGeometryGroup(cleanAll, g.start, g.count)
+          entries.push({ geometry: sub, material: grassRes.material, matrix: relMatrix, normalMatrix, flipWinding })
         }
       } else {
         const rawMat = Array.isArray(node.material) ? node.material[0] : node.material
         if (!rawMat) return
-        const mat = maybeAttachBakedNormal(node, rawMat, deduper.get(node, rawMat, true))
-        const barkU = bakeBarkMoss ? hasActiveBarkMoss(rawMat) : undefined
-        const bakedCol = barkU ? bakeBarkMossToColorAttr(node.geometry, barkU, node.matrixWorld) : undefined
+        const { material: barkMat, hasProceduralColorMap } = maybeAttachBakedNormal(node, rawMat, deduper.get(node, rawMat, true))
+        const grassRes = maybeBakeGrassMaterial(node, node.geometry, rawMat, barkMat)
+        const barkBake = resolveBarkColorBake(rawMat, bakeBarkMoss, hasProceduralColorMap)
+        const bakedCol = grassRes.normalizedColors ?? (barkBake
+          ? bakeBarkMossToColorAttr(node.geometry, barkBake.u, node.matrixWorld, barkBake.includeMoss, hasProceduralColorMap)
+          : undefined)
         const geo = cleanGeometry(node.geometry, bakedCol, windUv1)
-        entries.push({ geometry: geo, material: mat, matrix: relMatrix, normalMatrix, flipWinding })
+        entries.push({ geometry: geo, material: grassRes.material, matrix: relMatrix, normalMatrix, flipWinding })
       }
     })
 
@@ -862,35 +1349,63 @@ function prepareGlbSceneInternal(
   }
 
   // Separate mode: preserve hierarchy while still cleaning geometry, deduplicating materials,
-  // optionally baking 3D bark moss into vertex colors and high-poly sculpted bark into tangent normal+AO maps,
-  // exporting engine wind TEXCOORD_1, and removing decorative meshes/groups.
+  // optionally baking procedural bark BaseColor+Normal, sculpted Normal+AO, grass gradient BaseColor,
+  // 3D bark moss into vertex colors, engine wind TEXCOORD_1, and removing decorative meshes/groups.
   const geometryCache = new Map<BufferGeometry, BufferGeometry>()
   const cloneNode = (node: Object3D, isRoot: boolean): Object3D | undefined => {
+    if (!isRoot && !node.visible) return undefined
+    if (!isRoot && node instanceof Mesh && isExportIgnoredMesh(node)) return undefined
     if (!isRoot && excludeDecorations && isDecorativeNode(node, root, hasTree)) return undefined
     let copy: Object3D
     if (node instanceof Mesh) {
-      const rawMat = Array.isArray(node.material) ? node.material[0] : node.material
-      const mat = Array.isArray(node.material)
-        ? node.material.map(m => maybeAttachBakedNormal(node, m, deduper.get(node, m, false)))
-        : maybeAttachBakedNormal(node, node.material, deduper.get(node, node.material, false))
-      const barkU = bakeBarkMoss ? hasActiveBarkMoss(rawMat) : undefined
-      const canCacheGeo = !barkU && !exportWindUv
-      let geo = canCacheGeo ? geometryCache.get(node.geometry) : undefined
-      if (!geo) {
-        const bakedCol = barkU ? bakeBarkMossToColorAttr(node.geometry, barkU, node.matrixWorld) : undefined
+      if (node instanceof InstancedMesh) {
+        const bakedInst = bakeInstancedMeshGeometry(node)
+        if (!bakedInst) return undefined
+        tempDisposables?.push(bakedInst)
+        const rawMat = Array.isArray(node.material) ? node.material[0] : node.material
+        const { material: barkMat } = maybeAttachBakedNormal(node, rawMat, deduper.get(node, rawMat, false))
+        const grassRes = maybeBakeGrassMaterial(node, bakedInst, rawMat, barkMat)
         const relMatrix = exportWindUv ? invRoot.clone().multiply(node.matrixWorld) : undefined
-        const windUv1 = relMatrix ? synthesizeWindUv1(node.geometry, node, relMatrix, windYMin, windHeightSpan) : undefined
-        geo = cleanGeometry(node.geometry, bakedCol, windUv1)
-        const needsUv = (Array.isArray(mat) ? mat : [mat]).some(m => m instanceof MeshStandardMaterial && Boolean(m.map || m.normalMap || m.roughnessMap || m.aoMap))
-        if (needsUv && !geo.getAttribute('uv')) {
-          const fallbackUv = synthesizeTriplanarUv(geo)
-          if (fallbackUv) geo.setAttribute('uv', fallbackUv)
+        const windUv1 = relMatrix ? synthesizeWindUv1(bakedInst, node, relMatrix, windYMin, windHeightSpan) : undefined
+        const geo = cleanGeometry(bakedInst, grassRes.normalizedColors, windUv1)
+        copy = new Mesh(geo, grassRes.material)
+        copy.castShadow = node.castShadow
+        copy.receiveShadow = node.receiveShadow
+      } else {
+        const rawMat = Array.isArray(node.material) ? node.material[0] : node.material
+        let hasProceduralColorMap = false
+        let grassNormColors: BufferAttribute | undefined
+        const processOneMat = (m: Material) => {
+          const b = maybeAttachBakedNormal(node, m, deduper.get(node, m, false))
+          if (b.hasProceduralColorMap) hasProceduralColorMap = true
+          const g = maybeBakeGrassMaterial(node, node.geometry, m, b.material)
+          if (g.normalizedColors && !grassNormColors) grassNormColors = g.normalizedColors
+          return g.material
         }
-        if (canCacheGeo) geometryCache.set(node.geometry, geo)
+        const mat = Array.isArray(node.material)
+          ? node.material.map(processOneMat)
+          : processOneMat(node.material)
+        const barkBake = resolveBarkColorBake(rawMat, bakeBarkMoss, hasProceduralColorMap)
+        const canCacheGeo = !barkBake && !grassNormColors && !exportWindUv
+        let geo = canCacheGeo ? geometryCache.get(node.geometry) : undefined
+        if (!geo) {
+          const bakedCol = grassNormColors ?? (barkBake
+            ? bakeBarkMossToColorAttr(node.geometry, barkBake.u, node.matrixWorld, barkBake.includeMoss, hasProceduralColorMap)
+            : undefined)
+          const relMatrix = exportWindUv ? invRoot.clone().multiply(node.matrixWorld) : undefined
+          const windUv1 = relMatrix ? synthesizeWindUv1(node.geometry, node, relMatrix, windYMin, windHeightSpan) : undefined
+          geo = cleanGeometry(node.geometry, bakedCol, windUv1)
+          const needsUv = (Array.isArray(mat) ? mat : [mat]).some(m => m instanceof MeshStandardMaterial && Boolean(m.map || m.normalMap || m.roughnessMap || m.aoMap))
+          if (needsUv && !geo.getAttribute('uv')) {
+            const fallbackUv = synthesizeTriplanarUv(geo)
+            if (fallbackUv) geo.setAttribute('uv', fallbackUv)
+          }
+          if (canCacheGeo) geometryCache.set(node.geometry, geo)
+        }
+        copy = new Mesh(geo, mat)
+        copy.castShadow = node.castShadow
+        copy.receiveShadow = node.receiveShadow
       }
-      copy = new Mesh(geo, mat)
-      copy.castShadow = node.castShadow
-      copy.receiveShadow = node.receiveShadow
     } else {
       copy = new Group()
     }
@@ -914,41 +1429,69 @@ function prepareGlbSceneInternal(
   return cloneNode(root, true) ?? new Group()
 }
 
-/** Fast non-mutating inspection for the GLB export dialog (exact mesh count, triangles, material slots). */
+/** Fast non-mutating inspection for the GLB / Split / FBX export dialog (exact mesh count, triangles, material slots). */
 export function inspectGlbExport(root: Object3D, options: ExportGlbOptions = {}): GlbExportPreview {
   const mode = options.mode ?? 'merged'
   const excludeDecorations = Boolean(options.excludeDecorations)
   const bakeBarkMoss = Boolean(options.bakeBarkMoss)
   const bakeBarkNormal = Boolean(options.bakeBarkNormal)
+  const bakeProceduralBark = Boolean(options.bakeProceduralBark)
+  const bakeGrassTexture = Boolean(options.bakeGrassTexture)
   const exportWindUv = Boolean(options.exportWindUv)
   const hasTree = excludeDecorations ? hasWoodyTreeInScene(root) : false
   const deduper = createMaterialDeduper()
   const matNames: string[] = []
+  const vertexColorOnlyMaterials: string[] = []
   const seenMats = new Set<Material>()
   let keptMeshes = 0
   let excludedDecorations = 0
   let mossBakedMeshes = 0
   let normalBakedMeshes = 0
+  let proceduralBarkMeshes = 0
+  let grassBakedMeshes = 0
+  let hasModeledGrass = false
+  let hasProceduralBark = false
   let triangles = 0
 
   root.traverse(node => {
     if (!(node instanceof Mesh)) return
+    if (!isEffectivelyVisible(node, root) || isExportIgnoredMesh(node)) return
+    if (node instanceof InstancedMesh && node.count <= 0) return
     if (excludeDecorations && isDecorativeNode(node, root, hasTree)) {
       excludedDecorations++
       return
     }
     keptMeshes++
     const pos = node.geometry.getAttribute('position')
-    triangles += node.geometry.index ? Math.round(node.geometry.index.count / 3) : Math.round((pos?.count ?? 0) / 3)
+    const baseTris = node.geometry.index ? Math.round(node.geometry.index.count / 3) : Math.round((pos?.count ?? 0) / 3)
+    triangles += node instanceof InstancedMesh ? baseTris * node.count : baseTris
     const mats = Array.isArray(node.material) ? node.material : [node.material]
     if (bakeBarkMoss && mats.some(m => Boolean(hasActiveBarkMoss(m)))) mossBakedMeshes++
     if (bakeBarkNormal && Boolean(getSculptBakeInfo(node))) normalBakedMeshes++
+    const anyProcBark = mats.some(m => Boolean(isProceduralBarkMaterial(m)))
+    if (anyProcBark) {
+      hasProceduralBark = true
+      if (bakeProceduralBark) proceduralBarkMeshes++
+    }
+    const anyModeledGrass = mats.some(m => isModeledGrassMesh(node, m))
+    if (anyModeledGrass) {
+      hasModeledGrass = true
+      if (bakeGrassTexture) grassBakedMeshes++
+    }
     for (const rawMat of mats) {
       if (!rawMat) continue
       const clean = deduper.get(node, rawMat, mode === 'merged')
       if (!seenMats.has(clean)) {
         seenMats.add(clean)
-        matNames.push(clean.name || 'Material')
+        const mName = clean.name || 'Material'
+        matNames.push(mName)
+        const willGetBakedMap = (bakeProceduralBark && Boolean(isProceduralBarkMaterial(rawMat)))
+          || (bakeGrassTexture && isModeledGrassMesh(node, rawMat))
+        const hasMap = clean instanceof MeshStandardMaterial && Boolean(clean.map || willGetBakedMap)
+        const usesVertexColors = clean instanceof MeshStandardMaterial && Boolean(clean.vertexColors)
+        if (!hasMap && usesVertexColors) {
+          vertexColorOnlyMaterials.push(mName)
+        }
       }
     }
   })
@@ -960,6 +1503,11 @@ export function inspectGlbExport(root: Object3D, options: ExportGlbOptions = {})
     excludedDecorations,
     mossBakedMeshes,
     normalBakedMeshes,
+    proceduralBarkMeshes,
+    grassBakedMeshes,
+    hasModeledGrass,
+    hasProceduralBark,
+    vertexColorOnlyMaterials,
     windUvMeshes: exportWindUv ? keptMeshes : 0,
   }
 }
@@ -969,14 +1517,30 @@ export interface StandaloneBarkBakePng {
   width: number
   height: number
   normalConvention: NormalMapConvention
+  colorDataUrl?: string
   normalDataUrl: string
-  aoDataUrl: string
+  aoDataUrl?: string
 }
 
-/** Bakes standalone Tangent-Space Normal PNG + Cavity AO PNG data URLs for every sculpted trunk in `root`. */
+function rgbaBytesToPngDataUrl(bytes: Uint8Array, width: number, height: number): string {
+  if (typeof document !== 'undefined') {
+    const c = document.createElement('canvas')
+    c.width = width; c.height = height
+    const ctx = c.getContext('2d')
+    if (ctx) {
+      const id = ctx.createImageData(width, height)
+      id.data.set(bytes)
+      ctx.putImageData(id, 0, 0)
+      return c.toDataURL('image/png')
+    }
+  }
+  return ''
+}
+
+/** Bakes standalone Bark BaseColor / Normal / Cavity AO PNG data URLs for every sculpted OR default procedural trunk in `root`. */
 export function extractStandaloneBarkBakePngs(
   root: Object3D,
-  options: { size?: BakeResolution; normalConvention?: NormalMapConvention } = {},
+  options: { size?: BakeResolution; normalConvention?: NormalMapConvention; includeMoss?: boolean } = {},
 ): StandaloneBarkBakePng[] {
   const size: BakeResolution = options.size === 1024 || options.size === 2048 ? options.size : 512
   const normalConvention: NormalMapConvention = options.normalConvention === 'directx' ? 'directx' : 'opengl'
@@ -986,33 +1550,142 @@ export function extractStandaloneBarkBakePngs(
   root.traverse(node => {
     if (!(node instanceof Mesh) || seen.has(node.geometry)) return
     const info = getSculptBakeInfo(node)
-    if (!info) return
-    seen.add(node.geometry)
     const rawMat = Array.isArray(node.material) ? node.material[0] : node.material
-    const barkNormFallback = (rawMat?.userData?.barkMap as Texture | undefined)?.userData?.normalMap
-    const baseNormalMap = (rawMat instanceof MeshStandardMaterial ? rawMat.normalMap : undefined)
-      ?? (barkNormFallback instanceof Texture ? barkNormFallback : undefined)
-    const baked = bakeSculptedBarkMaps(info.trunk, info.seed, info.detail, {
-      size,
-      normalConvention,
-      heightField: info.heightField,
-      baseNormalMap: baseNormalMap ?? undefined,
-      plan: info.plan,
-    })
-    try {
-      const urls = bakedBarkMapsToPngDataUrls(baked)
-      out.push({
-        name: sanitizeMatToken(node.parent?.name || node.name || 'Bark'),
-        width: baked.width,
-        height: baked.height,
+    const procUniforms = isProceduralBarkMaterial(rawMat)
+    if (!info && !procUniforms) return
+    seen.add(node.geometry)
+    const baseName = sanitizeMatToken(node.parent?.name || node.name || 'Bark')
+
+    if (info) {
+      const barkNormFallback = (rawMat?.userData?.barkMap as Texture | undefined)?.userData?.normalMap
+      const baseNormalMap = (rawMat instanceof MeshStandardMaterial ? rawMat.normalMap : undefined)
+        ?? (barkNormFallback instanceof Texture ? barkNormFallback : undefined)
+      const baked = bakeSculptedBarkMaps(info.trunk, info.seed, info.detail, {
+        size,
         normalConvention,
-        normalDataUrl: urls.normalDataUrl,
-        aoDataUrl: urls.aoDataUrl,
+        heightField: info.heightField,
+        baseNormalMap: baseNormalMap ?? undefined,
+        plan: info.plan,
       })
-    } finally {
-      baked.dispose()
+      const procColor = procUniforms
+        ? bakeProceduralBarkMaps(procUniforms, { size, normalConvention, includeMoss: options.includeMoss ?? true })
+        : undefined
+      try {
+        const urls = bakedBarkMapsToPngDataUrls(baked)
+        out.push({
+          name: baseName,
+          width: baked.width,
+          height: baked.height,
+          normalConvention,
+          ...(procColor ? { colorDataUrl: rgbaBytesToPngDataUrl(procColor.colorBytes, procColor.width, procColor.height) } : {}),
+          normalDataUrl: urls.normalDataUrl,
+          aoDataUrl: urls.aoDataUrl,
+        })
+      } finally {
+        baked.dispose()
+        procColor?.dispose()
+      }
+      return
+    }
+
+    if (procUniforms) {
+      const proc = bakeProceduralBarkMaps(procUniforms, { size, normalConvention, includeMoss: options.includeMoss ?? true })
+      try {
+        out.push({
+          name: baseName,
+          width: proc.width,
+          height: proc.height,
+          normalConvention,
+          colorDataUrl: rgbaBytesToPngDataUrl(proc.colorBytes, proc.width, proc.height),
+          normalDataUrl: rgbaBytesToPngDataUrl(proc.normalBytes, proc.width, proc.height),
+        })
+      } finally {
+        proc.dispose()
+      }
     }
   })
+  return out
+}
+
+/** Non-blocking Worker-accelerated version of `extractStandaloneBarkBakePngs` (keeps UI responsive at 2048²). */
+export async function extractStandaloneBarkBakePngsAsync(
+  root: Object3D,
+  options: { size?: BakeResolution; normalConvention?: NormalMapConvention; includeMoss?: boolean } = {},
+): Promise<StandaloneBarkBakePng[]> {
+  const size: BakeResolution = options.size === 1024 || options.size === 2048 ? options.size : 512
+  const normalConvention: NormalMapConvention = options.normalConvention === 'directx' ? 'directx' : 'opengl'
+  const seen = new Set<BufferGeometry>()
+  const targets: {
+    baseName: string
+    info?: ReturnType<typeof getSculptBakeInfo>
+    rawMat: Material | undefined
+    procUniforms?: ProceduralBarkUniformLike
+  }[] = []
+
+  root.traverse(node => {
+    if (!(node instanceof Mesh) || seen.has(node.geometry)) return
+    const info = getSculptBakeInfo(node)
+    const rawMat = Array.isArray(node.material) ? node.material[0] : node.material
+    const procUniforms = isProceduralBarkMaterial(rawMat)
+    if (!info && !procUniforms) return
+    seen.add(node.geometry)
+    targets.push({
+      baseName: sanitizeMatToken(node.parent?.name || node.name || 'Bark'),
+      info,
+      rawMat,
+      procUniforms,
+    })
+  })
+
+  const out: StandaloneBarkBakePng[] = []
+  for (const t of targets) {
+    if (t.info) {
+      const barkNormFallback = (t.rawMat?.userData?.barkMap as Texture | undefined)?.userData?.normalMap
+      const baseNormalMap = (t.rawMat instanceof MeshStandardMaterial ? t.rawMat.normalMap : undefined)
+        ?? (barkNormFallback instanceof Texture ? barkNormFallback : undefined)
+      const baked = await bakeSculptedBarkMapsAsync(t.info.trunk, t.info.seed, t.info.detail, {
+        size,
+        normalConvention,
+        heightField: t.info.heightField,
+        baseNormalMap: baseNormalMap ?? undefined,
+        plan: t.info.plan,
+      })
+      const procColor = t.procUniforms
+        ? bakeProceduralBarkMaps(t.procUniforms, { size, normalConvention, includeMoss: options.includeMoss ?? true })
+        : undefined
+      try {
+        out.push({
+          name: t.baseName,
+          width: baked.width,
+          height: baked.height,
+          normalConvention,
+          ...(procColor ? { colorDataUrl: rgbaBytesToPngDataUrl(procColor.colorBytes, procColor.width, procColor.height) } : {}),
+          normalDataUrl: rgbaBytesToPngDataUrl(baked.normalBytes, baked.width, baked.height),
+          aoDataUrl: rgbaBytesToPngDataUrl(baked.aoBytes, baked.width, baked.height),
+        })
+      } finally {
+        baked.dispose()
+        procColor?.dispose()
+      }
+      continue
+    }
+
+    if (t.procUniforms) {
+      const proc = bakeProceduralBarkMaps(t.procUniforms, { size, normalConvention, includeMoss: options.includeMoss ?? true })
+      try {
+        out.push({
+          name: t.baseName,
+          width: proc.width,
+          height: proc.height,
+          normalConvention,
+          colorDataUrl: rgbaBytesToPngDataUrl(proc.colorBytes, proc.width, proc.height),
+          normalDataUrl: rgbaBytesToPngDataUrl(proc.normalBytes, proc.width, proc.height),
+        })
+      } finally {
+        proc.dispose()
+      }
+    }
+  }
   return out
 }
 
@@ -1199,20 +1872,21 @@ export async function exportGlb(group: Object3D, options: ExportGlbOptions = {})
   })
   const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js')
   const tempDisposables: { dispose(): void }[] = []
-  const prepared = prepareGlbSceneInternal(group, options, tempDisposables)
-  const preDiag = inspectPreparedSceneForLog(prepared)
-  activityLog.exportStep(
-    `GLB 预处理完成：${preDiag.meshCount} 网格 · ${preDiag.materials.length} 材质 · ${preDiag.uniqueTextureCount} 张贴图`,
-    preDiag,
-  )
-  if (preDiag.issues.length > 0) {
-    activityLog.exportStep(
-      `⚠️ 导出前检测到 ${preDiag.issues.length} 项贴图状态异常：${preDiag.issues.join('；')}`,
-      preDiag.issues,
-      'warn',
-    )
-  }
   try {
+    const prebakedNormals = await prebakeSculptedBarkMapsAsync(group, options, tempDisposables)
+    const prepared = prepareGlbSceneInternal(group, options, tempDisposables, true, prebakedNormals)
+    const preDiag = inspectPreparedSceneForLog(prepared)
+    activityLog.exportStep(
+      `GLB 预处理完成：${preDiag.meshCount} 网格 · ${preDiag.materials.length} 材质 · ${preDiag.uniqueTextureCount} 张贴图`,
+      preDiag,
+    )
+    if (preDiag.issues.length > 0) {
+      activityLog.exportStep(
+        `⚠️ 导出前检测到 ${preDiag.issues.length} 项贴图状态异常：${preDiag.issues.join('；')}`,
+        preDiag.issues,
+        'warn',
+      )
+    }
     const encodeStart = typeof performance !== 'undefined' ? performance.now() : Date.now()
     const bytes = await new GLTFExporter().parseAsync(prepared, { binary: true, onlyVisible: false })
     if (!(bytes instanceof ArrayBuffer)) throw new Error('GLB 导出未生成二进制文件')
@@ -1255,6 +1929,270 @@ export async function exportGlb(group: Object3D, options: ExportGlbOptions = {})
       'error',
     )
     throw err
+  } finally {
+    for (const d of tempDisposables) d.dispose()
+  }
+}
+
+function sanitizeExportBaseName(raw: string): string {
+  const clean = raw.replace(/\.(glb|gltf|fbx|zip)$/i, '').replace(/[^A-Za-z0-9_\-\u4e00-\u9fa5]+/g, '_').replace(/^_+|_+$/g, '')
+  return clean ? clean.slice(0, 64) : 'vegetation'
+}
+
+/**
+ * Exports a split glTF 2.0 bundle: `<baseName>.gltf` + `<baseName>.bin` + `textures/*.png`,
+ * separating all BaseColor / Normal / AO / Roughness PNG images into a clean external folder.
+ */
+export async function exportSplitGltfBundle(
+  group: Object3D,
+  baseName: string,
+  options: ExportGlbOptions = {},
+): Promise<ExportBundleResult> {
+  const started = typeof performance !== 'undefined' ? performance.now() : Date.now()
+  const cleanBase = sanitizeExportBaseName(baseName)
+  activityLog.exportStep(`开始拆分导出 glTF + 贴图（${options.mode === 'separate' ? '独立分体' : '整体合并'}）`, {
+    rootName: group.name || '(unnamed)',
+    baseName: cleanBase,
+    options,
+  })
+  const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js')
+  const tempDisposables: { dispose(): void }[] = []
+  try {
+    const prebakedNormals = await prebakeSculptedBarkMapsAsync(group, options, tempDisposables)
+    const prepared = prepareGlbSceneInternal(group, options, tempDisposables, true, prebakedNormals)
+    const preDiag = inspectPreparedSceneForLog(prepared)
+    // 1. Collect every unique texture per material channel, encode to PNG once, and temporarily detach
+    //    from materials before GLTFExporter so we never waste CPU base64-encoding & re-decoding images
+    //    (and so headless Node/Vitest works identically without DOM canvas!).
+    interface SplitMatBinding {
+      mat: MeshStandardMaterial
+      matName: string
+      slots: {
+        slot: 'map' | 'normalMap' | 'aoMap' | 'roughnessMap' | 'emissiveMap'
+        channel: string
+        tex: Texture
+      }[]
+    }
+    const matBindings: SplitMatBinding[] = []
+    const seenMat = new Set<Material>()
+    const uniqueTexPng = new Map<Texture, { relPath: string; png: Uint8Array; tex: Texture }>()
+    const usedPaths = new Set<string>()
+    const textureFiles: string[] = []
+    const files: ExportArchiveFile[] = []
+
+    const rawSlots: { mat: MeshStandardMaterial; slot: SplitMatBinding['slots'][number]['slot']; channel: string; tex: Texture }[] = []
+    prepared.traverse(node => {
+      if (!(node instanceof Mesh)) return
+      const mats = Array.isArray(node.material) ? node.material : [node.material]
+      for (const m of mats) {
+        if (!(m instanceof MeshStandardMaterial) || seenMat.has(m)) continue
+        seenMat.add(m)
+        const binding: SplitMatBinding = { mat: m, matName: m.name || 'Material', slots: [] }
+        const candidates: [SplitMatBinding['slots'][number]['slot'], string][] = [
+          ['map', 'BaseColor'],
+          ['normalMap', 'Normal'],
+          ['aoMap', 'AO'],
+          ['roughnessMap', 'Roughness'],
+          ['emissiveMap', 'Emissive'],
+        ]
+        for (const [slot, channel] of candidates) {
+          const tex = m[slot]
+          if (!tex) continue
+          binding.slots.push({ slot, channel, tex })
+          rawSlots.push({ mat: m, slot, channel, tex })
+        }
+        if (binding.slots.length) matBindings.push(binding)
+      }
+    })
+
+    for (const item of rawSlots) {
+      if (uniqueTexPng.has(item.tex)) continue
+      const png = await textureToPngBytes(item.tex)
+      if (!png || png.length < 8) continue
+      const hint = `${sanitizeMatToken(item.mat.name || 'Material')}_${item.channel}`
+      let relPath = `textures/${hint}.png`
+      let dup = 2
+      while (usedPaths.has(relPath.toLowerCase())) relPath = `textures/${hint}_${dup++}.png`
+      usedPaths.add(relPath.toLowerCase())
+      uniqueTexPng.set(item.tex, { relPath, png, tex: item.tex })
+      textureFiles.push(relPath)
+      files.push({ path: relPath, data: png })
+    }
+
+    // Detach textures during GLTFExporter binary pass (avoids FileReader & Base64 overhead!), then split JSON + BIN
+    const savedMetalnessMaps = new Map<MeshStandardMaterial, Texture | null>()
+    for (const b of matBindings) {
+      savedMetalnessMaps.set(b.mat, b.mat.metalnessMap)
+      b.mat.metalnessMap = null
+      for (const s of b.slots) b.mat[s.slot] = null
+    }
+    let glbArrayBuf: ArrayBuffer
+    try {
+      const parsed = await new GLTFExporter().parseAsync(prepared, { binary: true, onlyVisible: false })
+      if (!(parsed instanceof ArrayBuffer)) throw new Error('glTF 拆分导出未能生成二进制缓冲区')
+      glbArrayBuf = parsed
+    } finally {
+      for (const b of matBindings) {
+        for (const s of b.slots) b.mat[s.slot] = s.tex
+        b.mat.metalnessMap = savedMetalnessMaps.get(b.mat) ?? null
+      }
+    }
+
+    // 2. Unpack GLB header -> Chunk 0 (JSON) + Chunk 1 (raw .bin Uint8Array, zero Base64 round-trip!)
+    const dv = new DataView(glbArrayBuf)
+    const jsonLen = dv.getUint32(12, true)
+    const jsonStr = new TextDecoder('utf-8').decode(new Uint8Array(glbArrayBuf, 20, jsonLen)).trimEnd()
+    const rawGltf = JSON.parse(jsonStr) as {
+      buffers?: { uri?: string; byteLength: number }[]
+      samplers?: { magFilter: number; minFilter: number; wrapS: number; wrapT: number }[]
+      images?: { uri: string; mimeType: string; name: string }[]
+      textures?: { sampler: number; source: number; name: string }[]
+      materials?: {
+        name?: string
+        pbrMetallicRoughness?: {
+          baseColorTexture?: { index: number }
+          metallicRoughnessTexture?: { index: number }
+          [k: string]: unknown
+        }
+        normalTexture?: { index: number; scale?: number }
+        occlusionTexture?: { index: number; strength?: number }
+        emissiveTexture?: { index: number }
+      }[]
+    }
+    const binChunkOffset = 20 + jsonLen
+    if (binChunkOffset + 8 <= glbArrayBuf.byteLength) {
+      const binLen = dv.getUint32(binChunkOffset, true)
+      const binName = `${cleanBase}.bin`
+      const binBytes = new Uint8Array(glbArrayBuf.slice(binChunkOffset + 8, binChunkOffset + 8 + binLen))
+      files.push({ path: binName, data: binBytes })
+      if (rawGltf.buffers && rawGltf.buffers.length > 0) {
+        rawGltf.buffers[0].uri = binName
+        rawGltf.buffers[0].byteLength = binBytes.byteLength
+      }
+    }
+
+    // 3. Wire external `textures/*.png` images, samplers, textures & material references cleanly
+    if (uniqueTexPng.size > 0) {
+      const outSamplers: { magFilter: number; minFilter: number; wrapS: number; wrapT: number }[] = []
+      const samplerIndexByKey = new Map<string, number>()
+      const outImages: { uri: string; mimeType: string; name: string }[] = []
+      const outTextures: { sampler: number; source: number; name: string }[] = []
+      const texIndexMap = new Map<Texture, number>()
+
+      const gltfWrap = (w: number) => (w === 1001 ? 33071 : w === 1002 ? 33648 : 10497) // ClampToEdge / MirroredRepeat / Repeat
+      for (const [tex, rec] of uniqueTexPng.entries()) {
+        const ws = gltfWrap(tex.wrapS)
+        const wt = gltfWrap(tex.wrapT)
+        const sKey = `${ws}|${wt}`
+        let sIdx = samplerIndexByKey.get(sKey)
+        if (sIdx === undefined) {
+          sIdx = outSamplers.length
+          samplerIndexByKey.set(sKey, sIdx)
+          outSamplers.push({ magFilter: 9729, minFilter: 9987, wrapS: ws, wrapT: wt })
+        }
+        const imgIdx = outImages.length
+        const cleanLabel = rec.relPath.replace(/^textures\//, '').replace(/\.png$/i, '')
+        outImages.push({ uri: rec.relPath, mimeType: 'image/png', name: cleanLabel })
+        const tIdx = outTextures.length
+        outTextures.push({ sampler: sIdx, source: imgIdx, name: cleanLabel })
+        texIndexMap.set(tex, tIdx)
+      }
+
+      rawGltf.samplers = outSamplers
+      rawGltf.images = outImages
+      rawGltf.textures = outTextures
+
+      const gltfMats = rawGltf.materials ?? []
+      const usedGltfMatIdx = new Set<number>()
+      for (const b of matBindings) {
+        let gmIdx = gltfMats.findIndex((gm, idx) => !usedGltfMatIdx.has(idx) && gm.name === b.matName)
+        if (gmIdx < 0) gmIdx = gltfMats.findIndex((gm, idx) => !usedGltfMatIdx.has(idx) && (gm.name || '') === b.mat.name)
+        if (gmIdx < 0) continue
+        usedGltfMatIdx.add(gmIdx)
+        const gm = gltfMats[gmIdx]
+        for (const s of b.slots) {
+          const tIdx = texIndexMap.get(s.tex)
+          if (tIdx === undefined) continue
+          if (s.slot === 'map') {
+            gm.pbrMetallicRoughness = { ...(gm.pbrMetallicRoughness ?? {}), baseColorTexture: { index: tIdx } }
+          } else if (s.slot === 'normalMap') {
+            gm.normalTexture = { index: tIdx, scale: b.mat.normalScale?.x ?? 1 }
+          } else if (s.slot === 'aoMap') {
+            gm.occlusionTexture = { index: tIdx, strength: b.mat.aoMapIntensity ?? 1 }
+          } else if (s.slot === 'roughnessMap') {
+            gm.pbrMetallicRoughness = { ...(gm.pbrMetallicRoughness ?? {}), metallicRoughnessTexture: { index: tIdx } }
+          } else if (s.slot === 'emissiveMap') {
+            gm.emissiveTexture = { index: tIdx }
+          }
+        }
+      }
+    }
+
+    const gltfFilename = `${cleanBase}.gltf`
+    const gltfBytes = new TextEncoder().encode(JSON.stringify(rawGltf, null, 2))
+    files.unshift({ path: gltfFilename, data: gltfBytes })
+
+    const totalMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - started)
+    activityLog.exportStep(
+      `拆分 glTF + 贴图完成：${files.length} 个文件（${preDiag.meshCount} 网格 · ${preDiag.materials.length} 材质 · ${textureFiles.length} 张外部 PNG · ${totalMs} ms）`,
+      { primaryFilename: gltfFilename, files: files.map(f => ({ path: f.path, bytes: f.data.length })) },
+    )
+
+    return {
+      format: 'gltf-split',
+      primaryFilename: gltfFilename,
+      files,
+      textureFiles,
+      meshCount: preDiag.meshCount,
+      materialCount: preDiag.materials.length,
+      toZipBlob: () => {
+        const zip = createZipArchive(files)
+        return new Blob([zip as unknown as BlobPart], { type: 'application/zip' })
+      },
+    }
+  } finally {
+    for (const d of tempDisposables) d.dispose()
+  }
+}
+
+/**
+ * Exports a real FBX 7.4 Binary + external PNG textures bundle (`<baseName>.fbx` + `textures/*.png`)
+ * natively importable in Blender, Unreal Engine, Unity, Maya, and 3ds Max.
+ */
+export async function exportFbxBundle(
+  group: Object3D,
+  baseName: string,
+  options: ExportGlbOptions = {},
+): Promise<ExportBundleResult> {
+  const started = typeof performance !== 'undefined' ? performance.now() : Date.now()
+  const cleanBase = sanitizeExportBaseName(baseName)
+  activityLog.exportStep(`开始导出 FBX + TEX（${options.mode === 'separate' ? '独立分体' : '整体合并'}）`, {
+    rootName: group.name || '(unnamed)',
+    baseName: cleanBase,
+    options,
+  })
+  const tempDisposables: { dispose(): void }[] = []
+  try {
+    const prebakedNormals = await prebakeSculptedBarkMapsAsync(group, options, tempDisposables)
+    const prepared = prepareGlbSceneInternal(group, options, tempDisposables, true, prebakedNormals)
+    const fbx = await exportSceneToFbxBundle(prepared, cleanBase)
+    const totalMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - started)
+    activityLog.exportStep(
+      `FBX + TEX 编码完成：${fbx.files.length} 个文件（${(fbx.fbxBytes.length / 1024).toFixed(1)} KB FBX · ${fbx.meshCount} 网格 · ${fbx.materialCount} 材质 · ${fbx.textureFiles.length} 张外部 PNG · ${totalMs} ms）`,
+      { primaryFilename: `${cleanBase}.fbx`, files: fbx.files.map(f => ({ path: f.path, bytes: f.data.length })) },
+    )
+    return {
+      format: 'fbx',
+      primaryFilename: `${cleanBase}.fbx`,
+      files: fbx.files,
+      textureFiles: fbx.textureFiles,
+      meshCount: fbx.meshCount,
+      materialCount: fbx.materialCount,
+      toZipBlob: () => {
+        const zip = createZipArchive(fbx.files)
+        return new Blob([zip as unknown as BlobPart], { type: 'application/zip' })
+      },
+    }
   } finally {
     for (const d of tempDisposables) d.dispose()
   }

@@ -518,12 +518,15 @@ export function evalVectorLayout(
   const inKeys: [string, string][] = [['leafA', 'heightA'], ['leafB', 'heightB'], ['leafC', 'heightC'], ['leafD', 'heightD']]
   for (const [lk, hk] of inKeys) {
     const lb = inputs[lk]
-    if (lb && lb.kind === 'rgba') {
+    if (lb && (lb.kind === 'rgba' || lb.kind === 'gray')) {
+      const rgbaBuf = toRgbaLocal(lb, lb.width, lb.height, 1)
       const hb = inputs[hk]
       leafVariants.push({
-        rgba: lb,
-        height: hb && hb.kind === 'gray' ? hb : toGrayLocal(lb, lb.width, lb.height, 0.5),
-        meanLuma: meanOpaqueLuma(lb),
+        rgba: rgbaBuf,
+        height: hb && hb.kind !== 'label'
+          ? toGrayLocal(hb, rgbaBuf.width, rgbaBuf.height, 0.5)
+          : (lb.kind === 'gray' ? lb : toGrayLocal(rgbaBuf, rgbaBuf.width, rgbaBuf.height, 0.5)),
+        meanLuma: meanOpaqueLuma(rgbaBuf),
       })
     }
   }
@@ -1317,11 +1320,14 @@ export function evalAtlasCompose(
     ['slotA', 'heightA'], ['slotB', 'heightB'], ['slotC', 'heightC'], ['slotD', 'heightD'],
   ].map(([rk, hk]) => {
     const rb = inputs[rk]
-    if (!rb || rb.kind !== 'rgba') return undefined
+    if (!rb || (rb.kind !== 'rgba' && rb.kind !== 'gray')) return undefined
+    const rgbaBuf = toRgbaLocal(rb, rb.width, rb.height, 1)
     const hb = inputs[hk]
     return {
-      rgba: rb,
-      height: hb && hb.kind === 'gray' ? hb : toGrayLocal(rb, rb.width, rb.height, 0.5),
+      rgba: rgbaBuf,
+      height: hb && hb.kind !== 'label'
+        ? toGrayLocal(hb, rgbaBuf.width, rgbaBuf.height, 0.5)
+        : (rb.kind === 'gray' ? rb : toGrayLocal(rgbaBuf, rgbaBuf.width, rgbaBuf.height, 0.5)),
     }
   })
 

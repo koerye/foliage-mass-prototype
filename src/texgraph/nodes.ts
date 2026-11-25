@@ -1,5 +1,5 @@
 // Node catalog definitions, defaults, v1/v2 contract validation, and graph helpers.
-import type { EditableTextureSlot } from '../studio/texture-slots'
+import { editableTextureSlots, type EditableTextureSlot } from '../studio/texture-slots'
 import {
   CURRENT_GRAPH_SCHEMA_VERSION,
   type AtlasRegion, type CurvePoint, type GradientStop, type GraphEdge, type GraphNode,
@@ -7,7 +7,7 @@ import {
   type TextureGraph, type VectorLeafInstance, type VectorStem,
 } from './types'
 
-const validSlots = new Set<string>(['bark', 'leaf', 'needle', 'drape', 'palm', 'grass', 'fern', 'flower', 'blossom'])
+const validSlots = new Set<string>(editableTextureSlots)
 const validCategories = new Set<TextureCategory>(['leaf', 'bark', 'needle', 'flower', 'grass', 'other'])
 
 export const defaultBarkGradient: GradientStop[] = [

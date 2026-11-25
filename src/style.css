@@ -69,7 +69,7 @@ input[type=range]::-moz-range-thumb { width: 9px; height: 9px; border-radius: 50
 .seed label { font-size: 11px; color: var(--muted); }
 .seed input, .seed select { min-height: 32px; padding: 4px 7px; border: 1px solid #dce4d2; border-radius: 6px; background: #f4f5ea; font-size: 11px; }
 .seed input { width: 110px; font: 500 12px Consolas, monospace; }
-.toast { position: fixed; z-index: 5; right: 18px; bottom: 66px; max-width: calc(100vw - 35px); background: #f8fbee; border: 1px solid #b8cbb0; padding: 9px 11px; border-radius: 7px; box-shadow: 0 5px 18px #12352026; font-size: 12px; }
+.toast { position: fixed; z-index: 160; right: 18px; bottom: 66px; max-width: calc(100vw - 35px); background: #f8fbee; border: 1px solid #b8cbb0; padding: 9px 11px; border-radius: 7px; box-shadow: 0 5px 18px #12352026; font-size: 12px; }
 .toast.is-error { background: #fff8e9; border-color: #e0cba9; color: #724d2f; }
 @media(max-width: 840px) {
   .bar { padding-inline: 11px; }

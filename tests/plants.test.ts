@@ -1,16 +1,39 @@
 ﻿import { describe, expect, it } from 'vitest'
-import { LineCurve3, Texture, Vector3 } from 'three'
+import { Box3, LineCurve3, Mesh, Texture, Vector3 } from 'three'
+import { inspectGlbExport } from '../src/export-glb'
 import { buildTree } from '../src/tree/assemble'
 import { buildFronds } from '../src/tree/fronds'
 import { buildSkeleton, drapeDown, drapeTilt } from '../src/tree/skeleton'
-import { presetSpec, presetIds, type TreeSpec } from '../src/tree/spec'
+import { parseTreeSpec, presetSpec, presetIds, type TreeSpec } from '../src/tree/spec'
 import { cardTypes, generateLeafCards } from '../src/broadleaf/leaves'
 
-const textures = { leaf: new Texture(), needle: new Texture(), drape: new Texture(), palm: new Texture(), grass: new Texture(), fern: new Texture() }
+const textures = { leaf: new Texture(), needle: new Texture(), drape: new Texture(), palm: new Texture(), bamboo: new Texture(), lotusLeaf: new Texture(), lotusPetal: new Texture(), grass: new Texture(), fern: new Texture() }
 const leafMesh = (spec: TreeSpec) => {
   const asset = buildTree(spec, textures)
   const mesh = asset.group.children.find(m => m.name === 'Leaf cards') as unknown as { geometry: import('three').BufferGeometry }
   return { asset, geometry: mesh.geometry }
+}
+
+function reversedLeafTriangles(mesh: Mesh): number {
+  const { index } = mesh.geometry
+  if (!index) throw new Error('Expected indexed leaf geometry')
+  const position = mesh.geometry.getAttribute('position')
+  const normal = mesh.geometry.getAttribute('normal')
+  const a = new Vector3(), b = new Vector3(), c = new Vector3()
+  const face = new Vector3(), direction = new Vector3(), vertexNormal = new Vector3()
+  let reversed = 0
+  for (let i = 0; i < index.count; i += 3) {
+    const ia = index.getX(i), ib = index.getX(i + 1), ic = index.getX(i + 2)
+    a.fromBufferAttribute(position, ia)
+    b.fromBufferAttribute(position, ib).sub(a)
+    c.fromBufferAttribute(position, ic).sub(a)
+    face.crossVectors(b, c)
+    direction.fromBufferAttribute(normal, ia)
+      .add(vertexNormal.fromBufferAttribute(normal, ib))
+      .add(vertexNormal.fromBufferAttribute(normal, ic))
+    if (face.dot(direction) < -1e-9) reversed++
+  }
+  return reversed
 }
 
 describe('leaf insertion types', () => {
@@ -250,5 +273,154 @@ describe('palm trees', () => {
     const bare = buildTree({ ...spec, handles: [{ id: 1, kind: 'bare', anchor: [tip.x, tip.y, tip.z], offset: [0, 0, 0], radius: spec.palm.frondLength * 2 }] }, textures)
     expect(bare.stats.leaves).toBeLessThan(high.stats.leaves * .2)
     high.dispose(); bare.dispose()
+  })
+})
+
+describe('bamboo presets (realistic & chibi)', () => {
+  const factoryTextures = { ...textures, bamboo: undefined }
+
+  it.each(['bamboo-realistic', 'bamboo-chibi'] as const)('%s builds deterministic grounded culms, alpha bamboo leaf cards, JSON round-trip & GLB', id => {
+    const spec = presetSpec(id)
+    expect(spec.kind).toBe('bamboo')
+    expect(parseTreeSpec(JSON.parse(JSON.stringify(spec)))).toEqual(spec)
+
+    const a = buildTree(spec, factoryTextures)
+    const b = buildTree(spec, factoryTextures)
+    expect(a.stats.triangles).toBe(b.stats.triangles)
+    expect(a.stats.leaves).toBeGreaterThan(40)
+    expect(a.stats.triangles).toBeGreaterThan(1000)
+
+    const culmMesh = a.group.children.find(m => m.name === 'Bamboo culms') as Mesh | undefined
+    const leafMesh = a.group.children.find(m => m.name === 'Bamboo leaves') as Mesh | undefined
+    expect(culmMesh).toBeTruthy()
+    expect(leafMesh).toBeTruthy()
+    expect(reversedLeafTriangles(leafMesh!)).toBe(0)
+    const box = new Box3().setFromObject(a.group)
+    expect(box.min.y).toBeGreaterThanOrEqual(-1e-4)
+    expect(box.max.y).toBeGreaterThan(id === 'bamboo-realistic' ? 5.5 : 2.5)
+
+    const n = leafMesh!.geometry.getAttribute('normal').array
+    for (let i = 0; i < n.length; i += 3) expect(Math.hypot(n[i], n[i + 1], n[i + 2])).toBeCloseTo(1, 3)
+    for (const v of leafMesh!.geometry.getAttribute('uv').array) expect(v).toBeGreaterThanOrEqual(0), expect(v).toBeLessThanOrEqual(1)
+
+    // Hollow top toggle changes culm vertex topology cleanly
+    const toggled = buildTree({ ...spec, bamboo: { ...spec.bamboo, hollowTop: !spec.bamboo.hollowTop } }, factoryTextures)
+    const c1 = culmMesh!.geometry.getAttribute('position').count
+    const c2 = (toggled.group.children.find(m => m.name === 'Bamboo culms') as Mesh).geometry.getAttribute('position').count
+    expect(c1).not.toBe(c2)
+
+    // GLB export emits clean semantic material slots
+    const glb = inspectGlbExport(a.group, { mode: 'merged', excludeDecorations: false })
+    expect(glb.materials).toContain('Mat_Bamboo_Culm')
+    expect(glb.materials).toContain('Mat_Foliage_Bamboo')
+    toggled.dispose()
+    a.dispose(); b.dispose()
+  })
+
+  it('keeps uploaded bamboo spray textures on the wider cards', () => {
+    const spec = presetSpec('bamboo-realistic')
+    const factory = buildTree(spec, factoryTextures)
+    const custom = buildTree(spec, textures)
+    const mesh = custom.group.children.find(child => child.name === 'Bamboo leaves') as Mesh
+    expect(mesh.material).toHaveProperty('map', textures.bamboo)
+    expect(custom.stats.leaves).toBeLessThan(factory.stats.leaves)
+    expect(reversedLeafTriangles(mesh)).toBe(0)
+    custom.dispose()
+    factory.dispose()
+  })
+})
+
+describe('lotus presets (stemmed & floating)', () => {
+  it.each(['lotus-stemmed', 'lotus-floating'] as const)('%s builds valid lotus pads, multi-ring flowers/buds, JSON round-trip & GLB', id => {
+    const spec = presetSpec(id)
+    expect(spec.kind).toBe('lotus')
+    expect(parseTreeSpec(JSON.parse(JSON.stringify(spec)))).toEqual(spec)
+
+    const a = buildTree(spec, textures)
+    const b = buildTree(spec, textures)
+    expect(a.stats.triangles).toBe(b.stats.triangles)
+    expect(a.stats.leaves).toBeGreaterThanOrEqual(spec.lotus.leafCount - 2)
+    expect(a.stats.flowers).toBeGreaterThan(0)
+
+    const stemsMesh = a.group.children.find(m => m.name === 'Lotus stems') as Mesh | undefined
+    const leavesMesh = a.group.children.find(m => m.name === 'Lotus leaves') as Mesh | undefined
+    const petalsMesh = a.group.children.find(m => m.name === 'Lotus petals') as Mesh | undefined
+    const centersMesh = a.group.children.find(m => m.name === 'Lotus centers') as Mesh | undefined
+    expect(leavesMesh).toBeTruthy()
+    expect(petalsMesh).toBeTruthy()
+    expect(centersMesh).toBeTruthy()
+    expect(reversedLeafTriangles(leavesMesh!)).toBe(0)
+    const padNormals = leavesMesh!.geometry.getAttribute('normal')
+    let upward = 0
+    for (let i = 0; i < padNormals.count; i++) {
+      if (padNormals.getY(i) > 0) upward++
+    }
+    expect(upward).toBeGreaterThan(padNormals.count * .9)
+
+    const leavesBox = new Box3().setFromObject(leavesMesh!)
+    expect(leavesBox.min.y).toBeGreaterThanOrEqual(0)
+    if (id === 'lotus-stemmed') {
+      expect(stemsMesh).toBeTruthy()
+      expect(a.stats.branches).toBeGreaterThan(0)
+      expect(leavesBox.max.y).toBeGreaterThan(.75)
+    } else {
+      expect(stemsMesh).toBeUndefined()
+      expect(a.stats.branches).toBe(0)
+      expect(leavesBox.max.y).toBeLessThan(.35)
+    }
+
+    for (const mesh of [leavesMesh!, petalsMesh!]) {
+      const n = mesh.geometry.getAttribute('normal').array
+      for (let i = 0; i < n.length; i += 3) expect(Math.hypot(n[i], n[i + 1], n[i + 2])).toBeCloseTo(1, 3)
+      for (const v of mesh.geometry.getAttribute('uv').array) expect(v).toBeGreaterThanOrEqual(0), expect(v).toBeLessThanOrEqual(1)
+    }
+
+    const glb = inspectGlbExport(a.group, { mode: 'merged', excludeDecorations: false })
+    expect(glb.materials).toContain('Mat_Lotus_Leaves')
+    expect(glb.materials).toContain('Mat_Lotus_Petals')
+    expect(glb.materials).toContain('Mat_Lotus_Center')
+    if (id === 'lotus-stemmed') expect(glb.materials).toContain('Mat_Lotus_Stems')
+    a.dispose(); b.dispose()
+  })
+
+  it('keeps the center of legacy stemmed pads closed at maximum edge damage', () => {
+    const spec = presetSpec('lotus-stemmed')
+    const repaired = buildTree({ ...spec, lotus: { ...spec.lotus, leafNotch: 0 } }, textures)
+    const notched = buildTree({ ...spec, lotus: { ...spec.lotus, leafNotch: 1 } }, textures)
+    const leafGeometry = (asset: ReturnType<typeof buildTree>) =>
+      (asset.group.children.find(child => child.name === 'Lotus leaves') as Mesh).geometry
+    const regularPositions = leafGeometry(repaired).getAttribute('position')
+    const notchedPositions = leafGeometry(notched).getAttribute('position')
+    expect(notchedPositions.count).toBe(regularPositions.count)
+    expect(notchedPositions.array).not.toEqual(regularPositions.array)
+    repaired.dispose()
+    notched.dispose()
+  })
+})
+
+describe('feathery woodland & tiered bonsai presets', () => {
+  it.each(['broadleaf-poplar', 'broadleaf-bonsai-tier'] as const)('%s uses feathery leafStyle, builds deterministically, round-trips JSON & exports GLB', id => {
+    const spec = presetSpec(id)
+    expect(spec.kind).toBe('broadleaf')
+    expect(spec.shading.leafStyle).toBe('feathery')
+    expect(parseTreeSpec(JSON.parse(JSON.stringify(spec)))).toEqual(spec)
+
+    const a = buildTree(spec, textures)
+    const b = buildTree(spec, textures)
+    expect(a.stats.triangles).toBe(b.stats.triangles)
+    expect(a.stats.leaves).toBeGreaterThan(id === 'broadleaf-poplar' ? 800 : 300)
+    const box = new Box3().setFromObject(a.group)
+    expect(box.min.y).toBeGreaterThanOrEqual(-0.08)
+    if (id === 'broadleaf-poplar') {
+      expect(box.max.y).toBeGreaterThan(8.5)
+    } else {
+      // Sweeping left S-curve bonsai with flattened tiered cloud pads
+      expect(box.min.x).toBeLessThan(-2.5)
+      expect(box.max.y).toBeLessThan(4.0)
+      expect(a.skeleton.clusters.every(c => c.height < c.width * 0.42)).toBe(true)
+    }
+    const glb = inspectGlbExport(a.group, { mode: 'merged', excludeDecorations: false })
+    expect(glb.triangles).toBeGreaterThan(5000)
+    a.dispose(); b.dispose()
   })
 })

@@ -1,6 +1,7 @@
 /** Compare single dioramas on transparent or uniform backgrounds, in the current camera view. */
 async function subjectFrame(src: string) {
   const img = new Image()
+  if (/^https?:\/\//i.test(src)) img.crossOrigin = 'anonymous'
   img.src = src
   await img.decode()
   const ratio = Math.min(1, 512 / Math.max(img.naturalWidth, img.naturalHeight))

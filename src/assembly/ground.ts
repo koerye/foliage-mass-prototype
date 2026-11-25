@@ -7,9 +7,18 @@ import {
 } from 'three'
 import { rng } from '../shape'
 import type { AssemblyGroundSpec, PathLayout } from './spec'
+import { TerrainPaintLayer } from './terrain-brush'
 
 export interface BuiltGround {
   group: Group
+  /** Runtime Virtual Texture (RVT) color map matching world XZ [-rvtSize/2, +rvtSize/2]. */
+  rvtTexture?: CanvasTexture
+  rvtSize: number
+  rvtFallbackColor: Color
+  /** Live interactive Terrain Material Paint layer (updates topTex & RVT grass simultaneously). */
+  terrainPaint?: TerrainPaintLayer
+  /** CPU-side RVT ground color sampler (returns linear Color at world x, z). */
+  sampleRvtColor(x: number, z: number, out?: Color): Color
   dispose(): void
 }
 
@@ -71,13 +80,15 @@ function distToPolyline(px: number, py: number, pts: [number, number, number][])
 
 function pathCurveForLayout(layout: PathLayout): [number, number, number][] {
   if (layout === 'birch-curve') {
-    // Sweeps gently from front-center grass past the boulder toward the right edge (matches Ref 1)
+    // The track begins in the turf and broadens as it leaves the right bank.
     return [
-      [0.36, 0.78, 0.032],
-      [0.54, 0.72, 0.056],
-      [0.72, 0.60, 0.068],
-      [0.86, 0.44, 0.062],
-      [0.98, 0.30, 0.054],
+      [.61, .84, .014],
+      [.67, .79, .034],
+      [.75, .70, .040],
+      [.80, .54, .046],
+      [.87, .42, .053],
+      [.95, .28, .063],
+      [1.01, .23, .068],
     ]
   }
   if (layout === 'boulder-trail') {
@@ -109,14 +120,35 @@ function birchMeadowField(spec: AssemblyGroundSpec) {
     const swath = fbm2(u * 5.7, v * 5.5, seed, 3)
     const grain = noise2(u * 46, v * 62, seed + 87)
     const strokes = fbm2(u * 16 + swath, v * 11, seed + 123, 3)
-    const { dist, width } = distToPolyline(u, v + (swath - .5) * .075, curve)
-    const bank = dist + (strokes - .46) * .11 + (grain - .5) * .022
+    const { dist, width } = distToPolyline(u, v + (swath - .5) * .048, curve)
+    const bank = dist + (strokes - .45) * .061 + (grain - .5) * .011
     const normalized = bank / Math.max(.012, width * pathWidth)
-    const path = (1 - smoothstep(.59, 1.24, normalized)) * (.42 + .46 * smoothstep(.31, .67, strokes))
-    const back = 1 - smoothstep(.40, .86, u * .78 + v * .48)
-    const tone = clamp01(.46 + (swath - .46) * 1.17 + (strokes - .46) * .37 + u * .24 - back * .44)
+    const path = (1 - smoothstep(.54, 1.21, normalized)) * (.54 + .41 * smoothstep(.24, .61, strokes))
+    const back = 1 - smoothstep(.34, .86, u * .83 + v * .44)
+    const near = smoothstep(.71, .92, v) * smoothstep(.53, .80, u)
+    const tone = clamp01(.62 + (swath - .46) * .88 + (strokes - .46) * .26 - back * .45 - near * .19)
     return { path, tone, grain, strokes, swath }
   }
+}
+
+/** Samples the dirt-footpath mask [0..1] at world (x, z) on the diorama ground.
+ *  Used by the UE-style grass brush (`avoidPath`) so painted grass naturally hugs path verges. */
+export function groundPathStrengthAt(spec: AssemblyGroundSpec, x: number, z: number): number {
+  if (spec.style === 'none' || spec.style === 'studio' || spec.style === 'diorama-meadow' || spec.pathLayout === 'none') return 0
+  const size = Math.max(0.5, spec.size)
+  const u = x / size + 0.5
+  const v = z / size + 0.5
+  if (u < 0 || u > 1 || v < 0 || v > 1) return 0
+  if (spec.pathLayout === 'birch-curve') {
+    return birchMeadowField(spec)(u, v).path
+  }
+  const curve = pathCurveForLayout(spec.pathLayout)
+  if (!curve.length) return 0
+  const { dist, width } = distToPolyline(u, v, curve)
+  const pathWidth = Math.max(0.25, spec.pathWidth)
+  const warp = (fbm2(u * 12, v * 12, spec.seed + 19, 3) - 0.5) * 0.06
+  const normalized = (dist + warp) / Math.max(0.012, width * pathWidth)
+  return 1 - smoothstep(0.62, 1.18, normalized)
 }
 
 function birchMeadowPalette(spec: AssemblyGroundSpec) {
@@ -129,21 +161,23 @@ function birchMeadowPalette(spec: AssemblyGroundSpec) {
 function paintBirchMeadow(ctx: CanvasRenderingContext2D, spec: AssemblyGroundSpec, size: number) {
   const sample = birchMeadowField(spec)
   const grassColor = birchMeadowPalette(spec)
-  const grass = new Color(), dirt = new Color(), loam = new Color('#b98a4c')
-  const soil = new Color(spec.pathColor).lerp(loam, .25)
+  const grass = new Color(), dirt = new Color(), pixel = new Color()
+  const soil = new Color(spec.pathColor)
+  const loam = soil.clone().multiplyScalar(.73)
   const img = ctx.createImageData(size, size)
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const { path, tone, grain, strokes } = sample(x / (size - 1), y / (size - 1))
-      const flecks = (grain - .5) * .075
+      const flecks = (grain - .5) * .039
       const band = Math.floor(clamp01(tone + flecks) * 7) / 7
-      grassColor(.62 * tone + .38 * band + flecks, grass)
-      dirt.copy(loam).lerp(soil, smoothstep(.25, .70, strokes + flecks))
+      grassColor(.69 * tone + .31 * band + flecks, grass)
+      dirt.copy(loam).lerp(soil, smoothstep(.18, .63, strokes + flecks))
       grass.lerp(dirt, path)
+      pixel.copy(grass).convertLinearToSRGB()
       const offset = (y * size + x) * 4
-      img.data[offset] = Math.round(clamp01(grass.r) ** (1 / 2.2) * 255)
-      img.data[offset + 1] = Math.round(clamp01(grass.g) ** (1 / 2.2) * 255)
-      img.data[offset + 2] = Math.round(clamp01(grass.b) ** (1 / 2.2) * 255)
+      img.data[offset] = Math.round(pixel.r * 255)
+      img.data[offset + 1] = Math.round(pixel.g * 255)
+      img.data[offset + 2] = Math.round(pixel.b * 255)
       img.data[offset + 3] = 255
     }
   }
@@ -357,9 +391,17 @@ export function buildAssemblyGround(spec: AssemblyGroundSpec): BuiltGround {
   group.userData.isGround = true
 
   const disposables: { dispose(): void }[] = []
+  const fallbackColor = new Color(spec.grassColor)
+  const fallbackSample = (_x: number, _z: number, out = new Color()) => out.copy(fallbackColor)
 
   if (spec.style === 'none') {
-    return { group, dispose() {} }
+    return {
+      group,
+      rvtSize: Math.max(4, spec.size),
+      rvtFallbackColor: fallbackColor,
+      sampleRvtColor: fallbackSample,
+      dispose() {},
+    }
   }
 
   if (spec.style === 'studio') {
@@ -371,10 +413,14 @@ export function buildAssemblyGround(spec: AssemblyGroundSpec): BuiltGround {
     mesh.position.y = -0.005
     mesh.receiveShadow = true
     mesh.userData.isGround = true
+    mesh.userData.exportIgnore = true
     group.add(mesh)
     disposables.push(geo, mat)
     return {
       group,
+      rvtSize: Math.max(4, spec.size),
+      rvtFallbackColor: fallbackColor,
+      sampleRvtColor: fallbackSample,
       dispose() { for (const d of disposables) d.dispose() },
     }
   }
@@ -384,13 +430,36 @@ export function buildAssemblyGround(spec: AssemblyGroundSpec): BuiltGround {
   const thick = Math.max(0.04, spec.thickness)
   const canvas = paintDioramaTopCanvas(spec, 768)
   let topTex: CanvasTexture | undefined
+  let terrainPaint: TerrainPaintLayer | undefined
   if (canvas) {
     topTex = new CanvasTexture(canvas)
     topTex.colorSpace = SRGBColorSpace
     topTex.anisotropy = 8
     topTex.name = `diorama_ground_${spec.pathLayout}`
     disposables.push(topTex)
+    const ctx = canvas.getContext('2d')
+    if (ctx) {
+      const basePixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+      terrainPaint = new TerrainPaintLayer(size, canvas.width, canvas.height, basePixels, canvas, topTex)
+    }
+  } else {
+    // Headless Node/Vitest fallback so TerrainPaintLayer & sampleRvtColor work cleanly in unit tests
+    const hw = 64, hh = 64
+    const baseColSrgb = fallbackColor.clone().convertLinearToSRGB()
+    const basePixels = new Uint8ClampedArray(hw * hh * 4)
+    const br = Math.round(clamp01(baseColSrgb.r) * 255)
+    const bg = Math.round(clamp01(baseColSrgb.g) * 255)
+    const bb = Math.round(clamp01(baseColSrgb.b) * 255)
+    for (let i = 0; i < hw * hh; i++) {
+      basePixels[i * 4] = br
+      basePixels[i * 4 + 1] = bg
+      basePixels[i * 4 + 2] = bb
+      basePixels[i * 4 + 3] = 255
+    }
+    terrainPaint = new TerrainPaintLayer(size, hw, hh, basePixels)
   }
+  const sampleRvtColor = (x: number, z: number, out = new Color()): Color =>
+    terrainPaint ? terrainPaint.sampleLinearColor(x, z, out) : out.copy(fallbackColor)
 
   const topMat = new MeshStandardMaterial({
     name: 'Mat_Diorama_Ground_Top',
@@ -423,7 +492,7 @@ export function buildAssemblyGround(spec: AssemblyGroundSpec): BuiltGround {
   slab.castShadow = false
   slab.userData.isGround = true
   group.add(slab)
-  if (spec.style === 'diorama-path' && spec.pathLayout === 'birch-curve') {
+  if (spec.builtInTurf && spec.style === 'diorama-path' && spec.pathLayout === 'birch-curve') {
     const turf = buildBirchTurf(spec, size)
     group.add(turf)
     disposables.push(turf.geometry, turf.material)
@@ -431,6 +500,11 @@ export function buildAssemblyGround(spec: AssemblyGroundSpec): BuiltGround {
 
   return {
     group,
+    rvtTexture: topTex,
+    rvtSize: size,
+    rvtFallbackColor: fallbackColor,
+    terrainPaint,
+    sampleRvtColor,
     dispose() { for (const d of disposables) d.dispose() },
   }
 }

@@ -5,6 +5,7 @@ import type { AiSceneSpec } from '../ai/scene'
 import type { TreeKind, TreeSpec } from '../tree/spec'
 import type { LightingPreset } from '../viewport'
 import type { PresetScope, PresetStore, SavedPreset } from './preset-store'
+import type { SavedTextureMap } from './texture-serialize'
 
 export interface CurrentCapture<T> {
   defaultName: string
@@ -14,6 +15,7 @@ export interface CurrentCapture<T> {
   lighting: LightingPreset
   thumbnail: string
   payload: T
+  textures?: SavedTextureMap
   canSave?: boolean
   emptyReason?: string
 }
@@ -250,13 +252,24 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     clearHoverTimer()
     hoverTimer = setTimeout(() => {
       hoverTimer = undefined
-      if (drawer.hidden || !hoverCheck.checked) return
+      if (drawer.hidden || !hoverCheck.checked || renamingId) return
+      let live: SavedPreset<T> | undefined
+      if (preset.id.startsWith('showcase:')) {
+        const sid = preset.id.slice('showcase:'.length)
+        const sc = getVisibleShowcases().find(s => s.id === sid)
+        if (!sc) return
+        live = preset
+      } else {
+        // Re-verify user preset still exists in store (prevents ghost preview after delete/rename!)
+        live = host.store.get<T>(preset.id)
+      }
+      if (!live) return
       if (!previewSnapshot) previewSnapshot = { state: host.snapshotState() }
-      previewingId = preset.id
-      previewText.textContent = `👁 正在实时预览：「${preset.name}」`
+      previewingId = live.id
+      previewText.textContent = `👁 正在实时预览：「${live.name}」`
       previewBar.hidden = false
       updateCardClasses()
-      host.preview(preset)
+      host.preview(live)
     }, 85)
   }
 
@@ -454,6 +467,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         lighting: cap.lighting,
         thumbnail: cap.thumbnail,
         payload: cap.payload,
+        ...(cap.textures ? { textures: cap.textures } : {}),
       })
       activeId = saved.id
       host.onActiveChange?.(activeId)
@@ -483,6 +497,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         lighting: cap.lighting,
         thumbnail: cap.thumbnail,
         payload: cap.payload,
+        textures: cap.textures,
       })
       activeId = updated.id
       host.onActiveChange?.(activeId)
@@ -537,9 +552,14 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     e.stopPropagation()
     const count = getHiddenShowcaseCount()
     clearConfirmTimers()
-    await host.restoreShowcases()
-    renderGrid()
-    host.message(count > 0 ? `已恢复全部 ${count} 个内置案例` : '案例库已为完整状态')
+    try {
+      await host.restoreShowcases()
+      renderGrid()
+      host.message(count > 0 ? `已恢复全部 ${count} 个内置案例` : '案例库已为完整状态')
+    } catch (err) {
+      host.message(err instanceof Error ? err.message : String(err), true)
+      renderGrid()
+    }
   })
 
   const applyShowcaseCard = (sc: ShowcaseOption<T>) => {
@@ -575,6 +595,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         }
       } else if (act === 'delete-case' && host.deleteShowcase) {
         if (confirmDeleteCaseId !== id) {
+          endHoverPreview(true)
           confirmDeleteCaseId = id
           if (confirmCaseTimer !== undefined) clearTimeout(confirmCaseTimer)
           confirmCaseTimer = setTimeout(() => { confirmDeleteCaseId = undefined; confirmCaseTimer = undefined; renderGrid() }, 3200)
@@ -582,13 +603,18 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         } else {
           if (confirmCaseTimer !== undefined) { clearTimeout(confirmCaseTimer); confirmCaseTimer = undefined }
           confirmDeleteCaseId = undefined
-          if (previewingId === 'showcase:' + id) endHoverPreview(true)
+          if (previewingId === 'showcase:' + id || hoverTimer !== undefined) endHoverPreview(true)
           const sc = showcases.find(s => s.id === id)
           if (sc) {
-            await host.deleteShowcase(sc)
-            if (activeShowcaseId === id) activeShowcaseId = undefined
-            renderGrid()
-            host.message(`已从案例库删除「${sc.name}」`)
+            try {
+              await host.deleteShowcase(sc)
+              if (activeShowcaseId === id) activeShowcaseId = undefined
+              renderGrid()
+              host.message(`已从案例库删除「${sc.name}」`)
+            } catch (err) {
+              host.message(err instanceof Error ? err.message : String(err), true)
+              renderGrid()
+            }
           }
         }
       } else if (act === 'overwrite') {
@@ -604,6 +630,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         }
       } else if (act === 'delete') {
         if (confirmDeleteId !== id) {
+          endHoverPreview(true)
           confirmDeleteId = id
           if (confirmTimer) clearTimeout(confirmTimer)
           confirmTimer = setTimeout(() => { confirmDeleteId = undefined; renderGrid() }, 3200)
@@ -611,16 +638,21 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         } else {
           if (confirmTimer) clearTimeout(confirmTimer)
           confirmDeleteId = undefined
-          if (previewingId === id) endHoverPreview(true)
+          if (previewingId === id || hoverTimer !== undefined) endHoverPreview(true)
           const item = host.store.get<T>(id)
-          await host.store.remove(id)
-          if (activeId === id) {
-            activeId = undefined
-            host.onActiveChange?.(undefined)
+          try {
+            await host.store.remove(id)
+            if (activeId === id) {
+              activeId = undefined
+              host.onActiveChange?.(undefined)
+            }
+            refreshCapture(false)
+            renderGrid()
+            if (item) host.message(`已删除预设「${item.name}」`)
+          } catch (err) {
+            host.message(err instanceof Error ? err.message : String(err), true)
+            renderGrid()
           }
-          refreshCapture(false)
-          renderGrid()
-          if (item) host.message(`已删除预设「${item.name}」`)
         }
       }
       return

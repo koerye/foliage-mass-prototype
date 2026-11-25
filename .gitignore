@@ -1,11 +1,16 @@
 node_modules/
 dist/
+release/
+.vegetation_studio_mcp.json
+mcp-screenshots/
+exports/
 .qa/
 __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
 *.log
+*.bak
 
 # Dev test outputs & local scratch media (keep user-presets/ and user-textures/)
 evidence/

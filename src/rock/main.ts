@@ -1,11 +1,15 @@
 import '../style.css'
 import '../studio/studio.css'
+import '../studio/presets.css'
 import './rock.css'
 import { Vector3 } from 'three'
 import { exportGlb } from '../export-glb'
 import { activityLog, initStudioLogging } from '../studio/activity-log'
 import { mountActivityLogDrawer } from '../studio/activity-log-ui'
+import { mountDesktopToolbarBadge, tryDesktopSaveBlob } from '../studio/desktop-bridge'
+import { SnapshotHistory } from '../studio/history'
 import { createDefaultOverrideStore } from '../studio/default-overrides'
+import { bindGlbExportPopover } from '../studio/glb-export-ui'
 import { lightingPresets, Viewer, type Camera, type LightingPreset } from '../viewport'
 import { buildRockGroup, type RockBuildStats } from './geometry'
 import { makeRockMaterial, updateRockMaterialLive, type RockViewMode } from './material'
@@ -45,15 +49,15 @@ const sections: { title: string; open: boolean; fields: FieldDef[] }[] = [
     title: '形态与切面',
     open: true,
     fields: [
-      { kind: 'range', path: 'shape.width', label: '宽度 m', min: 0.4, max: 4.0, step: 0.02 },
-      { kind: 'range', path: 'shape.height', label: '高度 m', min: 0.35, max: 3.5, step: 0.02 },
-      { kind: 'range', path: 'shape.depth', label: '纵深 m', min: 0.4, max: 4.0, step: 0.02 },
+      { kind: 'range', path: 'shape.width', label: '宽度 m', min: 0.4, max: 4.0, step: 0.01 },
+      { kind: 'range', path: 'shape.height', label: '高度 m', min: 0.35, max: 3.5, step: 0.01 },
+      { kind: 'range', path: 'shape.depth', label: '纵深 m', min: 0.4, max: 4.0, step: 0.01 },
       { kind: 'range', path: 'shape.facetCount', label: '切面数量', min: 6, max: 26, step: 1 },
-      { kind: 'range', path: 'shape.flatness', label: '平面宽阔度', min: 0, max: 1, step: 0.02 },
+      { kind: 'range', path: 'shape.flatness', label: '平面宽阔度', min: 0, max: 1, step: 0.01 },
       { kind: 'range', path: 'shape.bevel', label: '棱边倒角', min: 0, max: 0.32, step: 0.005 },
-      { kind: 'range', path: 'shape.asymmetry', label: '非对称造型', min: 0, max: 1, step: 0.02 },
-      { kind: 'range', path: 'shape.taperTop', label: '顶部收窄', min: -0.35, max: 0.55, step: 0.02 },
-      { kind: 'range', path: 'shape.bottomFlat', label: '底面压平', min: 0, max: 1, step: 0.02 },
+      { kind: 'range', path: 'shape.asymmetry', label: '非对称造型', min: 0, max: 1, step: 0.01 },
+      { kind: 'range', path: 'shape.taperTop', label: '顶部收窄', min: -0.35, max: 0.55, step: 0.01 },
+      { kind: 'range', path: 'shape.bottomFlat', label: '底面压平', min: 0, max: 1, step: 0.01 },
     ],
   },
   {
@@ -61,10 +65,10 @@ const sections: { title: string; open: boolean; fields: FieldDef[] }[] = [
     open: true,
     fields: [
       { kind: 'subdiv', path: 'detail.subdivisions', label: '网格细分' },
-      { kind: 'range', path: 'detail.chisel', label: '二次凿痕', min: 0, max: 1, step: 0.02 },
-      { kind: 'range', path: 'detail.undulation', label: '表面起伏', min: 0, max: 1, step: 0.02 },
-      { kind: 'range', path: 'detail.cracks', label: '裂纹层理', min: 0, max: 1, step: 0.02 },
-      { kind: 'range', path: 'detail.sharpness', label: '棱面锐利度', min: 0, max: 1, step: 0.02 },
+      { kind: 'range', path: 'detail.chisel', label: '二次凿痕', min: 0, max: 1, step: 0.01 },
+      { kind: 'range', path: 'detail.undulation', label: '表面起伏', min: 0, max: 1, step: 0.01 },
+      { kind: 'range', path: 'detail.cracks', label: '裂纹层理', min: 0, max: 1, step: 0.01 },
+      { kind: 'range', path: 'detail.sharpness', label: '棱面锐利度', min: 0, max: 1, step: 0.01 },
     ],
   },
   {
@@ -74,12 +78,12 @@ const sections: { title: string; open: boolean; fields: FieldDef[] }[] = [
       { kind: 'color', path: 'shading.baseColor', label: '石体基色', live: true },
       { kind: 'color', path: 'shading.shadowColor', label: '暗部冷影', live: true },
       { kind: 'color', path: 'shading.edgeColor', label: '棱边高光色', live: true },
-      { kind: 'range', path: 'shading.edgeWear', label: '棱边提亮', min: 0, max: 1, step: 0.02, live: true },
-      { kind: 'range', path: 'shading.edgeBreakup', label: '高光断续感', min: 0, max: 1, step: 0.02, live: true },
-      { kind: 'range', path: 'shading.cavityAO', label: '凹缝暗影', min: 0, max: 1, step: 0.02, live: true },
-      { kind: 'range', path: 'shading.facetVariation', label: '切面明暗差', min: 0, max: 1, step: 0.02, live: true },
-      { kind: 'range', path: 'shading.grain', label: '手绘颗粒感', min: 0, max: 1, step: 0.02, live: true },
-      { kind: 'range', path: 'shading.roughness', label: '表面粗糙度', min: 0.25, max: 1, step: 0.02, live: true },
+      { kind: 'range', path: 'shading.edgeWear', label: '棱边提亮', min: 0, max: 1, step: 0.01, live: true },
+      { kind: 'range', path: 'shading.edgeBreakup', label: '高光断续感', min: 0, max: 1, step: 0.01, live: true },
+      { kind: 'range', path: 'shading.cavityAO', label: '凹缝暗影', min: 0, max: 1, step: 0.01, live: true },
+      { kind: 'range', path: 'shading.facetVariation', label: '切面明暗差', min: 0, max: 1, step: 0.01, live: true },
+      { kind: 'range', path: 'shading.grain', label: '手绘颗粒感', min: 0, max: 1, step: 0.01, live: true },
+      { kind: 'range', path: 'shading.roughness', label: '表面粗糙度', min: 0.25, max: 1, step: 0.01, live: true },
     ],
   },
   {
@@ -94,11 +98,11 @@ const sections: { title: string; open: boolean; fields: FieldDef[] }[] = [
         options: [['none', '无覆层'], ['sand', '暖沙 / 地衣'], ['moss', '青苔'], ['snow', '积雪']],
       },
       { kind: 'color', path: 'top.color', label: '覆层色调', live: true },
-      { kind: 'range', path: 'top.coverage', label: '覆盖范围', min: 0, max: 1, step: 0.02, live: true },
-      { kind: 'range', path: 'top.softness', label: '过渡柔和度', min: 0.05, max: 0.65, step: 0.02, live: true },
+      { kind: 'range', path: 'top.coverage', label: '覆盖范围', min: 0, max: 1, step: 0.01, live: true },
+      { kind: 'range', path: 'top.softness', label: '过渡柔和度', min: 0.05, max: 0.65, step: 0.01, live: true },
       { kind: 'range', path: 'cluster.count', label: '石块数量', min: 1, max: 5, step: 1 },
-      { kind: 'range', path: 'cluster.spread', label: '石堆间距', min: 0.45, max: 1.8, step: 0.04 },
-      { kind: 'range', path: 'cluster.scaleDecay', label: '副石比例', min: 0.3, max: 0.85, step: 0.02 },
+      { kind: 'range', path: 'cluster.spread', label: '石堆间距', min: 0.45, max: 1.8, step: 0.01 },
+      { kind: 'range', path: 'cluster.scaleDecay', label: '副石比例', min: 0.3, max: 0.85, step: 0.01 },
     ],
   },
 ]
@@ -144,7 +148,8 @@ byId('app').innerHTML = `
     <button id="import">导入 JSON</button>
     <button id="json">保存 JSON</button>
     <button id="png">截图 PNG</button>
-    <button id="glb" class="primary">导出 GLB</button>
+    <button id="png-alpha" title="导出透明背景抠图 PNG（自动隐藏背景与阴影底板）">透明底 PNG</button>
+    <button id="glb" class="primary" title="导出 GLB / 拆分 glTF+贴图 / FBX+TEX">导出 GLB/FBX</button>
     <button id="activity-log-btn" class="al-open-btn" title="查看每一步用户操作与导出诊断日志（支持一键复制/导出排查问题）">📋 日志<span class="pl-badge" id="al-badge">0</span></button>
   </nav>
 </header>
@@ -225,6 +230,7 @@ const rockDefaults = createDefaultOverrideStore<RockPresetId, RockDefaultOverrid
     const parsed = parseRockSpec(raw)
     return { version: 2, spec: { ...parsed, preset: id, name: rockPresets[id].name }, lighting: 'neutral' }
   },
+  slimForLocal: entry => ({ version: 2, spec: entry.spec, lighting: entry.lighting }),
 })
 
 function effectivePresetState(id: RockPresetId): { spec: RockSpec; lighting: LightingPreset } {
@@ -263,9 +269,12 @@ function message(value: unknown, error = false, logIt = true) {
 
 let viewer: Viewer | undefined
 try {
-  viewer = new Viewer(byId('canvas'), (_, calls) => {
-    byId('stat-calls').textContent = fmt.format(calls)
-  })
+  viewer = new Viewer(
+    byId('canvas'),
+    (_, calls) => { byId('stat-calls').textContent = fmt.format(calls) },
+    lost => { message(lost ? 'WebGL 渲染上下文已丢失，正在尝试恢复…' : 'WebGL 渲染上下文已恢复', lost) },
+  )
+  viewer.renderer.domElement.setAttribute('aria-label', '三维石头预览')
   viewer.setWind(false)
 } catch (error) {
   console.warn(error)
@@ -274,6 +283,20 @@ try {
 initStudioLogging({
   page: 'rock',
   getWebGLContext: () => viewer?.renderer.getContext() ?? null,
+})
+
+const rockHistory = new SnapshotHistory<RockSpec>({ maxDepth: 30 })
+const rangeBoundsByPath = new Map<string, { min: number; max: number; step: number }>()
+for (const sec of sections) {
+  for (const f of sec.fields) {
+    if (f.kind === 'range') rangeBoundsByPath.set(f.path, { min: f.min, max: f.max, step: f.step })
+  }
+}
+window.addEventListener('beforeunload', ev => {
+  if (userDirty) {
+    ev.preventDefault()
+    ev.returnValue = ''
+  }
 })
 
 function syncPanel() {
@@ -312,11 +335,16 @@ function syncPanel() {
     const v = getPath(spec, el.dataset.s!)
     el.value = String(v ?? 'none')
   })
-  // Toggle top-cap sub-fields visibility cleanly
+  // Toggle top-cap sub-fields & cel-inapplicable shading fields cleanly
   const topDisabled = spec.top.mode === 'none'
   for (const p of ['top.color', 'top.coverage', 'top.softness']) {
     const row = document.querySelector<HTMLElement>(`.s-field[data-path="${p}"]`)
     if (row) row.hidden = topDisabled
+  }
+  const isCel = spec.style === 'cel'
+  for (const p of ['shading.cavityAO', 'shading.grain', 'shading.roughness']) {
+    const row = document.querySelector<HTMLElement>(`.s-field[data-path="${p}"]`)
+    if (row) row.hidden = isCel
   }
   const singleStone = spec.cluster.count <= 1
   for (const p of ['cluster.spread', 'cluster.scaleDecay']) {
@@ -349,8 +377,19 @@ function rebuild(reframe = false) {
 }
 
 function applyParam(path: string, value: unknown, final: boolean) {
+  if (!final) rockHistory.beginGesture(spec)
+  else rockHistory.commitGesture(spec)
   userDirty = true
-  setPath(spec, path, value)
+  let nextVal: unknown = value
+  if (typeof value === 'number') {
+    const b = rangeBoundsByPath.get(path)
+    if (b) {
+      let clamped = Math.min(b.max, Math.max(b.min, value))
+      if (b.step === 1) clamped = Math.round(clamped)
+      nextVal = clamped
+    }
+  }
+  setPath(spec, path, nextVal)
   if (path === 'top.mode' && value !== 'none') {
     const mode = value as RockTopMode
     spec.top.color = topModeDefaultColors[mode]
@@ -372,14 +411,16 @@ function applyParam(path: string, value: unknown, final: boolean) {
 }
 
 function setLightingMood(mood: LightingPreset) {
-  lighting = mood
-  ;(byId('lighting') as HTMLSelectElement).value = mood
-  viewer?.setLighting(mood)
+  const resolved: LightingPreset = validLightingKeys.has(mood) ? mood : 'neutral'
+  lighting = resolved
+  ;(byId('lighting') as HTMLSelectElement).value = resolved
+  viewer?.setLighting(resolved)
 }
 
 function loadPreset(id: RockPresetId) {
   presetId = id
   const state = effectivePresetState(id)
+  rockHistory.clear()
   spec = state.spec
   setLightingMood(state.lighting)
   userDirty = false
@@ -413,6 +454,7 @@ async function resetCurrentToFactory() {
 }
 
 function randomizeSeed() {
+  rockHistory.push(spec)
   userDirty = true
   spec.seed = Math.floor(100 + Math.random() * 99899)
   syncPanel()
@@ -420,12 +462,30 @@ function randomizeSeed() {
 }
 
 function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  const ext = filename.split('.').pop()?.toLowerCase() ?? ''
+  const filters = ext === 'glb'
+    ? [{ name: 'glTF Binary (.glb)', extensions: ['glb'] }]
+    : ext === 'zip'
+      ? [{ name: 'ZIP 压缩包 (.zip)', extensions: ['zip'] }]
+      : ext === 'json'
+        ? [{ name: 'JSON (.json)', extensions: ['json'] }]
+        : ext === 'png'
+          ? [{ name: 'PNG 图像 (.png)', extensions: ['png'] }]
+          : undefined
+  void tryDesktopSaveBlob(blob, filename, filters).then(res => {
+    if (res.handled) {
+      if (!res.canceled && res.filePath) message(`已保存到 ${res.filePath}`)
+      return
+    }
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 5000)
+  }).catch(err => {
+    message(`文件保存失败：${err instanceof Error ? err.message : String(err)}`, true)
+  })
 }
 
 // Bind preset chips
@@ -438,6 +498,7 @@ document.querySelectorAll<HTMLButtonElement>('[data-style]').forEach(btn => {
   btn.addEventListener('click', () => {
     const next = btn.dataset.style as RockStyle
     if (spec.style === next) return
+    rockHistory.push(spec)
     userDirty = true
     spec.style = next
     syncPanel()
@@ -450,6 +511,7 @@ document.querySelectorAll<HTMLButtonElement>('[data-sub]').forEach(btn => {
   btn.addEventListener('click', () => {
     const sub = Number(btn.dataset.sub) as 0 | 1 | 2
     if (spec.detail.subdivisions === sub) return
+    rockHistory.push(spec)
     userDirty = true
     spec.detail.subdivisions = sub
     syncPanel()
@@ -463,6 +525,7 @@ panelEl.addEventListener('input', ev => {
   const t = ev.target as HTMLInputElement | HTMLSelectElement
   if (t.id === 'seed') {
     const n = Math.max(0, Math.round(Number(t.value) || 0))
+    rockHistory.beginGesture(spec)
     userDirty = true
     spec.seed = n
     rebuild(false)
@@ -474,8 +537,11 @@ panelEl.addEventListener('input', ev => {
     if (num) num.value = String(Number(v.toFixed(3)))
     applyParam(t.dataset.r, v, false)
   } else if (t.dataset.n) {
-    const v = Number(t.value)
-    if (!Number.isFinite(v)) return
+    if (t.value.trim() === '') return
+    const raw = Number(t.value)
+    if (!Number.isFinite(raw)) return
+    const b = rangeBoundsByPath.get(t.dataset.n)
+    const v = b ? Math.min(b.max, Math.max(b.min, raw)) : raw
     const rngEl = panelEl.querySelector<HTMLInputElement>(`[data-r="${t.dataset.n}"]`)
     if (rngEl) rngEl.value = String(v)
     applyParam(t.dataset.n, v, false)
@@ -488,9 +554,33 @@ panelEl.addEventListener('input', ev => {
 
 panelEl.addEventListener('change', ev => {
   const t = ev.target as HTMLInputElement
+  if (t.id === 'seed') {
+    rockHistory.commitGesture()
+    return
+  }
   const path = t.dataset.r || t.dataset.n || t.dataset.c
   if (!path) return
+  if (t.dataset.n) {
+    const b = rangeBoundsByPath.get(path)
+    const cur = Number(getPath(spec, path) ?? b?.min ?? 0)
+    t.value = String(Number(cur.toFixed(3)))
+  }
+  rockHistory.commitGesture()
   if (livePaths.has(path) && vertexColorsDirty) rebuild(false)
+})
+
+window.addEventListener('keydown', ev => {
+  const target = ev.target as HTMLElement | null
+  if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || (target instanceof HTMLInputElement && !['range', 'checkbox', 'radio', 'button'].includes(target.type)))) return
+  if (!(ev.ctrlKey || ev.metaKey)) return
+  const k = ev.key.toLowerCase()
+  if (k === 'z' && !ev.shiftKey) {
+    const prev = rockHistory.undo(spec)
+    if (prev) { ev.preventDefault(); spec = prev; syncPanel(); rebuild(false); message('已撤销石头参数修改') }
+  } else if (k === 'y' || (k === 'z' && ev.shiftKey)) {
+    const next = rockHistory.redo(spec)
+    if (next) { ev.preventDefault(); spec = next; syncPanel(); rebuild(false); message('已重做石头参数修改') }
+  }
 })
 
 byId('reseed').addEventListener('click', randomizeSeed)
@@ -545,8 +635,10 @@ byId<HTMLInputElement>('file').addEventListener('change', async ev => {
   if (!file) return
   try {
     const parsed = parseRockSpec(JSON.parse(await file.text()))
+    rockHistory.clear()
     presetId = parsed.preset
     spec = parsed
+    userDirty = false
     syncPanel()
     rebuild(true)
     message(`已导入石头参数：${parsed.name}`)
@@ -559,31 +651,39 @@ byId<HTMLInputElement>('file').addEventListener('change', async ev => {
 
 byId('png').addEventListener('click', () => {
   if (!viewer) return
-  const a = document.createElement('a')
-  a.href = viewer.snapshot()
-  a.download = `${spec.preset}-${spec.seed}.png`
-  a.click()
+  const dataUrl = viewer.snapshot()
+  const fname = `${spec.preset}-${spec.seed}.png`
+  fetch(dataUrl).then(r => r.blob()).then(b => downloadBlob(b, fname)).catch(() => {
+    const a = document.createElement('a')
+    a.href = dataUrl
+    a.download = fname
+    a.click()
+  })
   message('已保存 3D 截图 PNG')
 })
 
-byId('glb').addEventListener('click', async () => {
-  if (!built) return
-  if (vertexColorsDirty) rebuild(false)
-  try {
-    const blob = await exportGlb(built.group, { mode: 'merged', excludeDecorations: false })
-    const filename = `${spec.preset}-${spec.seed}.glb`
-    activityLog.exportStep(`触发浏览器下载 ${filename}（${(blob.size / 1024).toFixed(1)} KB）`, {
-      filename,
-      bytes: blob.size,
-      mimeType: blob.type,
-      triangles: built.stats.triangles,
-    })
-    downloadBlob(blob, filename)
-    message(`已导出 ${filename}（${(blob.size / 1024).toFixed(1)} KB · ${fmt.format(built.stats.triangles)} 面）`)
-  } catch (err) {
-    activityLog.exportStep(`石头 GLB 导出异常：${err instanceof Error ? err.message : String(err)}`, err, 'error')
-    message(err instanceof Error ? `GLB 导出失败：${err.message}` : 'GLB 导出失败', true)
-  }
+byId('png-alpha').addEventListener('click', () => {
+  if (!viewer) return
+  const dataUrl = viewer.snapshot({ transparent: true })
+  const fname = `${spec.preset}-${spec.seed}_transparent.png`
+  activityLog.exportStep(`导出透明背景 PNG：${fname}`, { filename: fname, viewMode, camera })
+  fetch(dataUrl).then(r => r.blob()).then(b => downloadBlob(b, fname)).catch(() => {
+    const a = document.createElement('a')
+    a.href = dataUrl
+    a.download = fname
+    a.click()
+  })
+  message('已保存透明底 3D 截图 PNG')
+})
+
+bindGlbExportPopover({
+  triggerButton: byId<HTMLButtonElement>('glb'),
+  getRoot: () => built?.group,
+  onBeforeExport: () => { if (vertexColorsDirty) rebuild(false) },
+  exportBlob: opts => exportGlb(built!.group, opts),
+  getFilename: opts => `${spec.preset}-${spec.seed}${opts.mode === 'merged' ? '-merged' : ''}.glb`,
+  saveBlob: downloadBlob,
+  message,
 })
 
 const activityLogDrawer = mountActivityLogDrawer({
@@ -619,10 +719,10 @@ const activityLogDrawer = mountActivityLogDrawer({
     viewer?.frame(c, built?.bounds.getCenter(new Vector3()))
   },
   setLighting: (l: LightingPreset) => {
-    lighting = l
-    ;(byId('lighting') as HTMLSelectElement).value = l
-    viewer?.setLighting(l)
+    setLightingMood(l)
   },
+  snapshotCanvas: (opts?: { transparent?: boolean }) => viewer?.snapshot({ transparent: Boolean(opts?.transparent) }) ?? '',
+  snapshotTransparentCanvas: () => viewer?.snapshot({ transparent: true }) ?? '',
   stats: () => ({ ...built?.stats, buildCount }),
   ready: () => rockDefaults.ready(),
   saveAsDefault: () => saveCurrentAsDefault(),
@@ -651,3 +751,5 @@ void rockDefaults.ready().then(() => {
   }
   syncPanel()
 })
+
+mountDesktopToolbarBadge('header.bar nav', msg => message(msg))

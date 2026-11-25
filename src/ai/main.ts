@@ -7,7 +7,8 @@ import '../studio/studio.css'
 import './ai.css'
 import { Box3, Group, MathUtils, Vector3, type Texture } from 'three'
 import { lightingPresets, Viewer, type Camera, type LightingPreset } from '../viewport'
-import { isWoodOnlyParam, views, type View } from '../tree/assemble'
+import { exportGlb } from '../export-glb'
+import { isOptimizeOnlyParam, isWoodOnlyParam, views, type View } from '../tree/assemble'
 import { CrownEnvelope, defaultHandles } from '../tree/envelope'
 import { lodPresets, optimizeAt, solveForTriangleBudget } from '../tree/optimize'
 import { buildSkeleton } from '../tree/skeleton'
@@ -23,7 +24,9 @@ import { mountPresetLibrary } from '../studio/preset-library'
 import { captureViewportThumbnail, createPresetStore, deepClone } from '../studio/preset-store'
 import { bindTextureSlots, createTextureRegistry, type EditableTextureSlot } from '../studio/texture-slots'
 import { mountTextureEditor } from '../texgraph/editor-ui'
-import { mountTextureLibrary, type AppliedTextureMeta } from '../texgraph/library-ui'
+import {
+  attachTextureGraphSource, mountTextureLibrary, resolveSlotEditorOptions, type AppliedTextureMeta,
+} from '../texgraph/library-ui'
 import { createTextureLibraryStore } from '../texgraph/store'
 import { makePainterlyDriftwoodBarkTexture, makePainterlyMossBarkTexture } from '../texgraph/templates'
 import { defaultCategoryForSlot } from '../texgraph/types'
@@ -38,6 +41,8 @@ import { aiShowcases, getAiShowcase } from './showcase'
 import { createHiddenShowcaseStore } from './showcase-store'
 import { activityLog, initStudioLogging } from '../studio/activity-log'
 import { mountActivityLogDrawer } from '../studio/activity-log-ui'
+import { mountDesktopToolbarBadge, tryDesktopSaveBlob } from '../studio/desktop-bridge'
+import { SnapshotHistory } from '../studio/history'
 
 const hiddenShowcaseStore = createHiddenShowcaseStore({ validIds: aiShowcases.map(s => s.id) })
 const visibleShowcases = () => aiShowcases.filter(s => !hiddenShowcaseStore.isHidden(s.id))
@@ -45,7 +50,7 @@ const visibleShowcases = () => aiShowcases.filter(s => !hiddenShowcaseStore.isHi
 const cameras: Record<Camera, string> = { front: '正面', angle: '45°', side: '侧面', top: '斜俯视' }
 const viewLabel: Record<View, string> = { final: '成品', skeleton: '枝干骨架', crown: '树冠' }
 const kindNames: Record<TreeKind, string> = {
-  broadleaf: '阔叶树 / 观花树', conifer: '针叶树', palm: '棕榈树',
+  broadleaf: '阔叶树 / 观花树', conifer: '针叶树', palm: '棕榈树', bamboo: '竹子', lotus: '荷花',
   grass: '草丛', fern: '蕨类', flowerbed: '花丛模板',
 }
 const byId = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
@@ -69,7 +74,7 @@ byId('app').innerHTML = `
     <button id="preset-lib" title="打开可视化预设库（支持悬停实时 3D 预览）">预设库<span class="pl-badge" id="preset-lib-count">0</span></button>
     <input id="file" type="file" accept=".json,application/json" hidden>
     <button id="import">导入 JSON</button><button id="json">保存 JSON</button>
-    <button id="png">截图 PNG</button><button id="glb">导出 GLB</button>
+    <button id="png">截图 PNG</button><button id="png-alpha" title="导出透明背景抠图 PNG（自动隐藏背景、阴影底板与编辑辅助线）">透明底 PNG</button><button id="glb" title="导出 GLB / 拆分 glTF+贴图 / FBX+TEX">导出 GLB/FBX</button>
     <button id="activity-log-btn" class="al-open-btn" title="查看每一步用户操作与导出诊断日志（支持一键复制/导出排查问题）">📋 日志<span class="pl-badge" id="al-badge">0</span></button>
   </nav>
 </header>
@@ -191,7 +196,7 @@ byId('app').innerHTML = `
             <p class="s-note">可选：接入兼容 OpenAI 的视觉大模型（不填则自动使用内置本地图像算法实时生成）</p>
             <input id="ai-llm-url" type="url" placeholder="API Endpoint（如 https://api.openai.com/v1/chat/completions）">
             <input id="ai-llm-model" type="text" placeholder="模型名（如 gpt-4o / gemini-2.5-pro）">
-            <input id="ai-llm-key" type="password" placeholder="API Key（仅保存在当前会话内存）">
+            <input id="ai-llm-key" type="password" data-log-ignore="true" autocomplete="off" placeholder="API Key（仅保存在当前会话内存）">
             <button type="button" id="ai-llm-run">用视觉大模型重分析当前图</button>
           </div>
         </div>
@@ -221,6 +226,26 @@ byId('app').innerHTML = `
 </div>
 <div id="toast" class="toast" role="status" hidden></div>`
 
+function syncStudioTop() {
+  const bar = document.querySelector<HTMLElement>('#app > header.bar')
+  const banner = document.getElementById('scene-edit-banner')
+  const barH = bar ? (bar.getBoundingClientRect().height || bar.offsetHeight) : 70
+  const bannerH = banner && !banner.hidden ? (banner.getBoundingClientRect().height || banner.offsetHeight) : 0
+  document.documentElement.style.setProperty('--studio-top', `${Math.max(0, Math.ceil(barH + bannerH))}px`)
+}
+{
+  const bar = document.querySelector<HTMLElement>('#app > header.bar')
+  const banner = document.getElementById('scene-edit-banner')
+  if (typeof ResizeObserver !== 'undefined') {
+    const ro = new ResizeObserver(syncStudioTop)
+    if (bar) ro.observe(bar)
+    if (banner) ro.observe(banner)
+  }
+  window.addEventListener('resize', syncStudioTop)
+  syncStudioTop()
+  requestAnimationFrame(syncStudioTop)
+}
+
 // ---- state & textures ------------------------------------------------------
 let sceneSpec: AiSceneSpec = blankAiScene()
 let selectedId: string | undefined
@@ -235,6 +260,8 @@ let sceneAsset: AiSceneAsset | undefined
 let view: View = 'final'
 let camera: Camera = 'front'
 let lighting: LightingPreset = 'neutral'
+let userDirty = false
+const aiHistory = new SnapshotHistory<AiSceneSpec>({ maxDepth: 30, clone: deepClone })
 
 function setLightingMood(mood: LightingPreset) {
   lighting = mood
@@ -286,7 +313,11 @@ const axisOf = (s: TreeSpec) => buildSkeleton({ ...s, handles: [] }).envelope.ax
 
 let viewer: Viewer | undefined
 try {
-  viewer = new Viewer(byId('canvas'), (_, calls) => { byId('stat-calls').textContent = fmt.format(calls) })
+  viewer = new Viewer(
+    byId('canvas'),
+    (_, calls) => { byId('stat-calls').textContent = fmt.format(calls) },
+    lost => { message(lost ? 'WebGL 渲染上下文已丢失，正在尝试恢复…' : 'WebGL 渲染上下文已恢复', lost) },
+  )
 } catch (error) {
   console.warn(error)
   byId('webgl').hidden = false
@@ -298,7 +329,7 @@ initStudioLogging({
 
 let cachedAxis = { key: '', axis: new Vector3() }
 let editUi: ReturnType<typeof bindEditToolsUi> | undefined
-const editor = viewer ? new CrownEditor(viewer, {
+const editor: CrownEditor | undefined = viewer ? new CrownEditor(viewer, {
   spec: () => activePart()?.spec ?? fallbackSpec,
   axis: () => {
     const p = activePart()
@@ -316,10 +347,13 @@ const editor = viewer ? new CrownEditor(viewer, {
     const p = activePart()
     return p ? sceneAsset?.partAssets.get(p.id)?.group : undefined
   },
+  partId: () => activePart()?.id,
   partLabel: () => (sceneSpec.parts.length > 1 ? activePart()?.label : undefined),
+  canHandleShortcuts: (): boolean => !textureEditor?.isOpen() && !textureLibrary?.isOpen() && !presetLibrary?.isOpen() && !activityLogDrawer?.isOpen() && byId('ai-mask-modal').hidden,
   setHandles: (handles, final) => {
     const p = activePart()
     if (!p) return
+    userDirty = true
     p.spec = { ...p.spec, handles }
     if (final) activityLog.action(`调整部件「${p.label}」树冠控制点（${handles.length} 个）`, { partId: p.id, count: handles.length }, 'scene')
     scheduleBuild(final, p.id)
@@ -327,6 +361,7 @@ const editor = viewer ? new CrownEditor(viewer, {
   setBranchEdits: (branchEdits: BranchEdit[], final: boolean) => {
     const p = activePart()
     if (!p) return
+    userDirty = true
     const next = { ...p.spec }
     if (branchEdits.length) next.branchEdits = branchEdits
     else delete next.branchEdits
@@ -334,9 +369,27 @@ const editor = viewer ? new CrownEditor(viewer, {
     if (final) activityLog.action(`编辑部件「${p.label}」枝条节点（${branchEdits.length} 条）`, { partId: p.id, count: branchEdits.length }, 'scene')
     scheduleBuild(final, p.id)
   },
+  setLeafEdits: (leafEdits, final) => {
+    const p = activePart()
+    if (!p) return
+    userDirty = true
+    const next = { ...p.spec }
+    if (leafEdits && (leafEdits.clumps.length || leafEdits.brushes.length)) next.leafEdits = leafEdits
+    else delete next.leafEdits
+    p.spec = next
+    if (final) {
+      activityLog.action(
+        `编辑部件「${p.label}」树叶（补叶簇 ${leafEdits?.clumps.length ?? 0} · 笔刷 ${leafEdits?.brushes.length ?? 0}）`,
+        { partId: p.id, clumps: leafEdits?.clumps.length ?? 0, brushes: leafEdits?.brushes.length ?? 0 },
+        'scene',
+      )
+    }
+    scheduleBuild(final, p.id)
+  },
   setNormalEdit: (normalEdit: LeafNormalEditSpec, final: boolean) => {
     const p = activePart()
     if (!p) return
+    userDirty = true
     p.spec = { ...p.spec, normalEdit }
     panel.sync()
     if (final) activityLog.action(`笔刷调整部件「${p.label}」叶片法线（${normalEdit.mode}）`, { partId: p.id, mode: normalEdit.mode }, 'scene')
@@ -377,13 +430,27 @@ let fullBuildCount = 0, partBuildCount = 0, woodBuildCount = 0
 let lastWoodMs = 0, lastWoodAt = 0, woodPending = false, woodPendingFinal = false, woodFrame = 0
 let pendingWoodPartIds = new Set<string>()
 let jsonDirty = false
+let sceneEpoch = 0
+
+function cancelScheduledBuilds() {
+  pending = false
+  pendingFinal = false
+  pendingPartId = undefined
+  cancelAnimationFrame(frame)
+  woodPending = false
+  woodPendingFinal = false
+  pendingWoodPartIds.clear()
+  cancelAnimationFrame(woodFrame)
+}
 
 function scheduleWoodBuild(partIds: string[], final = true) {
+  const epoch = sceneEpoch
   for (const id of partIds) pendingWoodPartIds.add(id)
   woodPending = true
   woodPendingFinal = woodPendingFinal || final
   cancelAnimationFrame(woodFrame)
   woodFrame = requestAnimationFrame(() => {
+    if (epoch !== sceneEpoch) return
     const isFinal = woodPendingFinal
     const interval = isFinal ? 0 : Math.min(48, Math.max(0, lastWoodMs * 1.15))
     if (performance.now() - lastWoodAt < interval) { scheduleWoodBuild([], isFinal); return }
@@ -430,6 +497,7 @@ function rebuildPartsWoodOnly(partIds: string[]) {
 }
 
 function scheduleBuild(final = true, partId?: string) {
+  const epoch = sceneEpoch
   woodPending = false
   woodPendingFinal = false
   pendingWoodPartIds.clear()
@@ -443,6 +511,7 @@ function scheduleBuild(final = true, partId?: string) {
   pendingFinal = pendingFinal || final
   cancelAnimationFrame(frame)
   frame = requestAnimationFrame(() => {
+    if (epoch !== sceneEpoch) return
     const isFinal = pendingFinal
     const interval = isFinal ? 0 : Math.max(0, lastBuildMs * 2.5)
     if (performance.now() - lastBuildAt < interval) {
@@ -485,9 +554,7 @@ function updateSceneStatsUi(asset: AiSceneAsset) {
 }
 
 function rebuildSinglePart(partId: string) {
-  pending = false
-  pendingFinal = false
-  pendingPartId = undefined
+  cancelScheduledBuilds()
   if (!viewer) return
   const p = sceneSpec.parts.find(x => x.id === partId)
   if (!p || !sceneAsset || !p.enabled || !sceneAsset.partAssets.has(partId)) {
@@ -523,9 +590,7 @@ function rebuildSinglePart(partId: string) {
 }
 
 function rebuild(reframe: boolean) {
-  pending = false
-  pendingFinal = false
-  pendingPartId = undefined
+  cancelScheduledBuilds()
   if (!viewer) return
   const started = performance.now()
   try {
@@ -541,7 +606,10 @@ function rebuild(reframe: boolean) {
       editor?.setEnabled(false)
       byId('edit-toggle').setAttribute('aria-pressed', 'false')
       byId('edit-group').hidden = true
+      updateOptStatus()
+      updateGlobalLodUi()
       markJsonDirty()
+      if (presetLibrary?.isOpen() && !presetLibrary.isPreviewing()) presetLibrary.refreshCapture(false)
       return
     }
 
@@ -707,9 +775,52 @@ byId('ai-scope-btn').onclick = () => {
   editUi?.setEnabled(editScope() === 'whole')
 }
 
+function remeshAiPartsOptimize(parts: AiPart[]): boolean {
+  if (!viewer || !sceneAsset || !parts.length) return false
+  const started = performance.now()
+  for (const part of parts) {
+    if (!part.enabled) continue
+    const built = sceneAsset.partAssets.get(part.id)
+    if (!built) return false
+    const effSpec = part.leafTexture !== 'auto' && part.spec.kind === 'broadleaf'
+      ? { ...part.spec, shading: { ...part.spec.shading, leafStyle: 'default' as const } }
+      : part.spec
+    if (!built.remeshForOptimize(effSpec)) return false
+    built.display(view)
+  }
+  const st = sceneAsset.stats
+  st.parts = 0
+  st.branches = 0
+  st.twigs = 0
+  st.leaves = 0
+  st.flowers = 0
+  st.triangles = 0
+  for (const built of sceneAsset.partAssets.values()) {
+    st.parts++
+    st.branches += built.stats.branches
+    st.twigs += built.stats.twigs
+    st.leaves += built.stats.leaves
+    st.flowers += built.stats.flowers
+    st.triangles += built.stats.triangles
+  }
+  st.ms = Math.round(performance.now() - started)
+  sceneAsset.group.userData.aiScene = sceneSpec
+  updateSceneStatsUi(sceneAsset)
+  updateOptStatus()
+  updateGlobalLodUi()
+  viewer.refreshShadows()
+  markJsonDirty()
+  if (presetLibrary?.isOpen() && !presetLibrary.isPreviewing()) presetLibrary.refreshCapture(false)
+  return true
+}
+
 function applyInspectorParam(path: string, value: unknown, final: boolean) {
   const p = activePart()
   if (!p) return
+  userDirty = true
+  if (path === 'trunk.barkStyle' && registry.isCustom('bark')) {
+    registry.resetDefault('bark')
+  }
   const scope: EditScope = path.startsWith('optimize.')
     ? (optScope === 'all' ? 'whole' : 'part')
     : editScope()
@@ -744,6 +855,9 @@ function applyInspectorParam(path: string, value: unknown, final: boolean) {
     markJsonDirty()
     return
   }
+  if (sceneAsset && !pending && isOptimizeOnlyParam(path) && changedParts.length > 0 && remeshAiPartsOptimize(changedParts)) {
+    return
+  }
   if (sceneAsset && !pending && isWoodOnlyParam(path) && changedParts.length > 0 &&
     changedParts.every(part => (part.spec.kind === 'broadleaf' || part.spec.kind === 'conifer') && sceneAsset!.partAssets.has(part.id))) {
     scheduleWoodBuild(changedParts.map(part => part.id), final)
@@ -755,6 +869,8 @@ function applyInspectorParam(path: string, value: unknown, final: boolean) {
 
 // ---- inspector & part list syncing -----------------------------------------
 const panel = bindPanel(byId('panel'), () => activePart()?.spec ?? fallbackSpec, (path, value, final) => {
+  if (!final) aiHistory.beginGesture(sceneSpec)
+  else aiHistory.commitGesture(sceneSpec)
   applyInspectorParam(path, value, final)
 })
 
@@ -802,12 +918,19 @@ function renderPartList() {
     for (const cb of list.querySelectorAll<HTMLInputElement>('[data-toggle]')) {
       cb.onchange = () => {
         const p = sceneSpec.parts.find(x => x.id === cb.dataset.toggle)
-        if (p) { p.enabled = cb.checked; rebuild(false) }
+        if (p) {
+          aiHistory.push(sceneSpec)
+          userDirty = true
+          p.enabled = cb.checked
+          rebuild(false)
+        }
       }
     }
     for (const del of list.querySelectorAll<HTMLButtonElement>('[data-del]')) {
       del.onclick = () => {
         const gone = del.dataset.del!
+        aiHistory.push(sceneSpec)
+        userDirty = true
         const customMap = partCustomTextures.get(gone)
         if (customMap) { for (const t of Object.values(customMap)) t?.dispose(); partCustomTextures.delete(gone); partCustomNames.delete(gone) }
         sceneSpec.parts = sceneSpec.parts.filter(x => x.id !== gone)
@@ -847,13 +970,16 @@ function updateGlobalLodUi() {
 
 function applyGlobalLod(level: number) {
   if (!sceneSpec.parts.length) return
+  aiHistory.push(sceneSpec)
+  userDirty = true
   const before = sceneAsset?.stats.triangles ?? 0
   globalLodLevel = level
   for (const part of sceneSpec.parts) {
     part.spec = { ...part.spec, optimize: optimizeAt(level, part.spec.optimize.targetTriangles) }
   }
   panel.sync()
-  rebuild(false)
+  const enabledParts = sceneSpec.parts.filter(p => p.enabled)
+  if (!remeshAiPartsOptimize(enabledParts)) rebuild(false)
   updateGlobalLodUi()
   const after = sceneAsset?.stats.triangles ?? 0
   const pct = before > 0 ? Math.round((1 - after / before) * 100) : 0
@@ -868,15 +994,21 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-global-lod
 function loadShowcaseById(id: string) {
   const entry = getAiShowcase(id) ?? aiShowcases[0]
   if (!entry) return
+  sceneEpoch++
+  cancelScheduledBuilds()
   clearAllPartCustomTextures()
-  if (entry.barkTemplate === 'bark-painterly-driftwood') {
+  editor?.clearUndo()
+  aiHistory.clear()
+  userDirty = false
+  sceneSpec = entry.build()
+  const hasNativeBarkStyle = sceneSpec.parts.some(p => Boolean(p.spec.trunk.barkStyle && p.spec.trunk.barkStyle !== 'default'))
+  if (!hasNativeBarkStyle && entry.barkTemplate === 'bark-painterly-driftwood') {
     registry.setCustom('bark', makePainterlyDriftwoodBarkTexture(512))
-  } else if (entry.barkTemplate === 'bark-painterly-moss') {
+  } else if (!hasNativeBarkStyle && entry.barkTemplate === 'bark-painterly-moss') {
     registry.setCustom('bark', makePainterlyMossBarkTexture(512))
   } else {
     registry.resetDefault('bark')
   }
-  sceneSpec = entry.build()
   selectedId = sceneSpec.parts[0]?.id
   globalLodLevel = 0
   lastReport = undefined
@@ -938,6 +1070,12 @@ function runAnalyzeOnPixels(pixels: PixelBuffer, name: string, dataUrl: string, 
     name,
     customMask ? { customMask, customMaskWidth: pixels.width, customMaskHeight: pixels.height } : {},
   )
+  sceneEpoch++
+  cancelScheduledBuilds()
+  clearAllPartCustomTextures()
+  editor?.clearUndo()
+  aiHistory.clear()
+  userDirty = true
   lastReport = report
   lastImageDataUrl = dataUrl
   lastImageName = name
@@ -1002,25 +1140,47 @@ function drawMaskCanvas() {
   maskCtx.putImageData(out, 0, 0)
 }
 
-function paintMaskDot(clientX: number, clientY: number) {
+let lastMaskPx: { x: number; y: number } | undefined
+let maskImageKey = ''
+
+function stampMaskCircle(cx: number, cy: number, rad: number, W: number, H: number) {
+  if (!maskStrokes) return
+  const r2 = rad * rad
+  for (let y = Math.max(0, cy - rad); y <= Math.min(H - 1, cy + rad); y++) {
+    for (let x = Math.max(0, cx - rad); x <= Math.min(W - 1, cx + rad); x++) {
+      if ((x - cx) ** 2 + (y - cy) ** 2 <= r2) maskStrokes[y * W + x] = maskBrush
+    }
+  }
+}
+
+function paintMaskDot(clientX: number, clientY: number, isMove = false) {
   if (!lastPixels || !maskStrokes) return
   const rect = maskCanvas.getBoundingClientRect()
   const cx = Math.round((clientX - rect.left) / Math.max(1, rect.width) * lastPixels.width)
   const cy = Math.round((clientY - rect.top) / Math.max(1, rect.height) * lastPixels.height)
   const rad = Math.max(2, byId<HTMLInputElement>('ai-mask-size').valueAsNumber || 10)
   const { width: W, height: H } = lastPixels
-  for (let y = Math.max(0, cy - rad); y <= Math.min(H - 1, cy + rad); y++) {
-    for (let x = Math.max(0, cx - rad); x <= Math.min(W - 1, cx + rad); x++) {
-      if ((x - cx) ** 2 + (y - cy) ** 2 <= rad * rad) maskStrokes[y * W + x] = maskBrush
+  if (isMove && lastMaskPx) {
+    const dx = cx - lastMaskPx.x, dy = cy - lastMaskPx.y
+    const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / Math.max(1, rad * 0.45)))
+    for (let s = 1; s <= steps; s++) {
+      stampMaskCircle(Math.round(lastMaskPx.x + dx * s / steps), Math.round(lastMaskPx.y + dy * s / steps), rad, W, H)
     }
+  } else {
+    stampMaskCircle(cx, cy, rad, W, H)
   }
+  lastMaskPx = { x: cx, y: cy }
   drawMaskCanvas()
 }
 
 function openMaskModal() {
   if (!lastPixels) { message('请先上传一张参考图', true); return }
-  maskStrokes = new Uint8Array(lastPixels.width * lastPixels.height)
-  maskPreview = lastCustomMask ? new Uint8Array(lastCustomMask) : undefined
+  const curKey = `${lastImageName || ''}|${lastPixels.width}x${lastPixels.height}`
+  if (!maskStrokes || maskStrokes.length !== lastPixels.width * lastPixels.height || maskImageKey !== curKey) {
+    maskStrokes = new Uint8Array(lastPixels.width * lastPixels.height)
+    maskImageKey = curKey
+  }
+  maskPreview = lastCustomMask ? new Uint8Array(lastCustomMask) : maskPreview
   byId('ai-mask-modal').hidden = false
   drawMaskCanvas()
 }
@@ -1041,21 +1201,24 @@ byId('ai-mask-reset').onclick = () => {
 }
 maskCanvas.addEventListener('pointerdown', e => {
   maskPainting = true
+  lastMaskPx = undefined
   maskCanvas.setPointerCapture(e.pointerId)
-  paintMaskDot(e.clientX, e.clientY)
+  paintMaskDot(e.clientX, e.clientY, false)
 })
-maskCanvas.addEventListener('pointermove', e => { if (maskPainting) paintMaskDot(e.clientX, e.clientY) })
+maskCanvas.addEventListener('pointermove', e => { if (maskPainting) paintMaskDot(e.clientX, e.clientY, true) })
 maskCanvas.addEventListener('pointerup', () => {
   if (!maskPainting) return
   maskPainting = false
-  if (lastPixels && maskStrokes && maskStrokes.some(v => v === 1)) {
+  lastMaskPx = undefined
+  if (lastPixels && maskStrokes && maskStrokes.some(v => v === 1 || v === 2)) {
     maskPreview = computeScribbleMask(lastPixels, maskStrokes)
     drawMaskCanvas()
   }
 })
+maskCanvas.addEventListener('pointercancel', () => { maskPainting = false; lastMaskPx = undefined })
 byId('ai-mask-apply').onclick = () => {
   if (!lastPixels || !lastImageDataUrl || !lastImageName) return
-  if (maskStrokes && maskStrokes.some(v => v === 1)) {
+  if (maskStrokes && maskStrokes.some(v => v === 1 || v === 2)) {
     maskPreview = computeScribbleMask(lastPixels, maskStrokes)
   }
   byId('ai-mask-modal').hidden = true
@@ -1105,7 +1268,12 @@ stageEl.addEventListener('drop', async e => {
 byId('ai-ref-hide').onclick = () => { byId('ai-ref-hud').hidden = true; byId('ai-ref-show').hidden = false }
 byId('ai-ref-show').onclick = () => { byId('ai-ref-hud').hidden = false; byId('ai-ref-show').hidden = true }
 byId('ai-clear').onclick = () => {
+  sceneEpoch++
+  cancelScheduledBuilds()
   clearAllPartCustomTextures()
+  editor?.clearUndo()
+  aiHistory.clear()
+  userDirty = false
   sceneSpec = blankAiScene()
   selectedId = undefined
   lastReport = undefined
@@ -1120,6 +1288,8 @@ byId('ai-clear').onclick = () => {
 
 // ---- part CRUD & transform controls ----------------------------------------
 function addNewPart(kind: TreeKind) {
+  aiHistory.push(sceneSpec)
+  userDirty = true
   const part = createAiPart(kind, `${kindNames[kind]} ${sceneSpec.parts.length + 1}`)
   sceneSpec.parts.push(part)
   selectedId = part.id
@@ -1131,14 +1301,19 @@ byId('ai-add-blank').onclick = () => addNewPart('broadleaf')
 byId<HTMLInputElement>('part-label').oninput = e => {
   const p = activePart()
   if (!p) return
+  aiHistory.beginGesture(sceneSpec)
+  userDirty = true
   p.label = (e.target as HTMLInputElement).value
   sceneAsset?.updatePartTransform(p, sceneSpec)
   renderPartList()
   markJsonDirty()
 }
+byId<HTMLInputElement>('part-label').onchange = () => aiHistory.commitGesture()
 byId<HTMLSelectElement>('part-kind').onchange = e => {
   const p = activePart()
   if (!p) return
+  aiHistory.push(sceneSpec)
+  userDirty = true
   const nextKind = (e.target as HTMLSelectElement).value as TreeKind
   const fresh = createAiPart(nextKind, p.label, p.spec.seed)
   p.spec = fresh.spec
@@ -1149,6 +1324,8 @@ byId<HTMLSelectElement>('part-kind').onchange = e => {
 byId<HTMLSelectElement>('part-tex').onchange = e => {
   const p = activePart()
   if (!p) return
+  aiHistory.push(sceneSpec)
+  userDirty = true
   const src = (e.target as HTMLSelectElement).value as LeafTextureSource
   const ids = applySceneLeafTexture(sceneSpec, p.id, src, editScope())
   if (ids.length === 1) rebuildSinglePart(ids[0])
@@ -1157,6 +1334,8 @@ byId<HTMLSelectElement>('part-tex').onchange = e => {
 byId<HTMLInputElement>('seed').onchange = () => {
   const p = activePart()
   if (!p) return
+  aiHistory.push(sceneSpec)
+  userDirty = true
   const nextSeed = Math.max(0, Math.round(byId<HTMLInputElement>('seed').valueAsNumber || 0))
   const ids = applySceneSeed(sceneSpec, p.id, nextSeed, editScope())
   if (ids.length === 1) rebuildSinglePart(ids[0])
@@ -1165,6 +1344,8 @@ byId<HTMLInputElement>('seed').onchange = () => {
 byId('reseed').onclick = () => {
   const p = activePart()
   if (!p) return
+  aiHistory.push(sceneSpec)
+  userDirty = true
   const nextSeed = Math.floor(Math.random() * 99999)
   byId<HTMLInputElement>('seed').value = String(nextSeed)
   const ids = applySceneSeed(sceneSpec, p.id, nextSeed, editScope())
@@ -1172,10 +1353,13 @@ byId('reseed').onclick = () => {
   else rebuild(false)
 }
 const bindNum = (id: string, apply: (p: AiPart, v: number) => void) => {
-  byId<HTMLInputElement>(id).oninput = e => {
+  const input = byId<HTMLInputElement>(id)
+  input.oninput = e => {
     const p = activePart()
     const v = (e.target as HTMLInputElement).valueAsNumber
     if (!p || !Number.isFinite(v)) return
+    aiHistory.beginGesture(sceneSpec)
+    userDirty = true
     apply(p, v)
     if (sceneAsset?.updatePartTransform(p, sceneSpec)) {
       syncEditorTransform()
@@ -1186,6 +1370,7 @@ const bindNum = (id: string, apply: (p: AiPart, v: number) => void) => {
       scheduleBuild(false, p.id)
     }
   }
+  input.onchange = () => aiHistory.commitGesture()
 }
 bindNum('part-px', (p, v) => { p.position[0] = v })
 bindNum('part-py', (p, v) => { p.position[1] = v })
@@ -1195,6 +1380,8 @@ byId<HTMLInputElement>('part-sc').oninput = e => {
   const p = activePart()
   const v = (e.target as HTMLInputElement).valueAsNumber
   if (!p || !Number.isFinite(v)) return
+  aiHistory.beginGesture(sceneSpec)
+  userDirty = true
   const ids = applySceneUniformScale(sceneSpec, p.id, v, editScope())
   let ok = true
   for (const id of ids) {
@@ -1210,9 +1397,12 @@ byId<HTMLInputElement>('part-sc').oninput = e => {
     scheduleBuild(false)
   }
 }
+byId<HTMLInputElement>('part-sc').onchange = () => aiHistory.commitGesture()
 byId('part-dup').onclick = () => {
   const p = activePart()
   if (!p) return
+  aiHistory.push(sceneSpec)
+  userDirty = true
   const clone: AiPart = JSON.parse(JSON.stringify(p))
   clone.id = 'part-' + Math.random().toString(36).slice(2, 8)
   clone.label = p.label + ' 副本'
@@ -1225,6 +1415,8 @@ byId('part-dup').onclick = () => {
 byId('part-clear-spine').onclick = () => {
   const p = activePart()
   if (!p) return
+  aiHistory.push(sceneSpec)
+  userDirty = true
   const nextTrunk = { ...p.spec.trunk }
   delete nextTrunk.spine
   p.spec = { ...p.spec, trunk: nextTrunk }
@@ -1235,6 +1427,8 @@ byId('part-clear-spine').onclick = () => {
 
 // ---- LOD buttons & budget solver (defaults to whole tree; optional single-part mode) ----
 function solveGlobalLod(target?: number) {
+  aiHistory.push(sceneSpec)
+  userDirty = true
   const p = activePart()
   const goal = Math.max(200, Math.round(target ?? (byId<HTMLInputElement>('opt-target').valueAsNumber || p?.spec.optimize.targetTriangles || 3000)))
   const res = solveSceneForTriangleBudget(sceneSpec, textures, goal)
@@ -1243,10 +1437,11 @@ function solveGlobalLod(target?: number) {
     part.spec = { ...part.spec, optimize: { ...res.optimize, targetTriangles: goal } }
   }
   panel.sync()
-  rebuild(false)
+  const enabledParts = sceneSpec.parts.filter(x => x.enabled)
+  if (!remeshAiPartsOptimize(enabledParts)) rebuild(false)
   updateGlobalLodUi()
   const pct = res.before > 0 ? Math.round((1 - res.after / res.before) * 100) : 0
-  const enabledCount = sceneSpec.parts.filter(x => x.enabled).length
+  const enabledCount = enabledParts.length
   message(res.reached
     ? `整棵树（${enabledCount} 部件）已优化至 ${fmt.format(res.after)} 面（原 ${fmt.format(res.before)} 面，−${pct}%）`
     : `整棵树（${enabledCount} 部件）已达极限低模 ${fmt.format(res.after)} 面（原 ${fmt.format(res.before)} 面，−${pct}%，目标 ${fmt.format(goal)} 面）`)
@@ -1261,9 +1456,11 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-lod]')) bt
   }
   const p = activePart()
   if (!p) return
+  aiHistory.push(sceneSpec)
+  userDirty = true
   p.spec = { ...p.spec, optimize: optimizeAt(level, p.spec.optimize.targetTriangles) }
   panel.sync()
-  rebuildSinglePart(p.id)
+  if (!remeshAiPartsOptimize([p])) rebuildSinglePart(p.id)
 }
 byId('opt-solve').onclick = () => {
   if (optScope === 'all') {
@@ -1272,11 +1469,13 @@ byId('opt-solve').onclick = () => {
   }
   const p = activePart()
   if (!p) return
+  aiHistory.push(sceneSpec)
+  userDirty = true
   const goal = Math.max(200, Math.round(byId<HTMLInputElement>('opt-target').valueAsNumber || p.spec.optimize.targetTriangles || 3000))
   const res = solveForTriangleBudget(p.spec, textures, goal)
   p.spec = { ...p.spec, optimize: res.optimize }
   panel.sync()
-  rebuildSinglePart(p.id)
+  if (!remeshAiPartsOptimize([p])) rebuildSinglePart(p.id)
   const pct = res.before > 0 ? Math.round((1 - res.after / res.before) * 100) : 0
   message(`已优化当前部件至 ${fmt.format(res.after)} 面（原 ${fmt.format(res.before)} 面，−${pct}%）`)
 }
@@ -1325,12 +1524,15 @@ editUi = bindEditToolsUi({
   onHandlesChange: (handles, final) => {
     const p = activePart()
     if (!p) return
+    userDirty = true
     p.spec = { ...p.spec, handles }
     scheduleBuild(final, p.id)
   },
   onResetHandles: () => {
     const p = activePart()
     if (!p) return
+    aiHistory.push(sceneSpec)
+    userDirty = true
     p.spec = { ...p.spec, handles: defaultHandles(new CrownEnvelope(p.spec, axisOf(p.spec))) }
     rebuildSinglePart(p.id)
   },
@@ -1353,6 +1555,8 @@ function activateCustomSlotOnPart(p: AiPart, kind: EditableTextureSlot): boolean
     const nativeMatch =
       (p.spec.kind === 'conifer' && (kind === 'needle' || kind === 'drape')) ||
       (p.spec.kind === 'palm' && kind === 'palm') ||
+      (p.spec.kind === 'bamboo' && kind === 'bamboo') ||
+      (p.spec.kind === 'lotus' && (kind === 'lotusLeaf' || kind === 'lotusPetal')) ||
       (p.spec.kind === 'grass' && kind === 'grass') ||
       (p.spec.kind === 'fern' && kind === 'fern') ||
       (p.spec.kind === 'flowerbed' && kind === 'blossom')
@@ -1387,14 +1591,29 @@ const texSlots = bindTextureSlots(registry, {
     ensureCustomTextureActive(slot)
     if (slot === 'leaf') {
       const targets = editScope() === 'whole' ? sceneSpec.parts : (activePart() ? [activePart()!] : [])
+      let atlasChanged = false
       for (const p of targets) {
-        if (p.spec.kind === 'broadleaf' && p.spec.leaves.atlasRegions?.length) {
-          p.spec = { ...p.spec, leaves: { ...p.spec.leaves, atlasRegions: undefined } }
+        if (p.spec.kind === 'broadleaf' && (p.spec.leaves.atlasCols !== 1 || p.spec.leaves.atlasRows !== 1 || p.spec.leaves.atlasRegions?.length)) {
+          p.spec = { ...p.spec, leaves: { ...p.spec.leaves, atlasCols: 1, atlasRows: 1, atlasRegions: undefined } }
+          atlasChanged = true
         }
       }
+      if (atlasChanged) panel.sync()
+    } else if (slot === 'bark') {
+      const targets = editScope() === 'whole' ? sceneSpec.parts : (activePart() ? [activePart()!] : [])
+      let barkChanged = false
+      for (const p of targets) {
+        if (p.spec.trunk.barkStyle && p.spec.trunk.barkStyle !== 'default') {
+          const nextTrunk = { ...p.spec.trunk }
+          delete nextTrunk.barkStyle
+          p.spec = { ...p.spec, trunk: nextTrunk }
+          barkChanged = true
+        }
+      }
+      if (barkChanged) panel.sync()
     }
   },
-  onOpenEditor: slot => textureEditor.open({ slot }),
+  onOpenEditor: slot => openAiEditorForSlot(slot),
   onOpenLibrary: slot => textureLibrary.open(undefined, defaultCategoryForSlot(slot)),
   onCustomTexture: (slot, texture, filename) => {
     if (editScope() === 'whole') {
@@ -1447,6 +1666,7 @@ const texSlots = bindTextureSlots(registry, {
     return { texture: customTex, label: `单体贴图：${fname}` }
   },
   onChange: () => {
+    userDirty = true
     const p = activePart()
     if (editScope() === 'part' && p) rebuildSinglePart(p.id)
     else rebuild(false)
@@ -1467,13 +1687,38 @@ byId('ai-copy-json').onclick = async () => {
 }
 byId('ai-apply-json').onclick = () => {
   try {
-    sceneSpec = parseAiScene(JSON.parse(byId<HTMLTextAreaElement>('ai-json-text').value))
+    const parsed = parseAiScene(JSON.parse(byId<HTMLTextAreaElement>('ai-json-text').value))
+    sceneEpoch++
+    cancelScheduledBuilds()
+    clearAllPartCustomTextures()
+    editor?.clearUndo()
+    aiHistory.clear()
+    userDirty = true
+    sceneSpec = parsed
     selectedId = sceneSpec.parts[0]?.id
     presetLibrary?.setActiveId(undefined)
     refreshUi(true)
     message(`已应用 JSON（共 ${sceneSpec.parts.length} 个部件）`)
   } catch (err) { message(err, true) }
 }
+let llmAbort: AbortController | undefined
+async function compressImageForLlm(dataUrl: string, maxDim = 1024): Promise<string> {
+  try {
+    const img = new Image()
+    img.src = dataUrl
+    await img.decode()
+    if (Math.max(img.naturalWidth, img.naturalHeight) <= maxDim && dataUrl.length < 400_000) return dataUrl
+    const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight))
+    const c = document.createElement('canvas')
+    c.width = Math.max(1, Math.round(img.naturalWidth * scale))
+    c.height = Math.max(1, Math.round(img.naturalHeight * scale))
+    c.getContext('2d')!.drawImage(img, 0, 0, c.width, c.height)
+    return c.toDataURL('image/jpeg', 0.86)
+  } catch {
+    return dataUrl
+  }
+}
+
 byId('ai-llm-run').onclick = async () => {
   const url = byId<HTMLInputElement>('ai-llm-url').value.trim()
   const model = byId<HTMLInputElement>('ai-llm-model').value.trim() || 'gpt-4o'
@@ -1481,12 +1726,18 @@ byId('ai-llm-run').onclick = async () => {
   if (!lastImageDataUrl) { message('请先上传一张参考图', true); return }
   if (!url || !key) { message('请填写 API Endpoint 与 API Key（留空则已使用本地图像算法）', true); return }
   const btn = byId<HTMLButtonElement>('ai-llm-run')
+  llmAbort?.abort()
+  const ctrl = new AbortController()
+  llmAbort = ctrl
+  const timeout = setTimeout(() => ctrl.abort(), 60000)
   btn.disabled = true
   try {
+    const uploadUrl = await compressImageForLlm(lastImageDataUrl)
     const prompt = 'You are a 3D procedural plant designer. Given this image and the following Vegetation Studio capability schema, return ONLY a valid JSON object matching AiSceneSpec (schemaVersion: 1) with accurate multi-part composition, trunk lean/wobble/barkColor, crown handles, leafTexture, and colors.\nSchema:\n' +
       JSON.stringify(aiCapabilitySchema())
     const resp = await fetch(url, {
       method: 'POST',
+      signal: ctrl.signal,
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
       body: JSON.stringify({
         model,
@@ -1495,22 +1746,39 @@ byId('ai-llm-run').onclick = async () => {
           role: 'user',
           content: [
             { type: 'text', text: prompt },
-            { type: 'image_url', image_url: { url: lastImageDataUrl } },
+            { type: 'image_url', image_url: { url: uploadUrl } },
           ],
         }],
       }),
     })
     if (!resp.ok) throw new Error(`API 请求失败 (${resp.status})`)
-    const json = await resp.json() as { choices?: { message?: { content?: string } }[] }
-    const content = json.choices?.[0]?.message?.content
+    const json = await resp.json() as { choices?: { message?: { content?: string | { type?: string; text?: string }[] } }[] }
+    const rawContent = json.choices?.[0]?.message?.content
+    const content = Array.isArray(rawContent)
+      ? rawContent.map(c => (typeof c === 'string' ? c : c?.text ?? '')).join('')
+      : rawContent
     if (!content) throw new Error('模型未返回有效内容')
-    const cleaned = content.replace(/^```(?:json)?\s*|\s*```$/g, '')
-    sceneSpec = parseAiScene(JSON.parse(cleaned))
+    if (ctrl.signal.aborted) return
+    const cleaned = content.trim().replace(/^```(?:json)?\s*|\s*```$/g, '')
+    const parsed = parseAiScene(JSON.parse(cleaned))
+    sceneEpoch++
+    cancelScheduledBuilds()
+    clearAllPartCustomTextures()
+    editor?.clearUndo()
+    aiHistory.clear()
+    userDirty = true
+    sceneSpec = parsed
     selectedId = sceneSpec.parts[0]?.id
     refreshUi(true)
     message('视觉大模型生成完成！')
-  } catch (err) { message(err, true) }
-  finally { btn.disabled = false }
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') message('视觉大模型请求超时或已取消', true)
+    else message(err, true)
+  } finally {
+    clearTimeout(timeout)
+    if (llmAbort === ctrl) llmAbort = undefined
+    btn.disabled = false
+  }
 }
 
 // ---- file actions ----------------------------------------------------------
@@ -1520,7 +1788,14 @@ fileInput.onchange = async () => {
   const selected = fileInput.files?.[0]
   if (!selected) return
   try {
-    sceneSpec = parseAiScene(JSON.parse(await selected.text()))
+    const parsed = parseAiScene(JSON.parse(await selected.text()))
+    sceneEpoch++
+    cancelScheduledBuilds()
+    clearAllPartCustomTextures()
+    editor?.clearUndo()
+    aiHistory.clear()
+    userDirty = false
+    sceneSpec = parsed
     selectedId = sceneSpec.parts[0]?.id
     presetLibrary?.setActiveId(undefined)
     refreshUi(true)
@@ -1534,25 +1809,133 @@ function download(url: string, filename: string) {
   link.href = url
   link.click()
 }
+window.addEventListener('beforeunload', ev => {
+  if (userDirty && sceneSpec.parts.length > 0) {
+    ev.preventDefault()
+    ev.returnValue = ''
+  }
+})
+window.addEventListener('keydown', ev => {
+  if (ev.defaultPrevented) return
+  const target = ev.target as HTMLElement | null
+  if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || (target instanceof HTMLInputElement && !['range', 'checkbox', 'radio', 'button'].includes(target.type)))) return
+  if (textureEditor.isOpen() || textureLibrary.isOpen() || presetLibrary.isOpen() || activityLogDrawer.isOpen() || !byId('ai-mask-modal').hidden) return
+  if (!(ev.ctrlKey || ev.metaKey)) return
+  const k = ev.key.toLowerCase()
+  if (k === 'z' && !ev.shiftKey) {
+    if (editor?.enabled && editor.canUndo()) return
+    const prev = aiHistory.undo(sceneSpec)
+    if (prev) {
+      ev.preventDefault()
+      userDirty = true
+      sceneSpec = prev
+      selectedId = sceneSpec.parts.some(p => p.id === selectedId) ? selectedId : sceneSpec.parts[0]?.id
+      refreshUi(false)
+      message('已撤销场景修改')
+    }
+  } else if (k === 'y' || (k === 'z' && ev.shiftKey)) {
+    const next = aiHistory.redo(sceneSpec)
+    if (next) {
+      ev.preventDefault()
+      userDirty = true
+      sceneSpec = next
+      selectedId = sceneSpec.parts.some(p => p.id === selectedId) ? selectedId : sceneSpec.parts[0]?.id
+      refreshUi(false)
+      message('已重做场景修改')
+    }
+  }
+})
 function save(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
-  download(url, filename)
-  setTimeout(() => URL.revokeObjectURL(url), 5000)
+  const ext = filename.split('.').pop()?.toLowerCase() ?? ''
+  const filters = ext === 'glb'
+    ? [{ name: 'glTF Binary (.glb)', extensions: ['glb'] }]
+    : ext === 'zip'
+      ? [{ name: 'ZIP 压缩包 (.zip)', extensions: ['zip'] }]
+      : ext === 'json'
+      ? [{ name: 'JSON (.json)', extensions: ['json'] }]
+      : ext === 'png'
+        ? [{ name: 'PNG 图像 (.png)', extensions: ['png'] }]
+        : undefined
+  void tryDesktopSaveBlob(blob, filename, filters).then(res => {
+    if (res.handled) {
+      if (!res.canceled && res.filePath) message(`已保存到 ${res.filePath}`)
+      return
+    }
+    const url = URL.createObjectURL(blob)
+    download(url, filename)
+    setTimeout(() => URL.revokeObjectURL(url), 5000)
+  }).catch(err => {
+    message(`文件保存失败：${err instanceof Error ? err.message : String(err)}`, true)
+  })
 }
-const fileName = () => (sceneSpec.name || 'ai-plant').replace(/[^\w\u4e00-\u9fa5-]+/g, '_')
-byId('json').onclick = () => save(new Blob([JSON.stringify(sceneSpec, null, 2)], { type: 'application/json' }), fileName() + '.json')
-byId('png').onclick = () => {
-  if (!viewer) return
+function captureAiPng(transparent = false): string {
+  if (!viewer) return ''
   const wasVisible = editor?.group.visible
   if (editor) editor.group.visible = false
-  download(viewer.snapshot(), fileName() + '-' + view + '-' + camera + '.png')
-  if (editor) editor.group.visible = Boolean(wasVisible)
+  try {
+    return viewer.snapshot({ transparent })
+  } finally {
+    if (editor) editor.group.visible = Boolean(wasVisible)
+  }
+}
+const fileName = () => (sceneSpec.name || 'ai-plant').replace(/[^\w\u4e00-\u9fa5-]+/g, '_')
+byId('json').onclick = () => {
+  userDirty = false
+  save(new Blob([JSON.stringify(sceneSpec, null, 2)], { type: 'application/json' }), fileName() + '.json')
+}
+byId('png').onclick = () => {
+  const dataUrl = captureAiPng(false)
+  if (!dataUrl) return
+  const fname = fileName() + '-' + view + '-' + camera + '.png'
+  fetch(dataUrl).then(r => r.blob()).then(b => save(b, fname)).catch(() => download(dataUrl, fname))
+}
+byId('png-alpha').onclick = () => {
+  const dataUrl = captureAiPng(true)
+  if (!dataUrl) return
+  const fname = `${fileName()}_transparent.png`
+  activityLog.exportStep(`导出透明背景 PNG：${fname}`, { filename: fname, view, camera })
+  fetch(dataUrl).then(r => r.blob()).then(b => save(b, fname)).catch(() => download(dataUrl, fname))
 }
 const glb = byId<HTMLButtonElement>('glb')
 bindGlbExportPopover({
   triggerButton: glb,
   getRoot: () => sceneAsset?.group,
   exportBlob: opts => sceneAsset!.exportGlb(opts),
+  exportLodGlb: async (lodLevel, opts) => {
+    const preset = lodPresets[lodLevel] ?? lodPresets[0]
+    const rootGroup = new Group()
+    rootGroup.name = 'Vegetation Studio AI / ' + sceneSpec.name
+    const disposables: { dispose(): void }[] = []
+    try {
+      for (const part of sceneSpec.parts) {
+        if (!part.enabled) continue
+        const baseSpec = part.leafTexture !== 'auto' && part.spec.kind === 'broadleaf'
+          ? { ...part.spec, shading: { ...part.spec.shading, leafStyle: 'default' as const } }
+          : part.spec
+        const lodSpec: TreeSpec = {
+          ...baseSpec,
+          optimize: optimizeAt(preset.level, part.spec.optimize.targetTriangles),
+        }
+        const existing = sceneAsset?.partAssets.get(part.id)
+        if (existing) {
+          const clone = existing.buildLodClone(lodSpec)
+          disposables.push(clone)
+          clone.group.name = part.label || part.id
+          clone.group.position.set(part.position[0], part.position[1], part.position[2])
+          clone.group.rotation.y = MathUtils.degToRad(part.rotationY)
+          clone.group.scale.setScalar(Math.max(.05, part.scale))
+          rootGroup.add(clone.group)
+        } else {
+          const built = buildAiScene({ ...sceneSpec, parts: [{ ...part, spec: lodSpec }] }, textures, partCustomTextures)
+          disposables.push(built)
+          rootGroup.add(built.group)
+        }
+      }
+      return await exportGlb(rootGroup, opts)
+    } finally {
+      for (const d of disposables) d.dispose()
+    }
+  },
   getFilename: opts => `${fileName()}${opts.mode === 'merged' ? '-merged' : ''}.glb`,
   saveBlob: save,
   message,
@@ -1620,7 +2003,12 @@ const presetLibrary = mountPresetLibrary<
     refreshUi(wasEmpty || sceneSpec.parts.length !== 1)
   },
   apply: preset => {
+    sceneEpoch++
+    cancelScheduledBuilds()
     clearAllPartCustomTextures()
+    editor?.clearUndo()
+    aiHistory.clear()
+    userDirty = false
     sceneSpec = deepClone(preset.payload)
     selectedId = sceneSpec.parts[0]?.id
     globalLodLevel = 0
@@ -1628,6 +2016,9 @@ const presetLibrary = mountPresetLibrary<
     editUi?.showSelectedHandle(undefined)
     setLightingMood(preset.lighting)
     refreshUi(true)
+  },
+  onActiveChange: id => {
+    if (id) userDirty = false
   },
   message,
 })
@@ -1670,7 +2061,7 @@ interface AiSlotSnapshot {
   }[]
 }
 
-const textureStore = createTextureLibraryStore()
+const textureStore = createTextureLibraryStore({ lazy: true })
 let aiHoverPreviewTex: Texture | undefined
 let aiHoverStashedTex: Texture | undefined
 
@@ -1701,6 +2092,7 @@ function applyAiProceduralTexture(
   texture.name = label
   const scope = editScope()
   const lead = activePart()
+  if (!isPreview) attachTextureGraphSource(texture, meta)
 
   if (isPreview) {
     const prevPreview = aiHoverPreviewTex
@@ -1717,6 +2109,7 @@ function applyAiProceduralTexture(
     }
     if (prevPreview && prevPreview !== texture && prevPreview !== aiHoverStashedTex) prevPreview.dispose()
   } else {
+    userDirty = true
     const oldStashed = aiHoverStashedTex
     aiHoverStashedTex = undefined
     const prevPreview = aiHoverPreviewTex
@@ -1738,14 +2131,27 @@ function applyAiProceduralTexture(
   }
 
   ensureCustomTextureActive(slot)
+  if (slot === 'bark' && !isPreview) {
+    const targets = scope === 'part' && lead ? [lead] : sceneSpec.parts
+    let barkChanged = false
+    for (const part of targets) {
+      if (part.spec.trunk.barkStyle && part.spec.trunk.barkStyle !== 'default') {
+        const nextTrunk = { ...part.spec.trunk }
+        delete nextTrunk.barkStyle
+        part.spec = { ...part.spec, trunk: nextTrunk }
+        barkChanged = true
+      }
+    }
+    if (barkChanged) panel.sync()
+  }
   if (slot === 'leaf') {
     const targets = scope === 'part' && lead ? [lead] : sceneSpec.parts.filter(p => p.spec.kind === 'broadleaf')
     let atlasChanged = false
     const nextRegions = meta?.atlasRegions?.length ? meta.atlasRegions : undefined
     for (const part of targets) {
       if (part.spec.kind !== 'broadleaf') continue
-      const nextCols = meta?.atlasCols ?? (nextRegions ? 1 : part.spec.leaves.atlasCols)
-      const nextRows = meta?.atlasRows ?? (nextRegions ? 1 : part.spec.leaves.atlasRows)
+      const nextCols = nextRegions ? 1 : (meta?.atlasCols ?? 1)
+      const nextRows = nextRegions ? 1 : (meta?.atlasRows ?? 1)
       const regDiff = JSON.stringify(part.spec.leaves.atlasRegions ?? null) !== JSON.stringify(nextRegions ?? null)
       if (part.spec.leaves.atlasCols !== nextCols || part.spec.leaves.atlasRows !== nextRows || regDiff) {
         part.spec = {
@@ -1850,7 +2256,7 @@ const textureLibrary = mountTextureLibrary<AiSlotSnapshot>({
   message,
 })
 
-const syncTexLibCount = () => { byId('tex-lib-count').textContent = String(textureStore.list().length) }
+const syncTexLibCount = () => { byId('tex-lib-count').textContent = String(textureStore.count) }
 textureStore.subscribe(syncTexLibCount)
 void textureStore.ready().then(syncTexLibCount)
 syncTexLibCount()
@@ -1866,14 +2272,31 @@ const activityLogDrawer = mountActivityLogDrawer({
   message: (text, err) => message(text, err, false),
 })
 
+function openAiEditorForSlot(slot: EditableTextureSlot) {
+  const openNow = () => {
+    const lead = activePart()
+    const activeTex = (editScope() === 'part' && lead ? partCustomTextures.get(lead.id)?.[slot] : undefined)
+      ?? registry.getCustom(slot)
+    textureEditor.open(resolveSlotEditorOptions(slot, activeTex, textureStore, lead?.spec))
+  }
+  if (!textureStore.isLoaded) {
+    void textureStore.ensureLoaded().finally(openNow)
+  } else {
+    openNow()
+  }
+}
+
 byId('tex-editor').onclick = () => {
   activityLogDrawer.close()
   const lead = activePart()
   const defaultSlot: EditableTextureSlot = lead?.spec.kind === 'conifer' ? 'needle'
     : lead?.spec.kind === 'palm' ? 'palm'
-      : lead?.spec.kind === 'flowerbed' ? 'blossom'
-        : lead?.spec.kind === 'fern' ? 'fern' : 'leaf'
-  textureEditor.open({ slot: defaultSlot })
+      : lead?.spec.kind === 'bamboo' ? 'bamboo'
+        : lead?.spec.kind === 'lotus' ? 'lotusLeaf'
+          : lead?.spec.kind === 'flowerbed' ? 'blossom'
+            : lead?.spec.kind === 'grass' ? 'grass'
+              : lead?.spec.kind === 'fern' ? 'fern' : 'leaf'
+  openAiEditorForSlot(defaultSlot)
 }
 byId('tex-lib').onclick = () => { activityLogDrawer.close(); textureLibrary.toggle() }
 
@@ -1925,13 +2348,18 @@ Object.assign(window, {
       editor: textureEditor,
       agent: textureEditor.agent,
       library: textureLibrary,
-      openEditor: (slot?: EditableTextureSlot) => textureEditor.open(slot ? { slot } : {}),
+      openEditor: (slot?: EditableTextureSlot) => (slot ? openAiEditorForSlot(slot) : textureEditor.open({})),
       closeEditor: () => textureEditor.close(),
       openLibrary: (tab?: 'mine' | 'templates') => textureLibrary.open(tab),
       closeLibrary: () => textureLibrary.close(),
     },
     schema: () => aiCapabilitySchema(),
     setScene(next: unknown) {
+      sceneEpoch++
+      cancelScheduledBuilds()
+      clearAllPartCustomTextures()
+      editor?.clearUndo()
+      aiHistory.clear()
       sceneSpec = parseAiScene(next)
       selectedId = sceneSpec.parts[0]?.id
       refreshUi(true)
@@ -1975,5 +2403,9 @@ Object.assign(window, {
     setShowNormalVectors: (on: boolean) => { editor?.setShowNormalVectors(on); editUi?.sync() },
     undoEdit: () => editor?.undo() ?? false,
     lastImageName: () => lastImageName,
+    snapshotCanvas: (opts?: { transparent?: boolean }) => captureAiPng(Boolean(opts?.transparent)),
+    snapshotTransparentCanvas: () => captureAiPng(true),
   },
 })
+
+mountDesktopToolbarBadge('header.bar nav', msg => message(msg))

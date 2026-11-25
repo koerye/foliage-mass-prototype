@@ -366,8 +366,8 @@ if (uBarkClay > 0.5) {
   if (mossAmt > 0.001) {
     vec3 wn = normalize(vBarkWorldNorm);
     float upSun = smoothstep(0.22, 0.78, wn.y);
-    float crevBias = smoothstep(0.76, 0.24, barkHeightVal);
-    float rootDamp = smoothstep(1.55, 0.04, vBarkObjPos.y) * smoothstep(-0.18, 0.34, wn.y) * (0.35 + 0.65 * crevBias);
+    float crevBias = 1.0 - smoothstep(0.24, 0.76, barkHeightVal);
+    float rootDamp = (1.0 - smoothstep(0.04, 1.55, vBarkObjPos.y)) * smoothstep(-0.18, 0.34, wn.y) * (0.35 + 0.65 * crevBias);
     float macroPatch = barkFbm3(vBarkObjPos * vec3(1.85, 1.35, 1.85) + vec3(4.1, 1.7, 8.3));
     float tuft = barkFbm3(vBarkObjPos * 5.8 + vec3(1.3, 5.1, 2.7));
     float fineBrush = barkNoise3(vBarkObjPos * vec3(14.0, 7.5, 14.0));
@@ -419,8 +419,8 @@ if (uBarkClay < 0.5) {
   float customNormAtten = uHasCustomNormal > 0.5 ? 0.18 : 1.0;
   float bumpStrength = (clamp(uBarkDetail, 0.0, 1.5) * (uUseBarkMap > 0.5 ? 0.30 * customNormAtten : (uBarkUvMode > 0.5 ? 0.14 : 0.22)) + uBarkLodBoost * 0.16) * barkAA;
   if (uBarkClay < 0.5 && bumpStrength > 0.001) {
-    vec3 dPosX = dFdx(vViewPosition);
-    vec3 dPosY = dFdy(vViewPosition);
+    vec3 dPosX = dFdx(-vViewPosition);
+    vec3 dPosY = dFdy(-vViewPosition);
     vec3 r1 = cross(dPosY, normal);
     vec3 r2 = cross(normal, dPosX);
     float det = dot(dPosX, r1);

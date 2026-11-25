@@ -14,6 +14,7 @@
 import { CatmullRomCurve3, Color, MathUtils, Vector3, type Texture } from 'three'
 import { rng, seedFor } from '../shape'
 import { radiusAt, type Branch } from './skeleton'
+import type { TrunkSpec } from './spec'
 
 export const barkUvModes = ['triplanar', 'flow'] as const
 export type BarkUvMode = typeof barkUvModes[number]
@@ -265,8 +266,13 @@ function smoothstep(e0: number, e1: number, x: number): number {
   return t * t * (3 - 2 * t)
 }
 
+const TWO_PI = Math.PI * 2
+
 function wrapAngleDiff(a: number, b: number): number {
-  return Math.atan2(Math.sin(a - b), Math.cos(a - b))
+  let d = (a - b) % TWO_PI
+  if (d > Math.PI) d -= TWO_PI
+  else if (d <= -Math.PI) d += TWO_PI
+  return d
 }
 
 function hash3(x: number, y: number, z: number): number {
@@ -610,6 +616,61 @@ export function ribCenterAngleAt(
 // ---------------------------------------------------------------------------
 // Unified Host Surface Evaluator (Single Source of Truth for Trunk, Collars & Hero Strands!)
 // ---------------------------------------------------------------------------
+export interface PrecomputedRibRow {
+  id: number
+  thetaRib: number
+  bodyEnv: number
+  halfW: number
+  amp: number
+  rw: number
+  creviceDepth: number
+}
+
+/** Precomputes all row-invariant rib geometry (`ribCenterAngleAt`, C1 onset/fadeout envelopes,
+ *  and integrated root-buttress width/reach) once per `py` row instead of per `px` pixel. */
+export function precomputeRibRow(
+  plan: TrunkFeaturePlan,
+  sculpt: TrunkSculptSpec,
+  t: number,
+  arcLen: number,
+  y: number,
+  refHeight: number,
+  isTrunk = true,
+): PrecomputedRibRow[] {
+  const out: PrecomputedRibRow[] = []
+  if (!isTrunk || !plan || plan.ribs.length === 0 || sculpt.intensity <= 0.001) return out
+  const hRef = Math.max(0.4, refHeight)
+  const twistRate = sculpt.twist * (isTrunk ? 1.0 : 0.55)
+  const ySafe = Math.max(0, y)
+  const bodyScale = 1.08 - 0.38 * Math.pow(t, 1.2)
+  for (let i = 0; i < plan.ribs.length; i++) {
+    const rib = plan.ribs[i]
+    const envOn = rib.startT <= 0.001 ? 1.0 : smoothstep(rib.startT, rib.startT + 0.14, t)
+    const envOff = rib.endT >= 1.0 ? 1.0 : (1 - smoothstep(rib.endT - 0.16, rib.endT, t))
+    const bodyEnv = envOn * envOff * bodyScale
+    if (bodyEnv <= 0.001 && !rib.isPrimaryRoot) continue
+    const thetaRib = ribCenterAngleAt(rib, t, arcLen, hRef, twistRate)
+    let halfW = rib.ribHalfWidth
+    let amp = rib.ribHeight * bodyEnv
+    let rw = 0
+    if (rib.isPrimaryRoot && ySafe < rib.buttressHeight * 1.35) {
+      rw = Math.pow(smoothstep(rib.buttressHeight * 1.25, 0, ySafe), 1.85)
+      halfW = MathUtils.lerp(halfW, rib.buttressHalfWidth, rw)
+      amp += rib.buttressReach * rw * (0.45 + 0.55 * sculpt.intensity)
+    }
+    out.push({
+      id: rib.id,
+      thetaRib,
+      bodyEnv,
+      halfW: Math.max(0.08, halfW),
+      amp,
+      rw,
+      creviceDepth: rib.creviceDepth,
+    })
+  }
+  return out
+}
+
 export interface SculptEvalInput {
   sculpt: TrunkSculptSpec
   angle: number           // 0..2*PI around ring
@@ -627,6 +688,8 @@ export interface SculptEvalInput {
   flareHeight: number
   heightField?: BarkHeightField
   plan?: TrunkFeaturePlan
+  /** Optional row-hoisted rib geometry from `precomputeRibRow` (avoids per-pixel `ribCenterAngleAt` in baking loops). */
+  precomputedRibs?: readonly PrecomputedRibRow[]
 }
 
 export interface SculptEvalResult {
@@ -653,7 +716,7 @@ export interface SculptEvalResult {
 export function evalBarkSculpt(inp: SculptEvalInput): SculptEvalResult {
   const {
     sculpt, angle, t, arcLen, y, baseRadius, refHeight, phase,
-    concavity, isTrunk, barkScale, flare, flareLobes, flareHeight, heightField, plan,
+    concavity, isTrunk, barkScale, flare, flareLobes, flareHeight, heightField, plan, precomputedRibs,
   } = inp
   const hRef = Math.max(0.4, refHeight)
   const normS = arcLen / hRef
@@ -664,8 +727,12 @@ export function evalBarkSculpt(inp: SculptEvalInput): SculptEvalResult {
   //    Strictly (uvU(2*PI) - uvU(0)) === 1.0!
   const twistAng = flowTwistAngle(normS, twistRate)
   const thetaInv = angle - twistAng
-  const uvU = thetaInv / (Math.PI * 2)
+  const uvU = thetaInv / TWO_PI
   const uvV = normS * 2.1
+
+  let hasCsInv = false
+  let cInv = 0
+  let sInv = 0
 
   // 2. Base Flare (strictly 2*PI-periodic integer harmonics — ZERO sin(2.3*a) seam tear!)
   let radius = baseRadius
@@ -683,46 +750,69 @@ export function evalBarkSculpt(inp: SculptEvalInput): SculptEvalResult {
       radius *= 1 + flare * 0.28 * expDecay
 
       // 3. Anchored Wide Surface Ribs + Integrated Continuous Root Buttresses (GPT 4.1 & 4.2!)
-      for (let i = 0; i < plan.ribs.length; i++) {
-        const rib = plan.ribs[i]
-        const thetaRib = ribCenterAngleAt(rib, t, arcLen, hRef, twistRate)
-        const dAng = wrapAngleDiff(angle, thetaRib)
-
-        // Smooth C1 onset & termination envelope (height AND slope go to 0 at startT and endT!)
-        const envOn = rib.startT <= 0.001 ? 1.0 : smoothstep(rib.startT, rib.startT + 0.14, t)
-        const envOff = rib.endT >= 1.0 ? 1.0 : (1 - smoothstep(rib.endT - 0.16, rib.endT, t))
-        const bodyEnv = envOn * envOff * (1.08 - 0.38 * Math.pow(t, 1.2))
-        if (bodyEnv <= 0.001 && !rib.isPrimaryRoot) continue
-
-        // Continuous integrated root buttress shoulder at s -> 0 (expands seamlessly out of this rib!)
-        let halfW = rib.ribHalfWidth
-        let amp = rib.ribHeight * bodyEnv
-        if (rib.isPrimaryRoot && ySafe < rib.buttressHeight * 1.35) {
-          const rw = Math.pow(smoothstep(rib.buttressHeight * 1.25, 0, ySafe), 1.85)
-          // Smoothly widen angular shoulder & amplify radial root extension toward ground y = 0
-          halfW = MathUtils.lerp(halfW, rib.buttressHalfWidth, rw)
-          const bAdd = rib.buttressReach * rw * (0.45 + 0.55 * sculpt.intensity)
-          amp += bAdd
-          buttressBoost = Math.max(buttressBoost, rw)
+      if (precomputedRibs !== undefined) {
+        for (let i = 0; i < precomputedRibs.length; i++) {
+          const pr = precomputedRibs[i]
+          if (pr.rw > buttressBoost) buttressBoost = pr.rw
+          const dAng = wrapAngleDiff(angle, pr.thetaRib)
+          const q = Math.abs(dAng) / pr.halfW
+          if (q < 1.0) {
+            const u = 1 - q * q
+            const hRib = pr.amp * (u * u)
+            ribTotal += hRib
+            if (hRib > ribMax) ribMax = hRib
+          }
+          if (q > 0.58 && q < 1.32 && sculpt.sharpness > 0.02) {
+            const shoulder = Math.exp(-(((q - 0.94) / 0.22) ** 2))
+            if (!hasCsInv) { cInv = Math.cos(thetaInv); sInv = Math.sin(thetaInv); hasCsInv = true }
+            const inter = smoothstep(0.24, 0.72, fbm3(cInv * 1.6 + pr.id * 2.3, normS * 1.45, sInv * 1.6 + 4.1, 2))
+            const crevAmt = shoulder * pr.creviceDepth * (0.45 + 0.55 * inter) * sculpt.sharpness * Math.max(pr.bodyEnv, buttressBoost * 0.85)
+            if (crevAmt > creviceTotal) creviceTotal = crevAmt
+          }
         }
+      } else {
+        const bodyScale = 1.08 - 0.38 * Math.pow(t, 1.2)
+        for (let i = 0; i < plan.ribs.length; i++) {
+          const rib = plan.ribs[i]
+          const thetaRib = ribCenterAngleAt(rib, t, arcLen, hRef, twistRate)
+          const dAng = wrapAngleDiff(angle, thetaRib)
 
-        const q = Math.abs(dAng) / Math.max(0.08, halfW)
-        if (q < 1.0) {
-          // GPT 4.1 wide smooth C1 muscular rib profile: A * (1 - q^2)^2
-          const u = 1 - q * q
-          const profile = u * u
-          const hRib = amp * profile
-          ribTotal += hRib
-          if (hRib > ribMax) ribMax = hRib
-        }
-        // Localized intermittent flanking crevice right along the shoulder edges of each wide rib
-        if (q > 0.58 && q < 1.32 && sculpt.sharpness > 0.02) {
-          const shoulder = Math.exp(-(((q - 0.94) / 0.22) ** 2))
-          // Low-frequency intermittent modulation so grooves deepen, split & fade organically
-          const cInv = Math.cos(thetaInv), sInv = Math.sin(thetaInv)
-          const inter = smoothstep(0.24, 0.72, fbm3(cInv * 1.6 + rib.id * 2.3, normS * 1.45, sInv * 1.6 + 4.1, 2))
-          const crevAmt = shoulder * rib.creviceDepth * (0.45 + 0.55 * inter) * sculpt.sharpness * Math.max(bodyEnv, buttressBoost * 0.85)
-          creviceTotal = Math.max(creviceTotal, crevAmt)
+          // Smooth C1 onset & termination envelope (height AND slope go to 0 at startT and endT!)
+          const envOn = rib.startT <= 0.001 ? 1.0 : smoothstep(rib.startT, rib.startT + 0.14, t)
+          const envOff = rib.endT >= 1.0 ? 1.0 : (1 - smoothstep(rib.endT - 0.16, rib.endT, t))
+          const bodyEnv = envOn * envOff * bodyScale
+          if (bodyEnv <= 0.001 && !rib.isPrimaryRoot) continue
+
+          // Continuous integrated root buttress shoulder at s -> 0 (expands seamlessly out of this rib!)
+          let halfW = rib.ribHalfWidth
+          let amp = rib.ribHeight * bodyEnv
+          if (rib.isPrimaryRoot && ySafe < rib.buttressHeight * 1.35) {
+            const rw = Math.pow(smoothstep(rib.buttressHeight * 1.25, 0, ySafe), 1.85)
+            // Smoothly widen angular shoulder & amplify radial root extension toward ground y = 0
+            halfW = MathUtils.lerp(halfW, rib.buttressHalfWidth, rw)
+            const bAdd = rib.buttressReach * rw * (0.45 + 0.55 * sculpt.intensity)
+            amp += bAdd
+            if (rw > buttressBoost) buttressBoost = rw
+          }
+
+          const q = Math.abs(dAng) / Math.max(0.08, halfW)
+          if (q < 1.0) {
+            // GPT 4.1 wide smooth C1 muscular rib profile: A * (1 - q^2)^2
+            const u = 1 - q * q
+            const profile = u * u
+            const hRib = amp * profile
+            ribTotal += hRib
+            if (hRib > ribMax) ribMax = hRib
+          }
+          // Localized intermittent flanking crevice right along the shoulder edges of each wide rib
+          if (q > 0.58 && q < 1.32 && sculpt.sharpness > 0.02) {
+            const shoulder = Math.exp(-(((q - 0.94) / 0.22) ** 2))
+            // Low-frequency intermittent modulation so grooves deepen, split & fade organically
+            if (!hasCsInv) { cInv = Math.cos(thetaInv); sInv = Math.sin(thetaInv); hasCsInv = true }
+            const inter = smoothstep(0.24, 0.72, fbm3(cInv * 1.6 + rib.id * 2.3, normS * 1.45, sInv * 1.6 + 4.1, 2))
+            const crevAmt = shoulder * rib.creviceDepth * (0.45 + 0.55 * inter) * sculpt.sharpness * Math.max(bodyEnv, buttressBoost * 0.85)
+            if (crevAmt > creviceTotal) creviceTotal = crevAmt
+          }
         }
       }
 
@@ -741,7 +831,7 @@ export function evalBarkSculpt(inp: SculptEvalInput): SculptEvalResult {
     }
   } else if (sculpt.intensity > 0.001) {
     // Primary limbs: gentle, smooth twist-aligned wide flutes (no noisy high-frequency ripples on thin limbs!)
-    const cInv = Math.cos(thetaInv), sInv = Math.sin(thetaInv)
+    if (!hasCsInv) { cInv = Math.cos(thetaInv); sInv = Math.sin(thetaInv); hasCsInv = true }
     const warp = (fbm3(cInv * 1.3 + 2.1, normS * 1.4 + phase, sInv * 1.3 + 5.3, 2) - 0.5) * sculpt.furrowWarp * 0.55
     const fCount = Math.max(3, Math.min(6, Math.round(sculpt.flutes * 0.65)))
     const wave = Math.pow(Math.max(1e-4, Math.abs(Math.sin(fCount * 0.5 * (thetaInv + warp)))), MathUtils.lerp(1.0, 0.55, sculpt.sharpness))
@@ -754,7 +844,7 @@ export function evalBarkSculpt(inp: SculptEvalInput): SculptEvalResult {
   // 4. Secondary Organic Weathering Fissures (controlled by `furrowWarp`, strictly periodic in thetaInv!)
   let fissureCrev = 0
   if (sculpt.intensity > 0.001 && sculpt.furrowWarp > 0.02) {
-    const cInv = Math.cos(thetaInv), sInv = Math.sin(thetaInv)
+    if (!hasCsInv) { cInv = Math.cos(thetaInv); sInv = Math.sin(thetaInv); hasCsInv = true }
     const fNoise = ridgedFbm3(cInv * 2.1 + 7.4, normS * 1.65 + phase, sInv * 2.1 + 3.2, 2)
     // Only carve intermittent fissures where ridged noise dips deep (weathered driftwood character!)
     const splitMask = smoothstep(0.55, 0.14, fNoise) * sculpt.furrowWarp * sculpt.intensity * limbAtten * (1 - 0.4 * t)
@@ -1125,5 +1215,231 @@ export function appendHeroStrands(ctx: HeroStrandContext) {
     color.push(bark.r * 0.7, bark.g * 0.7, bark.b * 0.7)
     const lastRow = start + (totalPts - 1) * cols
     for (let j = 0; j < strandSegs; j++) index.push(capEnd, lastRow + j, lastRow + j + 1)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pure-CPU Sculpted Bark Normal + Cavity AO Byte Baker (Worker & Node Safe!)
+// ---------------------------------------------------------------------------
+export type NormalMapConvention = 'opengl' | 'directx'
+
+export interface SculptedBarkBakePayload {
+  trunk: TrunkSpec
+  seed: number
+  woodDetail: number
+  size: number
+  normalConvention: NormalMapConvention
+  heightField?: BarkHeightField
+  baseNormRgba?: Uint8ClampedArray | Uint8Array
+  plan?: TrunkFeaturePlan
+}
+
+export interface SculptedBarkBakeBuffers {
+  normalBytes: Uint8Array
+  aoBytes: Uint8Array
+  width: number
+  height: number
+  normalConvention: NormalMapConvention
+  repeatY: number
+}
+
+function wrapMod(i: number, n: number): number {
+  const m = i % n
+  return m < 0 ? m + n : m
+}
+
+/** Separable O(1)-per-pixel periodic box blur in U (wrapping) and clamped V (approximates low-poly mesh capture). */
+function lowPassHeightGrid(src: Float32Array, w: number, h: number, radU: number, radV: number): Float32Array {
+  const tmp = new Float32Array(w * h)
+  const dst = new Float32Array(w * h)
+  const rU = Math.max(0, Math.min(Math.floor(w / 4), Math.round(radU)))
+  const rV = Math.max(0, Math.min(Math.floor(h / 4), Math.round(radV)))
+  if (rU === 0 && rV === 0) {
+    dst.set(src)
+    return dst
+  }
+  const invU = 1 / (2 * rU + 1)
+  for (let y = 0; y < h; y++) {
+    const row = y * w
+    let sum = 0
+    for (let dx = -rU; dx <= rU; dx++) sum += src[row + wrapMod(dx, w)]
+    tmp[row] = sum * invU
+    for (let x = 1; x < w; x++) {
+      sum += src[row + wrapMod(x + rU, w)] - src[row + wrapMod(x - 1 - rU, w)]
+      tmp[row + x] = sum * invU
+    }
+  }
+  const invV = 1 / (2 * rV + 1)
+  for (let x = 0; x < w; x++) {
+    let sum = 0
+    for (let dy = -rV; dy <= rV; dy++) sum += tmp[Math.max(0, Math.min(h - 1, dy)) * w + x]
+    dst[x] = sum * invV
+    for (let y = 1; y < h; y++) {
+      sum += tmp[Math.min(h - 1, y + rV) * w + x] - tmp[Math.max(0, y - 1 - rV) * w + x]
+      dst[y * w + x] = sum * invV
+    }
+  }
+  return dst
+}
+
+/** Computes raw RGBA byte grids for tangent-space normal & cavity AO maps with zero DOM calls.
+ *  Hoists row-invariant rib geometry via `precomputeRibRow` once per `py` row and reuses a single
+ *  `SculptEvalInput` struct across all `px` columns for both Worker and synchronous execution. */
+export function computeSculptedBarkBytes(payload: SculptedBarkBakePayload): SculptedBarkBakeBuffers {
+  const { trunk, seed, woodDetail } = payload
+  const size = Math.max(64, Math.min(2048, Math.round(payload.size ?? 512)))
+  const normalConvention: NormalMapConvention = payload.normalConvention === 'directx' ? 'directx' : 'opengl'
+  const ySign = normalConvention === 'directx' ? -1 : 1
+  const sculpt = trunk.sculpt!
+  const phase = (seed % 997) / 997 * TWO_PI
+  const barkScale = trunk.barkScale ?? 1
+  const detailStrength = MathUtils.clamp(trunk.barkDetail ?? 0.72, 0.1, 1.5)
+  const hRef = Math.max(0.5, trunk.height)
+  const baseR = Math.max(0.08, trunk.radius)
+  const vSpan = 2.1 // matches evalBarkSculpt uvV = normS * 2.1
+  const uTile = barkFlowTileU(barkScale)
+
+  const plan = payload.plan ?? buildTrunkFeaturePlan(
+    sculpt, seed, phase, trunk.flare, trunk.flareLobes, trunk.flareHeight,
+    trunk.height, trunk.height * (trunk.forkHeight ?? 0.6), [], [],
+  )
+  const trunkArcLen = Math.max(0.4, plan.trunkArcLen || hRef * (trunk.forkHeight ?? 0.65))
+  const maxTrunkUvV = Math.max(0.5, (trunkArcLen / hRef) * vSpan)
+  const vTileInt = Math.max(1, Math.round(maxTrunkUvV * barkScale * 0.85))
+
+  const hiHeight = new Float32Array(size * size)
+  const cavGrid = new Float32Array(size * size)
+
+  const evalInp: SculptEvalInput = {
+    sculpt,
+    angle: 0,
+    t: 0,
+    arcLen: 0,
+    y: 0,
+    baseRadius: baseR,
+    refHeight: hRef,
+    phase,
+    concavity: 0,
+    isTrunk: true,
+    barkScale,
+    flare: trunk.flare * 0.45,
+    flareLobes: trunk.flareLobes,
+    flareHeight: trunk.flareHeight,
+    heightField: payload.heightField,
+    plan,
+    precomputedRibs: undefined,
+  }
+
+  // 1. Sample exact analytical high-poly surface height (meters) + procedural micro-fibers in Flow-UV space
+  for (let py = 0; py < size; py++) {
+    // Flip V for Canvas/glTF image top-down orientation (py = 0 -> v = 1 -> top of trunk!)
+    const vNorm = 1 - (py + 0.5) / size
+    const t = vNorm
+    const arcLen = vNorm * trunkArcLen
+    const y = arcLen
+    const rLocal = baseR * Math.pow(1 - t * 0.45, trunk.taper)
+    const vUv = vNorm * maxTrunkUvV
+    const twistAng = flowTwistAngle(arcLen / hRef, sculpt.twist)
+
+    evalInp.t = t
+    evalInp.arcLen = arcLen
+    evalInp.y = y
+    evalInp.baseRadius = rLocal
+    evalInp.precomputedRibs = precomputeRibRow(plan, sculpt, t, arcLen, y, hRef, true)
+
+    const rowOff = py * size
+    for (let px = 0; px < size; px++) {
+      const uNorm = (px + 0.5) / size
+      // Invert Flow UV (uvU = (angle - twistAng) / 2PI) -> physical angle for exact surface alignment!
+      evalInp.angle = uNorm * TWO_PI + twistAng
+      const res = evalBarkSculpt(evalInp)
+      // Add procedural flow-bark micro-striations (so GPU onBeforeCompile fibers appear natively in external GLB viewers!)
+      const micro = evalFlowBarkMicroCpu(uNorm, vUv, barkScale)
+      const microMeters = (micro - 0.5) * baseR * 0.048 * detailStrength
+      hiHeight[rowOff + px] = (res.finalRadius - rLocal) + microMeters
+      cavGrid[rowOff + px] = MathUtils.clamp(res.cavity + (0.5 - micro) * 0.28 * detailStrength, 0, 1)
+    }
+  }
+
+  // 2. Deduct low-frequency height already represented by the exported mesh's LOD subdivision!
+  const lod = woodSculptLodParams(woodDetail, sculpt)
+  const meshCaptureU = Math.max(2, Math.round((size / Math.max(8, lod.trunkSegs)) * 0.55))
+  const meshCaptureV = Math.max(2, Math.round((size / Math.max(8, lod.trunkRings)) * 0.55))
+  const macroRetention = MathUtils.clamp((1.0 - woodDetail) * 1.15, 0.22, 0.92)
+  const lowHeight = lowPassHeightGrid(hiHeight, size, size, meshCaptureU, meshCaptureV)
+
+  const residual = new Float32Array(size * size)
+  for (let i = 0; i < residual.length; i++) {
+    residual[i] = (hiHeight[i] - lowHeight[i]) + lowHeight[i] * macroRetention
+  }
+
+  // 3. Compute exact centered-difference Tangent-Space Normals (+X right, +Y up OpenGL / -Y DirectX, +Z out)
+  const normalBytes = new Uint8Array(size * size * 4)
+  const aoBytes = new Uint8Array(size * size * 4)
+  const baseNormRgba = payload.baseNormRgba
+
+  const avgCircum = TWO_PI * baseR * 0.85
+  const dSu = avgCircum / size
+  const dSv = trunkArcLen / size
+  const inv2dSu = 1 / (2 * dSu)
+  const inv2dSv = 1 / (2 * dSv)
+  const normalGain = 1.15 + (1 - woodDetail) * 0.45
+
+  for (let py = 0; py < size; py++) {
+    const yPrev = Math.max(0, py - 1)
+    const yNext = Math.min(size - 1, py + 1)
+    const rowOff = py * size
+    const prevRowOff = yPrev * size
+    const nextRowOff = yNext * size
+    for (let px = 0; px < size; px++) {
+      const xPrev = (px - 1 + size) % size
+      const xNext = (px + 1) % size
+
+      const dhdu = (residual[rowOff + xNext] - residual[rowOff + xPrev]) * inv2dSu
+      const dhdv = (residual[prevRowOff + px] - residual[nextRowOff + px]) * inv2dSv
+
+      let nx = -dhdu * normalGain
+      let ny = -dhdv * normalGain
+      let nz = 1.0
+      const len = Math.hypot(nx, ny, nz)
+      nx /= len; ny /= len; nz /= len
+
+      if (baseNormRgba) {
+        const bx = wrapMod(Math.round(px * uTile), size)
+        const by = wrapMod(Math.round(py * vTileInt), size)
+        const bi = (by * size + bx) * 4
+        const tx = baseNormRgba[bi] / 127.5 - 1
+        const ty = baseNormRgba[bi + 1] / 127.5 - 1
+        const tz = Math.max(0.05, baseNormRgba[bi + 2] / 127.5 - 1)
+        const tZ = nz + 1
+        const dotTU = nx * (-tx) + ny * (-ty) + tZ * tz
+        const rx = nx * dotTU + tx * tZ
+        const ry = ny * dotTU + ty * tZ
+        const rz = tZ * dotTU - tz * tZ
+        const rLen = Math.hypot(rx, ry, rz)
+        if (rLen > 1e-5) { nx = rx / rLen; ny = ry / rLen; nz = Math.max(0.05, rz / rLen) }
+      }
+
+      const idx = (rowOff + px) * 4
+      normalBytes[idx] = Math.round(MathUtils.clamp(nx * 0.5 + 0.5, 0, 1) * 255)
+      normalBytes[idx + 1] = Math.round(MathUtils.clamp((ny * ySign) * 0.5 + 0.5, 0, 1) * 255)
+      normalBytes[idx + 2] = Math.round(MathUtils.clamp(nz * 0.5 + 0.5, 0, 1) * 255)
+      normalBytes[idx + 3] = 255
+
+      const aoVal = Math.round(MathUtils.clamp(1 - cavGrid[rowOff + px] * sculpt.creviceAO * 0.82, 0.16, 1) * 255)
+      aoBytes[idx] = aoVal
+      aoBytes[idx + 1] = aoVal
+      aoBytes[idx + 2] = aoVal
+      aoBytes[idx + 3] = 255
+    }
+  }
+
+  return {
+    normalBytes,
+    aoBytes,
+    width: size,
+    height: size,
+    normalConvention,
+    repeatY: 1 / maxTrunkUvV,
   }
 }

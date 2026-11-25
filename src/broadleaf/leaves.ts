@@ -5,10 +5,14 @@
 // soft clump field) -> pruning, orientation, card mesh with blended normals.
 // The leaf look itself comes from a user supplied alpha texture.
 import {
-  BufferAttribute, BufferGeometry, Color, QuadraticBezierCurve3, Vector3,
+  BufferAttribute, BufferGeometry, Color, MathUtils, QuadraticBezierCurve3, Vector3,
 } from 'three'
-import { clamp, rng, seedFor } from '../shape'
+import { clamp, rng, seedFor, tau } from '../shape'
 import type { AtlasRegion } from '../texgraph/types'
+import {
+  applyLeafTintAt, clumpToCrownCluster, leafPruneMaskAt, leafScaleFactorAt,
+  type LeafClumpEdit, type LeafEditSpec,
+} from '../tree/leaf-edits'
 import type { Curve } from 'three'
 
 /** Any branch carrier (old growth.ts limbs or the new skeleton). */
@@ -25,16 +29,39 @@ export interface CrownCluster {
   width: number
   height: number
   depth: number
+  /** Optional relative card density multiplier for this cluster (default 1). */
+  density?: number
+  /** Optional clump-local sunlit/shadow pigment bias (-0.4..+0.4, default 0). */
+  shade?: number
+  /** Optional per-cluster leaf card scale multiplier (used by manual sculpted leaf clumps). */
+  leafScale?: number
+  /** Optional hex tint override for sculpted leaf clumps. */
+  tint?: string
+  /** Optional 0..1 tint blend strength for sculpted leaf clumps. */
+  tintStrength?: number
+  /** When true, bypasses global outer/inner/canopyLift pruning so hand-placed clumps always stay lush. */
+  manual?: boolean
 }
 /** Optional external crown model: normalized radius (1 = surface) and a keep mask (bare zones). */
 export interface LeafShaping {
   radius?: (p: Vector3) => number
   keep?: (p: Vector3, random: number) => boolean
+  colorAt?: (position: Vector3, cardIndex: number, target: Color) => void
   padFlatten?: number
   flat?: boolean
   reduce?: number
-  /** When true (sculpted/node-edited skeletons), preserve protruding clump shells against global ellipsoid outer clipping. */
+  /** When true, preserve protruding branch-anchored clump shells against global ellipsoid outer clipping. */
   preserveClumpShells?: boolean
+  /** When true, applies 3D spatial-hash blue-noise spacing across twigs/limbs/clumps so overlapping
+   *  branches never crowd into dense blobs, overlapping clumps merge without holes, and bare pruned twigs are omitted. */
+  uniformDensity?: boolean
+  /** 0..1 coherent clump-local two-tone gouache color-mass shading (sunlit face vs cool shaded mass). */
+  colorMass?: number
+  /** When true, distributes cards cleanly across clump ellipsoid shells (preserving crisp breathing air gaps
+   *  between boughs while scaling smoothly with all twig/limb/clump density controls). */
+  clumpMassMode?: boolean
+  /** Optional 3D interactive leaf clumps & foliage brush edits. */
+  leafEdits?: LeafEditSpec
 }
 
 export const normalSources = ['clumps', 'crown'] as const
@@ -178,8 +205,13 @@ export function parseLeafParams(value: unknown): LeafParams {
     ;(result as unknown as Record<string, number>)[key] = n
   }
   if (data.cardType !== undefined) {
-    if (!(cardTypes as readonly string[]).includes(data.cardType as string)) throw new Error('未知插片方式')
-    result.cardType = data.cardType as CardType
+    if (data.cardType === 'blades') {
+      // Legacy 3D-modeled blades migration -> standard game-ready crossed alpha leaf cards
+      result.cardType = 'cross'
+    } else {
+      if (!(cardTypes as readonly string[]).includes(data.cardType as string)) throw new Error('未知插片方式')
+      result.cardType = data.cardType as CardType
+    }
   }
   if (data.normalSource !== undefined) {
     if (!normalSources.includes(data.normalSource as NormalSource)) throw new Error('未知法线来源')
@@ -240,12 +272,25 @@ export interface LeafCard {
   cell: number
   shade: number
   spin: number
+  clumpIndex?: number
 }
 
 export interface Envelope {
   center: Vector3
   radii: Vector3
-  clumps: { center: Vector3; sigma: number; radii: Vector3; yaw: number }[]
+  clumps: {
+    center: Vector3
+    sigma: number
+    radii: Vector3
+    yaw: number
+    direction: Vector3
+    density: number
+    shade: number
+    leafScale?: number
+    tint?: string
+    tintStrength?: number
+    manual?: boolean
+  }[]
 }
 
 const UP = new Vector3(0, 1, 0)
@@ -315,6 +360,13 @@ export function fitEnvelope(twigs: Twig[], limbs: Limb[], clusters: CrownCluster
     sigma: Math.max(.15, (c.width + c.height + c.depth) / 3 * .6 * p.clumpScale),
     radii: new Vector3(c.width * .5, c.height * .5, c.depth * .5),
     yaw: -Math.atan2(c.direction.z, c.direction.x),
+    direction: c.direction.clone().normalize(),
+    density: c.density ?? 1,
+    shade: c.shade ?? 0,
+    ...(c.leafScale !== undefined ? { leafScale: c.leafScale } : {}),
+    ...(c.tint ? { tint: c.tint } : {}),
+    ...(c.tintStrength !== undefined ? { tintStrength: c.tintStrength } : {}),
+    ...(c.manual ? { manual: true } : {}),
   }))
   return { center, radii, clumps }
 }
@@ -356,7 +408,7 @@ export function envelopeNormal(env: Envelope, point: Vector3, source: NormalSour
     if (field.lengthSq() < 1e-8) return target
     field.normalize()
   }
-  return target.multiplyScalar(.45).addScaledVector(field, .55).normalize()
+  return target.multiplyScalar(.30).addScaledVector(field, .70).normalize()
 }
 
 function randomUnit(u: number, v: number) {
@@ -364,35 +416,254 @@ function randomUnit(u: number, v: number) {
   return new Vector3(s * Math.cos(a), z, s * Math.sin(a))
 }
 
+/** Lightweight 3D spatial hash for O(1) blue-noise leaf-card spacing (prevents overcrowded branch blobs
+ *  and lets overlapping clump pillows fuse seamlessly without Swiss-cheese holes). */
+class LeafOccupancyGrid {
+  private readonly cell: number
+  private readonly inv: number
+  private readonly buckets = new Map<string, number[]>()
+  private readonly coords: number[] = []
+
+  constructor(cellSize: number) {
+    this.cell = Math.max(.06, cellSize)
+    this.inv = 1 / this.cell
+  }
+
+  private key(ix: number, iy: number, iz: number) {
+    return `${ix},${iy},${iz}`
+  }
+
+  tooClose(p: Vector3, minDist: number): boolean {
+    if (minDist <= 1e-4) return false
+    const r2 = minDist * minDist
+    const cx = Math.floor(p.x * this.inv)
+    const cy = Math.floor(p.y * this.inv)
+    const cz = Math.floor(p.z * this.inv)
+    const span = Math.max(1, Math.ceil(minDist * this.inv))
+    for (let dx = -span; dx <= span; dx++) {
+      for (let dy = -span; dy <= span; dy++) {
+        for (let dz = -span; dz <= span; dz++) {
+          const list = this.buckets.get(this.key(cx + dx, cy + dy, cz + dz))
+          if (!list) continue
+          for (let i = 0; i < list.length; i++) {
+            const o = list[i]
+            const ox = p.x - this.coords[o], oy = p.y - this.coords[o + 1], oz = p.z - this.coords[o + 2]
+            if (ox * ox + oy * oy + oz * oz < r2) return true
+          }
+        }
+      }
+    }
+    return false
+  }
+
+  add(p: Vector3) {
+    const idx = this.coords.length
+    this.coords.push(p.x, p.y, p.z)
+    const k = this.key(Math.floor(p.x * this.inv), Math.floor(p.y * this.inv), Math.floor(p.z * this.inv))
+    const list = this.buckets.get(k)
+    if (list) list.push(idx)
+    else this.buckets.set(k, [idx])
+  }
+}
+
+const FORWARD = new Vector3(0, 0, 1)
+
+/** Unified clump-surface Fibonacci shell distribution for coherent painterly color-mass canopies.
+ *  Preserves crisp negative-space breathing gaps between boughs while still responding to every
+ *  twig, limb, clump, orientation, bare-zone, pruning, and LOD parameter! */
+function distributeClumpMassLeaves(
+  env: Envelope,
+  p: LeafParams,
+  seed: number,
+  shaping: LeafShaping,
+): { cards: LeafCard[]; pruned: number; activeTwigIds: Set<number> } {
+  const cards: LeafCard[] = []
+  let pruned = 0
+  const cells = p.atlasCols * p.atlasRows
+  const twigSpan = Math.max(0, p.twigEnd - p.twigStart)
+  const leavesOnTwigs = p.twigFrequency * twigSpan * p.leavesPerTwig * (1 - p.leafStart)
+  const leafDensity = p.clumpFill + leavesOnTwigs * .42 + p.limbLeafFrequency * .46 + p.tipLeaves * .26
+  const clumpRandomBase = seed ^ p.leafSeed
+  const useUniform = Boolean(shaping.uniformDensity)
+  const denseCrown = clamp((env.clumps.length - 10) / 20)
+  const multiPlane = p.cardType === 'cross' || p.cardType === 'tri' || p.cardType === 'fan'
+  const planeSpacingMul = multiPlane ? MathUtils.lerp(1, 1.18, denseCrown) : 1
+  const occupancy = useUniform ? new LeafOccupancyGrid(Math.max(.08, p.leafSize * .24)) : undefined
+  // Strictly asymmetric (j < index) deep-overlap culling prevents mutual deletion of visible bough seams
+  const deepOverlapLimit = MathUtils.lerp(.52, .68, denseCrown)
+
+  const leafEdits = shaping.leafEdits
+  for (const [index, clump] of env.clumps.entries()) {
+    const random = rng(seedFor(clumpRandomBase, 7301 + index))
+    const isManual = Boolean(clump.manual)
+    const radii = isManual ? clump.radii.clone() : clump.radii.clone().multiplyScalar(p.clumpFillScale)
+    const area = (radii.x * radii.y + radii.x * radii.z + radii.y * radii.z) * (4 * Math.PI / 3)
+    const baseDensity = isManual ? Math.max(5.2, leafDensity) : leafDensity
+    const count = Math.round(clamp(area * baseDensity * clump.density, 0, 440))
+    const phase = random() * tau
+    for (let i = 0; i < count; i++) {
+      const y = 1 - 2 * (i + .2 + random() * .6) / Math.max(1, count)
+      const horizontal = Math.sqrt(Math.max(0, 1 - y * y))
+      const angle = i * golden + phase + (random() - .5) * p.leafJitter
+      const dir = new Vector3(Math.cos(angle) * horizontal, y, Math.sin(angle) * horizontal)
+      const isInner = i % 5 === 0
+      const distance = isInner
+        ? .82 - random() * p.clumpFillDepth * .76
+        : .97 - random() * p.clumpFillDepth * .30
+      if (!isManual && (distance < p.pruneInner || distance > p.pruneOuter)) { pruned++; continue }
+      const position = dir.clone().multiply(radii).multiplyScalar(distance).add(clump.center)
+      position.addScaledVector(dir, p.leafOffset * .12)
+      if (!isManual && shaping.radius && shaping.radius(position) > p.pruneOuter) { pruned++; continue }
+      if (!isManual && shaping.keep && !shaping.keep(position, random())) { pruned++; continue }
+      if (leafEdits) {
+        const pm = leafPruneMaskAt(position, leafEdits)
+        if (pm > .92 || (pm > .04 && random() < pm)) { pruned++; continue }
+      }
+      if (!isManual && index > 0) {
+        let buried = false
+        for (let j = 0; j < index; j++) {
+          if (clumpRadius(env.clumps[j], position, p.clumpFillScale) < deepOverlapLimit) {
+            buried = true
+            break
+          }
+        }
+        if (buried) { pruned++; continue }
+      }
+      if (occupancy && !isManual) {
+        const gapFactor = MathUtils.lerp(isInner ? .22 : .16, isInner ? .33 : .26, denseCrown) * planeSpacingMul
+        if (occupancy.tooClose(position, p.leafSize * gapFactor)) { pruned++; continue }
+      }
+      const normal = clump.direction.clone().lerp(dir, .55 + p.faceOutward * .45)
+        .addScaledVector(UP, p.upAlign * .35).normalize()
+      const right = new Vector3().crossVectors(Math.abs(normal.y) > .95 ? FORWARD : UP, normal).normalize()
+      const tilt = (random() - .5) * MathUtils.degToRad(p.randomTilt)
+      normal.applyAxisAngle(right, tilt)
+      const up = new Vector3().crossVectors(normal, right)
+      const spin = (random() - .5) * MathUtils.degToRad(p.randomRoll) * 1.15
+      right.applyAxisAngle(normal, spin)
+      up.applyAxisAngle(normal, spin)
+      const taper = MathUtils.lerp(1, p.leafTipScale, Math.max(0, y) * .38)
+      const scaleMul = (clump.leafScale ?? 1) * leafScaleFactorAt(position, leafEdits)
+      const size = p.leafSize * (.82 + (random() - .5) * p.leafSizeVariance) * taper * scaleMul
+      const cell = Math.min(cells - 1, Math.floor(random() * cells))
+      cards.push({
+        position, right, up, normal,
+        width: size * p.leafAspect, height: size,
+        cell, shade: random(), spin, clumpIndex: index,
+      })
+      occupancy?.add(position)
+    }
+  }
+  if (leafEdits?.brushes.length) {
+    emitDensifyBrushCards(cards, env, p, seed, leafEdits, cells)
+  }
+  return { cards, pruned, activeTwigIds: new Set<number>() }
+}
+
+/** Emits localized organic foliage card bursts for user-painted 'densify' brush strokes. */
+function emitDensifyBrushCards(
+  cards: LeafCard[],
+  env: Envelope,
+  p: LeafParams,
+  seed: number,
+  leafEdits: LeafEditSpec,
+  cells: number,
+) {
+  for (const stroke of leafEdits.brushes) {
+    if (stroke.kind !== 'densify' || stroke.strength <= 0) continue
+    const br = rng(seedFor(seed ^ p.leafSeed, 17300 + stroke.id * 37))
+    const rad = MathUtils.clamp(stroke.radius, .2, 3.5)
+    const count = Math.round(clamp(8 + 22 * stroke.strength * rad * rad, 6, 92))
+    const center = new Vector3(stroke.position[0], stroke.position[1], stroke.position[2])
+    const phase = br() * tau
+    for (let k = 0; k < count; k++) {
+      const y = 1 - 2 * (k + .25 + br() * .5) / Math.max(1, count)
+      const h = Math.sqrt(Math.max(0, 1 - y * y))
+      const a = k * golden + phase + (br() - .5) * .6
+      const dist = Math.cbrt(.18 + br() * .82) * rad
+      const position = new Vector3(
+        center.x + Math.cos(a) * h * dist,
+        center.y + y * dist * .82,
+        center.z + Math.sin(a) * h * dist,
+      )
+      const pm = leafPruneMaskAt(position, leafEdits)
+      if (pm > .92 || (pm > .04 && br() < pm)) continue
+      const outward = envelopeNormal(env, position, p.normalSource)
+      const localDir = position.clone().sub(center)
+      if (localDir.lengthSq() < 1e-6) localDir.copy(outward)
+      else localDir.normalize()
+      const normal = outward.clone().lerp(localDir, .35).addScaledVector(UP, p.upAlign * .35).normalize()
+      const right = new Vector3().crossVectors(Math.abs(normal.y) > .95 ? FORWARD : UP, normal).normalize()
+      const tilt = (br() - .5) * MathUtils.degToRad(p.randomTilt)
+      normal.applyAxisAngle(right, tilt)
+      const up = new Vector3().crossVectors(normal, right).normalize()
+      const spin = (br() - .5) * MathUtils.degToRad(p.randomRoll)
+      right.applyAxisAngle(normal, spin)
+      up.applyAxisAngle(normal, spin)
+      const size = p.leafSize * (.76 + br() * .42) * leafScaleFactorAt(position, leafEdits)
+      cards.push({
+        position, right, up, normal,
+        width: size * p.leafAspect, height: size,
+        cell: Math.min(cells - 1, Math.floor(br() * cells)),
+        shade: br(), spin,
+      })
+    }
+  }
+}
+
 /** Distributes leaf cards over twigs and limbs, prunes against the envelope and orients them. */
 export function distributeLeaves(limbs: Limb[], twigs: Twig[], env: Envelope, p: LeafParams, seed: number, shaping: LeafShaping = {}) {
+  if (shaping.clumpMassMode && env.clumps.length > 0) {
+    return distributeClumpMassLeaves(env, p, seed, shaping)
+  }
   const radiusOf = shaping.radius ?? ((q: Vector3) => envelopeRadius(env, q))
   const cards: LeafCard[] = []
   const random = rng(seedFor(seed ^ p.leafSeed, 9100))
   const cells = p.atlasCols * p.atlasRows
+  const useUniform = Boolean(shaping.uniformDensity)
+  const occupancy = useUniform ? new LeafOccupancyGrid(Math.max(.08, p.leafSize * .32)) : undefined
+  const activeTwigIds = new Set<number>()
+  const leafEdits = shaping.leafEdits
   let pruned = 0
-  const place = (point: Vector3, tangent: Vector3, k: number, along: number, tip: boolean) => {
+
+  const place = (
+    point: Vector3,
+    tangent: Vector3,
+    k: number,
+    along: number,
+    tip: boolean,
+    minGap = 0,
+    twigId = -1,
+    clumpIndex?: number,
+  ): boolean => {
     // consume a fixed number of random values per anchor for stable layouts
     const r = Array.from({ length: 11 }, random)
+    const manualClump = clumpIndex !== undefined && env.clumps[clumpIndex]?.manual ? env.clumps[clumpIndex] : undefined
     const position = point.clone().addScaledVector(randomUnit(r[0], r[1]), p.leafJitter * p.leafSize * .5 * r[2])
     const outward = envelopeNormal(env, position, p.normalSource)
     position.addScaledVector(outward, p.leafOffset * p.leafSize * .5)
-    const rho = radiusOf(position)
-    // On sculpted / node-edited crowns (`!shaping.radius`), `fitEnvelope` is a tight L2 ellipsoid around
-    // base cluster bounds, which can scalp circular craters out of protruding clump shells on diagonals.
-    // Measure outer pruning against the union of the envelope and local clump shells so sculpted lobes stay lush.
-    let outerRho = rho
-    if (shaping.preserveClumpShells && env.clumps.length > 0 && outerRho > p.pruneOuter) {
-      const shellScale = Math.max(1, p.clumpFillScale)
-      let minClump = Infinity
-      for (const cl of env.clumps) {
-        const cr = clumpRadius(cl, position, shellScale)
-        if (cr < minClump) minClump = cr
+    if (!manualClump) {
+      const rho = radiusOf(position)
+      // Measure outer pruning against the union of the envelope and local branch-anchored clump shells
+      // so protruding outer lobes (like birch Y-fork limbs) are NEVER scalped bare!
+      let outerRho = rho
+      if (shaping.preserveClumpShells && env.clumps.length > 0 && outerRho > p.pruneOuter) {
+        const shellScale = Math.max(1, p.clumpFillScale)
+        let minClump = Infinity
+        for (const cl of env.clumps) {
+          const cr = clumpRadius(cl, position, shellScale)
+          if (cr < minClump) minClump = cr
+        }
+        outerRho = Math.min(outerRho, minClump)
       }
-      outerRho = Math.min(outerRho, minClump)
+      if (outerRho > p.pruneOuter || rho < p.pruneInner) { pruned++; return false }
+      if (shaping.keep && !shaping.keep(position, r[9])) { pruned++; return false }
+      if (occupancy && minGap > 0 && occupancy.tooClose(position, minGap)) { pruned++; return false }
     }
-    if (outerRho > p.pruneOuter || rho < p.pruneInner) { pruned++; return }
-    if (shaping.keep && !shaping.keep(position, r[9])) { pruned++; return }
+    if (leafEdits) {
+      const pm = leafPruneMaskAt(position, leafEdits)
+      if (pm > .92 || (pm > .04 && r[9] < pm)) { pruned++; return false }
+    }
     const t = tangent.clone().normalize()
     const radial = anyPerpendicular(t).applyAxisAngle(t, k * golden + r[3] * .5)
     const angle = tip ? 0 : p.leafAngle * Math.PI / 180
@@ -413,57 +684,91 @@ export function distributeLeaves(limbs: Limb[], twigs: Twig[], env: Envelope, p:
     if (up.lengthSq() < 1e-6) up.copy(anyPerpendicular(normal))
     up.normalize().applyAxisAngle(normal, (r[6] * 2 - 1) * p.randomRoll * Math.PI / 180)
     const right = new Vector3().crossVectors(up, normal).normalize()
-    const size = p.leafSize * Math.max(.1, 1 + (r[7] * 2 - 1) * p.leafSizeVariance) * (1 + (p.leafTipScale - 1) * along)
+    const scaleMul = (manualClump?.leafScale ?? 1) * leafScaleFactorAt(position, leafEdits)
+    const size = p.leafSize * Math.max(.1, 1 + (r[7] * 2 - 1) * p.leafSizeVariance) * (1 + (p.leafTipScale - 1) * along) * scaleMul
     cards.push({
       position, right, up, normal, width: size * p.leafAspect, height: size,
       cell: Math.min(cells - 1, Math.floor(r[8] * cells)), shade: r[9], spin: (r[10] * 2 - 1) * p.randomRoll * Math.PI / 180,
+      ...(clumpIndex !== undefined ? { clumpIndex } : {}),
     })
+    occupancy?.add(position)
+    if (twigId >= 0) activeTwigIds.add(twigId)
+    return true
   }
-  const along = (curve: { getPoint(t: number): Vector3; getTangent(t: number): Vector3 }, count: number, start: number, tips: number) => {
+  const twigGap = useUniform ? p.leafSize * .18 : 0
+  const limbGap = useUniform ? p.leafSize * .24 : 0
+  const clumpGap = useUniform ? p.leafSize * .26 : 0
+  const along = (
+    curve: { getPoint(t: number): Vector3; getTangent(t: number): Vector3 },
+    count: number,
+    start: number,
+    tips: number,
+    gap: number,
+    twigId = -1,
+  ) => {
     for (let k = 0; k < count; k++) {
       const t = clamp(start + (1 - start) * (k + .15 + random() * .7) / count)
-      place(curve.getPoint(t), curve.getTangent(t), k, t, false)
+      place(curve.getPoint(t), curve.getTangent(t), k, t, false, gap, twigId)
     }
-    for (let k = 0; k < tips; k++) place(curve.getPoint(1), curve.getTangent(1), k + count, 1, true)
+    for (let k = 0; k < tips; k++) place(curve.getPoint(1), curve.getTangent(1), k + count, 1, true, gap * .75, twigId)
   }
+  // 1. Place uniform clump-fill core & shell FIRST when uniformDensity is on so every branch cluster
+  //    gets an even, hole-free painterly pillow before twig/limb accents fill in remaining spaces!
+  const padFlatten = clamp(shaping.padFlatten ?? 0, 0, .85)
+  const fillDepth = p.clumpFillDepth ** (1 - .7 * padFlatten)
+  const fillRandom = rng(seedFor(seed ^ p.leafSeed, 9400))
+  const emitClumpFill = () => {
+    env.clumps.forEach((clump, i) => {
+      const isManual = Boolean(clump.manual)
+      const r = isManual ? clump.radii.clone() : clump.radii.clone().multiplyScalar(p.clumpFillScale)
+      const a = (r.x * r.y) ** 1.6, b = (r.x * r.z) ** 1.6, c = (r.y * r.z) ** 1.6
+      const area = 4 * Math.PI * ((a + b + c) / 3) ** (1 / 1.6)
+      const fillRate = isManual ? Math.max(4.8, p.clumpFill) * clump.density : p.clumpFill
+      const count = stochasticCount(fillRate * area, fillRandom)
+      const offset = fillRandom() * Math.PI * 2
+      for (let k = 0; k < count; k++) {
+        const jitter = fillRandom(), depth = fillRandom(), spin = fillRandom()
+        const y = 1 - 2 * (k + .2 + jitter * .6) / count
+        const radial = Math.sqrt(Math.max(0, 1 - y * y)), theta = k * golden + offset
+        const local = new Vector3(Math.cos(theta) * radial * r.x, y * r.y, Math.sin(theta) * radial * r.z)
+        if (useUniform && fillDepth > .04) {
+          // Dual-band stratified pillow: 72% crisp outer silhouette shell + 28% soft inner core (zero sky holes!)
+          const radialScale = (k % 4 === 0)
+            ? Math.max(.26, 1 - fillDepth * (.52 + .48 * depth))
+            : (1 - fillDepth * .32 * depth)
+          local.applyAxisAngle(UP, clump.yaw).multiplyScalar(radialScale)
+        } else {
+          local.applyAxisAngle(UP, clump.yaw).multiplyScalar(1 - fillDepth * depth)
+        }
+        const point = local.add(clump.center)
+        if (!useUniform && !isManual) {
+          // Legacy interior neighbor culling (replaced by 3D spatial hash in uniformDensity mode)
+          const hidden = env.clumps.some((other, j) => j !== i && clumpRadius(other, point, p.clumpFillScale) < .82)
+          if (hidden) { pruned++; continue }
+        }
+        const n = point.clone().sub(clump.center).normalize()
+        const t = UP.clone().addScaledVector(n, -n.y)
+        if (t.lengthSq() < 1e-4) t.copy(anyPerpendicular(n))
+        t.normalize().applyAxisAngle(n, (spin - .5) * 1.2)
+        place(point, t, k, .5, false, isManual ? 0 : clumpGap, -1, i)
+      }
+    })
+  }
+
+  if (useUniform) emitClumpFill()
   for (const twig of twigs) {
-    along(twig.curve, stochasticCount(p.leavesPerTwig, random), p.leafStart, p.tipLeaves)
+    along(twig.curve, stochasticCount(p.leavesPerTwig, random), p.leafStart, p.tipLeaves, twigGap, twig.id)
   }
   for (const limb of limbs) {
     if (limb.kind === 'trunk') continue
     const count = stochasticCount(p.limbLeafFrequency * limb.curve.getLength() * (1 - p.twigStart), random)
-    along(limb.curve, count, p.twigStart, limb.kind === 'secondary' ? p.tipLeaves : 0)
+    along(limb.curve, count, p.twigStart, limb.kind === 'secondary' ? p.tipLeaves : 0, limbGap)
   }
-  // A flattened pad has less room between its top and underside. Distribute its
-  // fill across a deeper radial band so overlapping pads don't expose a dark interior.
-  // Depth 0 remains a pure shell, and the number of candidates stays the same.
-  const padFlatten = clamp(shaping.padFlatten ?? 0, 0, .85)
-  const fillDepth = p.clumpFillDepth ** (1 - .7 * padFlatten)
-  const fillRandom = rng(seedFor(seed ^ p.leafSeed, 9400))
-  env.clumps.forEach((clump, i) => {
-    const r = clump.radii.clone().multiplyScalar(p.clumpFillScale)
-    const a = (r.x * r.y) ** 1.6, b = (r.x * r.z) ** 1.6, c = (r.y * r.z) ** 1.6
-    const area = 4 * Math.PI * ((a + b + c) / 3) ** (1 / 1.6)
-    const count = stochasticCount(p.clumpFill * area, fillRandom)
-    const offset = fillRandom() * Math.PI * 2
-    for (let k = 0; k < count; k++) {
-      const jitter = fillRandom(), depth = fillRandom(), spin = fillRandom()
-      const y = 1 - 2 * (k + .2 + jitter * .6) / count
-      const radial = Math.sqrt(Math.max(0, 1 - y * y)), theta = k * golden + offset
-      const local = new Vector3(Math.cos(theta) * radial * r.x, y * r.y, Math.sin(theta) * radial * r.z)
-      local.applyAxisAngle(UP, clump.yaw).multiplyScalar(1 - fillDepth * depth)
-      const point = local.add(clump.center)
-      // hidden inside a neighbouring clump -> skip (interior culling of the union)
-      const hidden = env.clumps.some((other, j) => j !== i && clumpRadius(other, point, p.clumpFillScale) < .82)
-      if (hidden) { pruned++; continue }
-      const n = point.clone().sub(clump.center).normalize()
-      const t = UP.clone().addScaledVector(n, -n.y)
-      if (t.lengthSq() < 1e-4) t.copy(anyPerpendicular(n))
-      t.normalize().applyAxisAngle(n, (spin - .5) * 1.2)
-      place(point, t, k, .5, false)
-    }
-  })
-  return { cards, pruned }
+  if (!useUniform) emitClumpFill()
+  if (leafEdits?.brushes.length) {
+    emitDensifyBrushCards(cards, env, p, seed, leafEdits, cells)
+  }
+  return { cards, pruned, activeTwigIds }
 }
 
 function clumpRadius(clump: Envelope['clumps'][number], point: Vector3, scale: number) {
@@ -472,7 +777,7 @@ function clumpRadius(clump: Envelope['clumps'][number], point: Vector3, scale: n
 }
 
 
-/** Card insertion types ("插片方式"). */
+/** Card insertion types ("插片方式"). Pure alpha leaf cards only (game-ready). */
 export const cardTypes = ['quad', 'cross', 'tri', 'fan', 'strip', 'drape'] as const
 export type CardType = typeof cardTypes[number]
 export const cardTypeLabels: Record<CardType, string> = {
@@ -590,25 +895,64 @@ export function buildCardGeometry(cards: LeafCard[], env: Envelope, p: LeafParam
             const tv = isAtlas ? atlasPad + (1 - w) * (1 - 2 * atlasPad) : (1 - w)
             uvs.set([(col + tu) / p.atlasCols, 1 - (row + tv) / p.atlasRows], v * 2)
           }
-          let rho = radiusOf(world)
-          if (env.clumps.length > 0 && rho < .9) {
-            // On asymmetric or node-edited crowns, an exposed exterior clump skin may sit inside
-            // the global bounding ellipsoid. Lift outerness by local clump-surface exposure so
-            // exterior lobes never collapse into dark interior AO.
+          const colorMass = clamp(shaping.colorMass ?? 0)
+          if (shaping.colorAt) {
+            shaping.colorAt(world, c, color)
+          } else {
+            let rho = radiusOf(world)
+            const hasFixedClump = card.clumpIndex !== undefined && env.clumps[card.clumpIndex] !== undefined
+            let nearestClump = hasFixedClump ? env.clumps[card.clumpIndex!] : undefined
             let minClump = Infinity
-            for (const clump of env.clumps) {
-              const cr = clumpRadius(clump, world, 1)
-              if (cr < minClump) minClump = cr
+            if (env.clumps.length > 0 && (rho < .9 || (colorMass > 1e-4 && !hasFixedClump))) {
+              for (const clump of env.clumps) {
+                const cr = clumpRadius(clump, world, 1)
+                if (cr < minClump) {
+                  minClump = cr
+                  if (!hasFixedClump) nearestClump = clump
+                }
+              }
+              if (rho < .9 && minClump > .72) rho = Math.max(rho, Math.min(1.02, minClump * .84))
             }
-            if (minClump > .72) rho = Math.max(rho, Math.min(1.02, minClump * .84))
+            const outerness = clamp((rho - .35) / .75)
+            const occlusion = Math.max(.44, 1 - p.aoStrength * (1 - outerness) * .72 - p.aoStrength * clamp(-env3.y) * .22)
+            color.copy(inner).lerp(outer, outerness).multiplyScalar(occlusion * shade)
+            if (warmShift !== 0) {
+              color.r = Math.max(0, color.r * (1 + warmShift * .65))
+              color.g = Math.max(0, color.g * (1 + warmShift * .22))
+              color.b = Math.max(0, color.b * (1 - warmShift * .55))
+            }
+            if (colorMass > 1e-4) {
+              // Universal clump-local two-tone gouache color-mass shading: organizes each bough cluster
+              // into a coherent sunlit pigment mass & cool shaded mass with a crisp painterly terminator!
+              const pad = nearestClump
+              const px = pad ? (world.x - pad.center.x) / Math.max(.05, pad.radii.x) : (world.x - env.center.x) / Math.max(.1, env.radii.x)
+              const py = pad ? (world.y - pad.center.y) / Math.max(.05, pad.radii.y) : (world.y - env.center.y) / Math.max(.1, env.radii.y)
+              const pz = pad ? (world.z - pad.center.z) / Math.max(.05, pad.radii.z) : (world.z - env.center.z) / Math.max(.1, env.radii.z)
+              const cloud = Math.sin(px * 3.8 + pz * 2.1) * .12 + Math.sin(py * 5.4 - pz * 4.1 + px) * .09
+              const sunlight = px * .34 + py * .66 + pz * .16 + cloud + (pad?.shade ?? 0)
+              const base = MathUtils.smoothstep(sunlight, -.30, .77)
+              const paintEdge = MathUtils.smoothstep(sunlight, .08, .26)
+              const colorMix = clamp(.04 + base * .56 + paintEdge * .37 + (card.shade - .5) * p.tintVariance * .5)
+              const massScale = 1 - p.aoStrength * .22 * (1 - base)
+              const mr = MathUtils.lerp(inner.r, outer.r, colorMix) * massScale
+              const mg = MathUtils.lerp(inner.g, outer.g, colorMix) * massScale
+              const mb = MathUtils.lerp(inner.b, outer.b, colorMix) * massScale
+              color.setRGB(
+                MathUtils.lerp(color.r, mr, colorMass),
+                MathUtils.lerp(color.g, mg, colorMass),
+                MathUtils.lerp(color.b, mb, colorMass),
+              )
+            }
           }
-          const outerness = clamp((rho - .35) / .75)
-          const occlusion = Math.max(.44, 1 - p.aoStrength * (1 - outerness) * .72 - p.aoStrength * clamp(-env3.y) * .22)
-          color.copy(inner).lerp(outer, outerness).multiplyScalar(occlusion * shade)
-          if (warmShift !== 0) {
-            color.r = Math.max(0, color.r * (1 + warmShift * .65))
-            color.g = Math.max(0, color.g * (1 + warmShift * .22))
-            color.b = Math.max(0, color.b * (1 - warmShift * .55))
+          if (shaping.leafEdits) {
+            const fixedClump = card.clumpIndex !== undefined ? env.clumps[card.clumpIndex] : undefined
+            const manualHint: LeafClumpEdit | undefined = fixedClump?.manual && fixedClump.tint && (fixedClump.tintStrength ?? 0) > 0
+              ? {
+                  id: 0, position: [0, 0, 0], radius: 1, flatten: 0, density: 1, leafScale: 1,
+                  tint: fixedClump.tint, tintStrength: fixedClump.tintStrength,
+                }
+              : undefined
+            applyLeafTintAt(world, shaping.leafEdits, color, manualHint)
           }
           colors.set([color.r, color.g, color.b], v * 3)
           v++
@@ -707,31 +1051,31 @@ function mergeGeometry(a: BufferGeometry, b: BufferGeometry) {
   return out
 }
 
-/** Build individual hanging sprays attached to the edited branch skeleton. */
-function buildDrapeCurtains(
+interface DrapeAnchor {
+  pos: Vector3
+  radialXZ: Vector3
+  dropLen: number
+  width: number
+  cell: number
+  shade: number
+  yawJitter: number
+  swayDir: number
+}
+
+/** Place individual hanging spray anchors along the edited branch skeleton (optimize-independent). */
+function placeDrapeAnchors(
   limbs: Limb[],
   twigs: Twig[],
   env: Envelope,
   p: LeafParams,
   seed: number,
   shaping: LeafShaping,
-) {
+): { rawAnchors: DrapeAnchor[]; pruned: number } {
   const radiusOf = shaping.radius ?? ((q: Vector3) => envelopeRadius(env, q))
   const random = rng(seedFor(seed ^ p.leafSeed, 9850))
   const cells = p.atlasCols * p.atlasRows
   const envMinY = env.center.y - env.radii.y
   const envHeight = Math.max(.5, env.radii.y * 2)
-
-  interface DrapeAnchor {
-    pos: Vector3
-    radialXZ: Vector3
-    dropLen: number
-    width: number
-    cell: number
-    shade: number
-    yawJitter: number
-    swayDir: number
-  }
 
   const rawAnchors: DrapeAnchor[] = []
   let pruned = 0
@@ -797,6 +1141,20 @@ function buildDrapeCurtains(
       addAnchor(twig.curve.getPoint(t), twig.curve.getTangent(t), .85 + .25 * t)
     }
   }
+
+  return { rawAnchors, pruned }
+}
+
+/** Deterministic zero-RNG mesh builder from cached hanging drape spray anchors. */
+function buildDrapeGeometry(
+  rawAnchors: DrapeAnchor[],
+  twigs: Twig[],
+  env: Envelope,
+  p: LeafParams,
+  pruned: number,
+  shaping: LeafShaping,
+) {
+  const radiusOf = shaping.radius ?? ((q: Vector3) => envelopeRadius(env, q))
 
   // Thin sprays at lower LODs without closing the spaces between them.
   const reduce = clamp(shaping.reduce ?? 0, 0, .78)
@@ -915,6 +1273,7 @@ function buildDrapeCurtains(
         const tipLift = .84 + .22 * s
         const occlusion = (1 - p.aoStrength * (1 - outMix) * .72 - p.aoStrength * clamp(-envN.y) * .16) * tipLift
         col.copy(inner).lerp(outer, clamp(outMix * .78 + s * .24)).multiplyScalar(occlusion * shade)
+        if (shaping.leafEdits) applyLeafTintAt(world, shaping.leafEdits, col)
         colors[v * 3] = col.r
         colors[v * 3 + 1] = col.g
         colors[v * 3 + 2] = col.b
@@ -931,18 +1290,90 @@ function buildDrapeCurtains(
   return { twigs, envelope: env, cards, pruned, geometry, strips: 0 }
 }
 
-export function generateLeafCards(growth: { limbs: Limb[]; clusters: CrownCluster[]; config: { seed: number } },
-  params: LeafParams, shaping: LeafShaping = {}) {
+/** Cached unreduced broadleaf placement (twigs + envelope + unthinned LeafCard[] / DrapeAnchor[]).
+ *  Decouples expensive skeleton/spatial-hash placement from fast zero-RNG LOD remeshing. */
+export interface LeafPlacementCache {
+  mode: 'cards' | 'drape'
+  twigs: Twig[]
+  keepTwigsAll: Twig[]
+  envelope: Envelope
+  pruned: number
+  params: LeafParams
+  cardParams: LeafParams
+  seed: number
+  shapingBase: LeafShaping
+  strip: boolean
+  rawCards?: LeafCard[]
+  rawDrapeAnchors?: DrapeAnchor[]
+}
+
+/** Runs twig generation, envelope fitting, and full unreduced leaf/drape placement once. */
+export function computeLeafPlacement(
+  growth: { limbs: Limb[]; clusters: CrownCluster[]; config: { seed: number } },
+  params: LeafParams,
+  shaping: LeafShaping = {},
+): LeafPlacementCache {
   const seed = growth.config.seed
   const twigs = generateTwigs(growth.limbs, params, seed)
-  const envelope = fitEnvelope(twigs, growth.limbs, growth.clusters, params)
+  const mergedClusters = shaping.leafEdits?.clumps.length
+    ? [...growth.clusters, ...shaping.leafEdits.clumps.map(clumpToCrownCluster)]
+    : growth.clusters
+  const envelope = fitEnvelope(twigs, growth.limbs, mergedClusters, params)
+  const shapingBase: LeafShaping = { ...shaping }
+  delete shapingBase.flat
+  delete shapingBase.reduce
+
   if (params.cardType === 'drape') {
-    return buildDrapeCurtains(growth.limbs, twigs, envelope, params, seed, shaping)
+    const { rawAnchors, pruned } = placeDrapeAnchors(growth.limbs, twigs, envelope, params, seed, shapingBase)
+    return {
+      mode: 'drape',
+      twigs,
+      keepTwigsAll: twigs,
+      envelope,
+      pruned,
+      params,
+      cardParams: params,
+      seed,
+      shapingBase,
+      strip: false,
+      rawDrapeAnchors: rawAnchors,
+    }
   }
+
   const strip = params.cardType === 'strip'
   const cardParams = strip ? { ...params, leavesPerTwig: 0, tipLeaves: 0, cardType: 'quad' as const } : params
-  const { cards: rawCards, pruned } = distributeLeaves(growth.limbs, twigs, envelope, cardParams, seed, shaping)
-  const reduce = clamp(shaping.reduce ?? 0, 0, .78)
+  const { cards: rawCards, pruned, activeTwigIds } = distributeLeaves(growth.limbs, twigs, envelope, cardParams, seed, shapingBase)
+  // Omit orphaned bare twig sticks whose leaves were all pruned/culled (prevents dead needle spikes on foliage branches!)
+  const keepTwigsAll = (!strip && !shapingBase.clumpMassMode && shapingBase.uniformDensity && (params.leavesPerTwig > 0 || params.tipLeaves > 0))
+    ? twigs.filter(t => activeTwigIds.has(t.id))
+    : twigs
+
+  return {
+    mode: 'cards',
+    twigs,
+    keepTwigsAll,
+    envelope,
+    pruned,
+    params,
+    cardParams,
+    seed,
+    shapingBase,
+    strip,
+    rawCards,
+  }
+}
+
+/** Deterministic zero-RNG LOD remeshing from a cached `LeafPlacementCache` (100% aligned silhouettes across LOD0-LOD3). */
+export function remeshLeafPlacement(
+  cache: LeafPlacementCache,
+  opt: { flat?: boolean; reduce?: number } = {},
+) {
+  const shaping: LeafShaping = { ...cache.shapingBase, flat: opt.flat, reduce: opt.reduce }
+  if (cache.mode === 'drape') {
+    return buildDrapeGeometry(cache.rawDrapeAnchors!, cache.twigs, cache.envelope, cache.params, cache.pruned, shaping)
+  }
+  const rawCards = cache.rawCards!
+  const reduce = clamp(opt.reduce ?? 0, 0, .78)
   let cards = rawCards
   if (reduce > 0 && rawCards.length > 0) {
     // Stratified Bresenham thinning keeps coverage uniform across twigs and clumps,
@@ -957,13 +1388,21 @@ export function generateLeafCards(growth: { limbs: Limb[]; clusters: CrownCluste
       }
     }
   }
-  let geometry = buildCardGeometry(cards, envelope, cardParams, shaping)
+  let geometry = buildCardGeometry(cards, cache.envelope, cache.cardParams, shaping)
   let strips = 0
-  if (strip) {
-    const keepTwigs = reduce > 0 ? twigs.filter((_, i) => i === 0 || Math.floor(i * (1 - reduce)) !== Math.floor((i - 1) * (1 - reduce))) : twigs
-    const s = buildTwigStrips(keepTwigs, envelope, params, seed, shaping)
+  if (cache.strip) {
+    const keepTwigs = reduce > 0
+      ? cache.twigs.filter((_, i) => i === 0 || Math.floor(i * (1 - reduce)) !== Math.floor((i - 1) * (1 - reduce)))
+      : cache.twigs
+    const s = buildTwigStrips(keepTwigs, cache.envelope, cache.params, cache.seed, shaping)
     strips = s.strips
     geometry = mergeGeometry(geometry, s.geometry)
   }
-  return { twigs, envelope, cards, pruned, geometry, strips }
+  return { twigs: cache.keepTwigsAll, envelope: cache.envelope, cards, pruned: cache.pruned, geometry, strips }
+}
+
+export function generateLeafCards(growth: { limbs: Limb[]; clusters: CrownCluster[]; config: { seed: number } },
+  params: LeafParams, shaping: LeafShaping = {}) {
+  const cache = computeLeafPlacement(growth, params, shaping)
+  return { ...remeshLeafPlacement(cache, { flat: shaping.flat, reduce: shaping.reduce }), cache }
 }

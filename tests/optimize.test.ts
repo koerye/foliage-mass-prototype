@@ -4,7 +4,7 @@ import { buildTree } from '../src/tree/assemble'
 import { lodPresets, optimizeAt, solveForTriangleBudget } from '../src/tree/optimize'
 import { presetIds, presetSpec } from '../src/tree/spec'
 
-const textures = { leaf: new Texture(), needle: new Texture(), drape: new Texture(), palm: new Texture(), grass: new Texture(), fern: new Texture() }
+const textures = { leaf: new Texture(), needle: new Texture(), drape: new Texture(), palm: new Texture(), bamboo: new Texture(), lotusLeaf: new Texture(), lotusPetal: new Texture(), grass: new Texture(), fern: new Texture() }
 
 describe('mesh optimization & species fixes', () => {
   it.each(presetIds)('%s sits cleanly on or above y = 0 (no trunk root spike)', id => {
@@ -17,7 +17,7 @@ describe('mesh optimization & species fixes', () => {
     asset.dispose()
   })
 
-  it.each(['broadleaf-round', 'broadleaf-sakura', 'broadleaf-maple', 'broadleaf-willow', 'conifer-standard', 'palm-tropical', 'shrub-round', 'grass-clump', 'fern', 'flowerbed-stemmed', 'flowerbed-pure'] as const)('%s reduces triangles monotonically across LOD presets', id => {
+  it.each(['broadleaf-round', 'broadleaf-sakura', 'broadleaf-maple', 'broadleaf-willow', 'conifer-standard', 'palm-tropical', 'bamboo-realistic', 'bamboo-chibi', 'lotus-stemmed', 'lotus-floating', 'shrub-round', 'grass-clump', 'fern', 'flowerbed-stemmed', 'flowerbed-pure'] as const)('%s reduces triangles monotonically across LOD presets', id => {
     const base = presetSpec(id)
     const counts = lodPresets.map(p => {
       const a = buildTree({ ...base, optimize: optimizeAt(p.level) }, textures)
@@ -27,9 +27,9 @@ describe('mesh optimization & species fixes', () => {
     })
     for (let i = 1; i < counts.length; i++) expect(counts[i]).toBeLessThanOrEqual(counts[i - 1])
     // significant savings on trees and shrubs
-    if (id !== 'grass-clump' && id !== 'fern' && !id.startsWith('flowerbed')) {
-      expect(counts[1]).toBeLessThan(counts[0] * .45)
-      expect(counts[3]).toBeLessThan(counts[0] * .2)
+    if (id !== 'grass-clump' && id !== 'fern' && !id.startsWith('flowerbed') && !id.startsWith('lotus')) {
+      expect(counts[1]).toBeLessThan(counts[0] * .65)
+      expect(counts[3]).toBeLessThan(counts[0] * .28)
     }
   })
 

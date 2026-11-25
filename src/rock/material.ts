@@ -188,35 +188,50 @@ if (uViewMode < 0.5 && uStyle < 0.5 && uGrain > 0.01) {
 }`)
       .replace('#include <opaque_fragment>', `
 if (uViewMode < 0.5 && uStyle > 0.5) {
-  // Crisp 4-band anime cel planes (lit top / mid side / cool slate shadow / deep wedge) + broken pale ridge strokes
+  // Crisp 4-band anime cel planes (lit top / mid side / cool slate shadow / deep wedge) + broken pale ridge strokes.
+  // Dynamically follows directionalLights[0] direction & color so studio lighting moods visibly drive rock cel shading.
+  float ndl;
+  vec3 keyTint = vec3(1.0);
+  float keyGain = 1.0;
+#if NUM_DIR_LIGHTS > 0
+  ndl = dot(normalize(normal), normalize(directionalLights[0].direction));
+  vec3 rawDirCol = directionalLights[0].color;
+  float dirLum = max(dot(rawDirCol, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
+  keyTint = clamp(rawDirCol / dirLum, vec3(0.65), vec3(1.35));
+  keyGain = clamp(dirLum / 2.15, 0.72, 1.32);
+#else
   vec3 wn = normalize(vRockWorldNorm);
-  vec3 keyDir = normalize(vec3(0.24, 0.82, 0.52));
-  float ndl = dot(wn, keyDir);
+  ndl = dot(wn, normalize(vec3(0.24, 0.82, 0.52)));
+#endif
   float litBand = smoothstep(0.54, 0.60, ndl);
   float midBand = smoothstep(0.14, 0.20, ndl);
   float shadeBand = smoothstep(-0.24, -0.18, ndl);
 
-  vec3 celLit = uBaseColor * (1.10 * rockPlaneShade);
-  vec3 celMid = mix(uShadowColor, uBaseColor, 0.64) * rockPlaneShade;
-  vec3 celShade = uShadowColor * (1.02 + 0.08 * (vRockData.w - 0.5));
-  vec3 celDeep = uShadowColor * 0.66;
+  vec3 litLight = mix(vec3(1.0), keyTint, 0.72) * mix(1.0, keyGain, 0.55);
+  vec3 midLight = mix(vec3(1.0), keyTint, 0.45) * mix(1.0, keyGain, 0.35);
+  vec3 shadeLight = mix(vec3(1.0), vec3(1.0) / max(keyTint, vec3(0.55)), 0.18) * mix(1.0, keyGain, 0.20);
+
+  vec3 celLit = uBaseColor * (1.10 * rockPlaneShade) * litLight;
+  vec3 celMid = mix(uShadowColor, uBaseColor, 0.64) * rockPlaneShade * midLight;
+  vec3 celShade = uShadowColor * (1.02 + 0.08 * (vRockData.w - 0.5)) * shadeLight;
+  vec3 celDeep = uShadowColor * 0.66 * shadeLight;
 
   vec3 celCol = mix(celDeep, celShade, shadeBand);
   celCol = mix(celCol, celMid, midBand);
   celCol = mix(celCol, celLit, litBand);
 
   if (rockTopMask > 0.01) {
-    celCol = mix(celCol, uTopColor * (0.87 + 0.11 * litBand), rockTopMask * 0.83);
+    celCol = mix(celCol, uTopColor * (0.87 + 0.11 * litBand) * mix(midLight, litLight, litBand), rockTopMask * 0.83);
   }
 
   // Luminous crisp broken ridge strokes sit cleanly on top of cel planes
-  celCol = mix(celCol, uEdgeColor * 1.14, rockEdgeMask);
+  celCol = mix(celCol, uEdgeColor * 1.14 * mix(vec3(1.0), litLight, 0.5), rockEdgeMask);
   outgoingLight = celCol;
 }
 #include <opaque_fragment>`)
   }
 
-  mat.customProgramCacheKey = () => 'stylized-rock-v3'
+  mat.customProgramCacheKey = () => 'stylized-rock-v4'
   return mat
 }
 

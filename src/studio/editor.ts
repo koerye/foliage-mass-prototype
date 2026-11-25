@@ -26,6 +26,10 @@ import { foliageNormalView } from '../broadleaf/leaf-material'
 import type { Viewer } from '../viewport'
 import { CrownEnvelope } from '../tree/envelope'
 import {
+  cloneLeafEditSpec, defaultLeafEditSpec, hasLeafEdits,
+  type LeafBrushKind, type LeafBrushStroke, type LeafClumpEdit, type LeafEditSpec,
+} from '../tree/leaf-edits'
+import {
   buildNormalVectorsGeometry, cloneLeafNormalEdit, customNormalCenter, defaultLeafNormalEdit,
   type LeafNormalEditSpec, type LeafNormalMode, type NormalBrushKind, type NormalBrushStroke,
 } from '../tree/leaf-normals'
@@ -34,7 +38,8 @@ import type { BranchEdit, CrownHandle, TreeSpec, XYZ } from '../tree/spec'
 import { estimateBranchTriangles } from '../tree/wood'
 
 export type EditMode = 'select' | 'add-shape' | 'add-bare'
-export type EditSubMode = 'nodes' | 'crown' | 'normals'
+export type EditSubMode = 'nodes' | 'crown' | 'leaves' | 'normals'
+export type LeafTool = 'clump' | LeafBrushKind | 'erase'
 export type NormalTool = 'center' | NormalBrushKind | 'erase'
 export type GizmoKind = 'length' | 'pitch' | 'yaw' | 'gravity' | 'radius'
 
@@ -71,9 +76,12 @@ export interface EditorHost {
   axis(): Vector3
   skeleton?(): Skeleton | undefined
   foliageObject?(): Object3D | undefined
+  partId?(): string | undefined
   partLabel?(): string | undefined
+  canHandleShortcuts?(): boolean
   setHandles(handles: CrownHandle[], final: boolean): void
   setBranchEdits?(edits: BranchEdit[], final: boolean): void
+  setLeafEdits?(next: LeafEditSpec | undefined, final: boolean): void
   setNormalEdit?(next: LeafNormalEditSpec, final: boolean): void
   selected(handle: CrownHandle | undefined): void
   selectedBranch?(info: SelectedBranchInfo | undefined): void
@@ -83,8 +91,10 @@ export interface EditorHost {
 }
 
 interface UndoEntry {
+  partId?: string
   branchEdits: BranchEdit[]
   handles: CrownHandle[]
+  leafEdits?: LeafEditSpec
   normalEdit: LeafNormalEditSpec
 }
 
@@ -257,6 +267,31 @@ export class CrownEditor {
   private dragNormalCenter?: { plane: Plane; grab: Vector3; baseCenter: Vector3; startEdit: LeafNormalEditSpec; snapshot: UndoEntry; moved: boolean }
   private dragNormalBrush?: { strokeId: number; anchorLocal: Vector3; lastLocal: Vector3; snapshot: UndoEntry; isErase: boolean }
 
+  // Direct 3D Leaf / Foliage Sculptor visuals (hand-placed leaf clumps + 3D foliage brushes)
+  leafTool: LeafTool = 'clump'
+  leafBrushRadius = 0.90
+  leafBrushStrength = 0.72
+  leafScaleSign: 1 | -1 = 1
+  leafBrushColor = '#e68c2e'
+  leafClumpRadius = 0.85
+  leafClumpFlatten = 0.34
+  selectedLeafClumpId: number | undefined
+  private readonly leafGroup = new Group()
+  private readonly leafClumpMeshes = new Group()
+  private readonly leafBrushZones = new Group()
+  private readonly matLeafClump = new MeshBasicMaterial({ color: '#22c55e', depthTest: false })
+  private readonly matLeafClumpSelected = new MeshBasicMaterial({ color: '#fde047', depthTest: false })
+  private readonly matLeafZone = new MeshBasicMaterial({ color: '#34d399', wireframe: true, transparent: true, opacity: .24, depthTest: false })
+  private readonly matLeafZoneSel = new MeshBasicMaterial({ color: '#fde047', wireframe: true, transparent: true, opacity: .45, depthTest: false })
+  private readonly matLeafBrushDensify = new LineBasicMaterial({ color: '#34d399', transparent: true, opacity: .45, depthTest: false })
+  private readonly matLeafBrushPrune = new LineBasicMaterial({ color: '#f87171', transparent: true, opacity: .48, depthTest: false })
+  private readonly matLeafBrushScale = new LineBasicMaterial({ color: '#fbbf24', transparent: true, opacity: .45, depthTest: false })
+  private readonly matLeafBrushTint = new LineBasicMaterial({ color: '#f59e0b', transparent: true, opacity: .48, depthTest: false })
+  private readonly leafCursorMesh: LineSegments
+  private readonly leafCursorMat = new LineBasicMaterial({ color: '#34d399', transparent: true, opacity: .82, depthTest: false })
+  private dragLeafClump?: { id: number; plane: Plane; grab: Vector3; snapshot: UndoEntry; moved: boolean }
+  private dragLeafBrush?: { lastLocal: Vector3; snapshot: UndoEntry; changed: boolean }
+
   // SpeedTree Crisp Vector Gizmo Overlay (SVG + Tooltip locked to 3D branch pivot)
   private readonly overlay: HTMLDivElement
   private readonly svg: SVGSVGElement
@@ -334,7 +369,12 @@ export class CrownEditor {
     this.normalCursorMesh.visible = false
     this.normalGroup.add(this.normalVectors, this.normalBrushZones, this.normalCenterCross, this.normalCenterKnob, this.normalCursorMesh)
     this.normalGroup.visible = false
-    this.group.add(this.crownGroup, this.nodeGroup, this.normalGroup)
+    this.leafCursorMesh = new LineSegments(this.normalRingGeo, this.leafCursorMat)
+    this.leafCursorMesh.renderOrder = 1000
+    this.leafCursorMesh.visible = false
+    this.leafGroup.add(this.leafClumpMeshes, this.leafBrushZones, this.leafCursorMesh)
+    this.leafGroup.visible = false
+    this.group.add(this.crownGroup, this.nodeGroup, this.leafGroup, this.normalGroup)
     this.group.visible = false
     viewer.scene.add(this.group)
 
@@ -435,15 +475,45 @@ export class CrownEditor {
     el.addEventListener('pointerdown', this.onCanvasDown, { capture: true })
     el.addEventListener('pointermove', this.onCanvasHover)
     el.addEventListener('pointerleave', this.onCanvasLeave)
+    el.addEventListener('pointercancel', this.onCancelActiveDrag)
     window.addEventListener('pointermove', this.onWindowMove)
     window.addEventListener('pointerup', this.onWindowUp)
+    window.addEventListener('blur', this.onCancelActiveDrag)
     window.addEventListener('keydown', this.onKeyDown)
     this.removeRenderListener = viewer.addRenderListener(this.onFrameSync)
   }
 
+  /** Unwinds any active 3D drag across all 6 sub-machines and unlocks OrbitControls (prevents Alt+Tab / tool-switch lockups). */
+  cancelActiveDrag() {
+    const hadDrag = Boolean(
+      this.dragCrown || this.dragGizmo || this.dragSpline || this.dragRoot
+      || this.dragNormalCenter || this.dragNormalBrush
+      || this.dragLeafClump || this.dragLeafBrush || this.clickCandidate,
+    )
+    this.dragCrown = undefined
+    this.dragHandles = undefined
+    this.dragGizmo = undefined
+    this.dragSpline = undefined
+    this.dragRoot = undefined
+    this.dragNormalCenter = undefined
+    this.dragNormalBrush = undefined
+    this.dragLeafClump = undefined
+    this.dragLeafBrush = undefined
+    this.clickCandidate = undefined
+    if (hadDrag) {
+      this.viewer.controls.enabled = true
+      this.tooltip.hidden = true
+      this.refresh()
+    }
+  }
+
+  private onCancelActiveDrag = () => {
+    this.cancelActiveDrag()
+  }
+
   private get isGroundKind() {
     const k = this.host.spec().kind
-    return k === 'grass' || k === 'fern' || k === 'flowerbed'
+    return k === 'grass' || k === 'fern' || k === 'flowerbed' || k === 'bamboo' || k === 'lotus'
   }
 
   private currentSkeleton(): Skeleton {
@@ -456,8 +526,10 @@ export class CrownEditor {
   private snapshot(): UndoEntry {
     const s = this.host.spec()
     return {
+      partId: this.host.partId?.(),
       branchEdits: cloneEdits(s.branchEdits),
       handles: cloneHandles(s.handles),
+      leafEdits: hasLeafEdits(s.leafEdits) ? cloneLeafEditSpec(s.leafEdits) : undefined,
       normalEdit: cloneLeafNormalEdit(s.normalEdit),
     }
   }
@@ -470,10 +542,21 @@ export class CrownEditor {
 
   canUndo() { return this.undoStack.length > 0 }
 
+  clearUndo() {
+    if (this.undoStack.length === 0) return
+    this.undoStack.length = 0
+    this.host.onStateChange?.()
+  }
+
   undo(): boolean {
     const prev = this.undoStack.pop()
     if (!prev) return false
+    if (prev.partId && this.host.partId && this.host.partId() !== prev.partId) {
+      if (this.host.focusPart) this.host.focusPart(prev.partId)
+      else return false
+    }
     if (this.host.setBranchEdits) this.host.setBranchEdits(prev.branchEdits, true)
+    if (this.host.setLeafEdits) this.host.setLeafEdits(prev.leafEdits, true)
     if (this.host.setNormalEdit) this.host.setNormalEdit(prev.normalEdit, true)
     this.host.setHandles(prev.handles, true)
     this.host.onStateChange?.()
@@ -482,6 +565,7 @@ export class CrownEditor {
   }
 
   setEnabled(on: boolean) {
+    this.cancelActiveDrag()
     this.enabled = on
     this.group.visible = on
     this.overlay.hidden = !on || (this.subMode !== 'nodes' && this.subMode !== 'crown')
@@ -494,9 +578,10 @@ export class CrownEditor {
       this.hoverBadge.hidden = true
       this.tooltip.hidden = true
       this.normalCursorMesh.visible = false
+      this.leafCursorMesh.visible = false
       foliageNormalView.uNormalDebug.value = 0
     } else {
-      // Auto-select crown sculpt on ground plants when in nodes mode; keep 'normals' allowed for ALL plant kinds!
+      // Auto-select crown sculpt on ground plants when in nodes mode; keep 'leaves' & 'normals' allowed for ALL plant kinds!
       if (this.isGroundKind && this.subMode === 'nodes') {
         this.subMode = 'crown'
       } else if (this.subMode === 'nodes' && this.selectedBranchId === undefined) {
@@ -510,6 +595,7 @@ export class CrownEditor {
   }
 
   setSubMode(sub: EditSubMode) {
+    this.cancelActiveDrag()
     if (sub === 'nodes' && this.isGroundKind) sub = 'crown'
     this.subMode = sub
     this.setMode('select')
@@ -520,12 +606,88 @@ export class CrownEditor {
     this.overlay.hidden = !this.enabled || (sub !== 'nodes' && sub !== 'crown')
     this.svg.style.display = sub === 'nodes' ? '' : 'none'
     this.normalCursorMesh.visible = false
+    this.leafCursorMesh.visible = false
     foliageNormalView.uNormalDebug.value = this.enabled && sub === 'normals' && this.normalDebugColor ? 1 : 0
     if (sub === 'nodes' && this.enabled && this.selectedBranchId === undefined) {
       const sk = this.currentSkeleton()
       if (sk.branches.length > 0) this.selectedBranchId = sk.branches[0].id
     }
-    this.viewer.renderer.domElement.style.cursor = sub === 'normals' && this.normalTool !== 'center' ? 'crosshair' : ''
+    this.viewer.renderer.domElement.style.cursor = (sub === 'normals' && this.normalTool !== 'center') || sub === 'leaves' ? 'crosshair' : ''
+    this.refresh()
+    this.host.onStateChange?.()
+  }
+
+  private leafCursorColorFor(tool: LeafTool): string {
+    switch (tool) {
+      case 'prune': return '#f87171'
+      case 'scale': return '#fbbf24'
+      case 'tint': return this.leafBrushColor
+      case 'erase': return '#94a3b8'
+      default: return '#34d399'
+    }
+  }
+
+  setLeafTool(tool: LeafTool) {
+    this.leafTool = tool
+    this.leafCursorMesh.visible = false
+    this.leafCursorMat.color.set(this.leafCursorColorFor(tool))
+    if (this.enabled && this.subMode === 'leaves') {
+      this.viewer.renderer.domElement.style.cursor = 'crosshair'
+    }
+    this.host.onStateChange?.()
+  }
+
+  getSelectedLeafClump(): LeafClumpEdit | undefined {
+    if (this.selectedLeafClumpId === undefined) return undefined
+    return this.host.spec().leafEdits?.clumps.find(c => c.id === this.selectedLeafClumpId)
+  }
+
+  updateSelectedLeafClump(patch: Partial<LeafClumpEdit>, final: boolean) {
+    if (!this.host.setLeafEdits || this.selectedLeafClumpId === undefined) return
+    const cur = cloneLeafEditSpec(this.host.spec().leafEdits)
+    const item = cur.clumps.find(c => c.id === this.selectedLeafClumpId)
+    if (!item) return
+    if (final) this.pushUndo(this.snapshot())
+    Object.assign(item, patch)
+    if (!item.tint || (item.tintStrength ?? 0) <= 0) {
+      delete item.tint
+      delete item.tintStrength
+    }
+    this.host.setLeafEdits(hasLeafEdits(cur) ? cur : undefined, final)
+    this.refresh()
+    this.host.onStateChange?.()
+  }
+
+  removeSelectedLeafClump() {
+    if (!this.host.setLeafEdits || this.selectedLeafClumpId === undefined) return
+    const cur = cloneLeafEditSpec(this.host.spec().leafEdits)
+    const nextClumps = cur.clumps.filter(c => c.id !== this.selectedLeafClumpId)
+    if (nextClumps.length === cur.clumps.length) return
+    this.pushUndo(this.snapshot())
+    cur.clumps = nextClumps
+    this.selectedLeafClumpId = nextClumps[nextClumps.length - 1]?.id
+    this.host.setLeafEdits(hasLeafEdits(cur) ? cur : undefined, true)
+    this.refresh()
+    this.host.onStateChange?.()
+  }
+
+  clearLeafBrushes() {
+    if (!this.host.setLeafEdits) return
+    const cur = cloneLeafEditSpec(this.host.spec().leafEdits)
+    if (!cur.brushes.length) return
+    this.pushUndo(this.snapshot())
+    cur.brushes = []
+    this.host.setLeafEdits(hasLeafEdits(cur) ? cur : undefined, true)
+    this.refresh()
+    this.host.onStateChange?.()
+  }
+
+  resetLeafEdits() {
+    if (!this.host.setLeafEdits) return
+    if (!hasLeafEdits(this.host.spec().leafEdits)) return
+    this.pushUndo(this.snapshot())
+    this.selectedLeafClumpId = undefined
+    this.host.setLeafEdits(undefined, true)
     this.refresh()
     this.host.onStateChange?.()
   }
@@ -700,18 +862,44 @@ export class CrownEditor {
   }
 
   private onKeyDown = (e: KeyboardEvent) => {
+    if (e.defaultPrevented) return
     const tag = (e.target as HTMLElement | null)?.tagName
     if (!this.enabled || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-      if (this.undo()) e.preventDefault()
+    if (this.host.canHandleShortcuts && !this.host.canHandleShortcuts()) return
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+      if (this.undo()) {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+      }
       return
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {
-      if (this.subMode === 'nodes') this.pruneSelectedBranch()
-      else this.removeSelected()
+      if (this.subMode === 'nodes') {
+        const info = this.getSelectedBranchInfo()
+        if (info && info.role !== 'trunk') {
+          this.pruneSelectedBranch()
+          e.preventDefault()
+          e.stopImmediatePropagation()
+        }
+      } else if (this.subMode === 'crown') {
+        if (this.selectedId !== undefined) {
+          this.removeSelected()
+          e.preventDefault()
+          e.stopImmediatePropagation()
+        }
+      } else if (this.subMode === 'leaves') {
+        if (this.selectedLeafClumpId !== undefined) {
+          this.removeSelectedLeafClump()
+          e.preventDefault()
+          e.stopImmediatePropagation()
+        }
+      }
     } else if (e.key === 'Escape') {
+      this.cancelActiveDrag()
       this.setMode('select')
       if (this.subMode === 'nodes') this.selectBranch(undefined)
+      e.preventDefault()
+      e.stopImmediatePropagation()
     }
   }
 
@@ -743,11 +931,21 @@ export class CrownEditor {
     for (const child of [...this.normalBrushZones.children]) {
       this.normalBrushZones.remove(child)
       const geo = (child as Mesh | LineSegments).geometry
-      if (geo && geo !== this.knobGeo && geo !== this.zoneGeo) geo.dispose()
+      if (geo && geo !== this.knobGeo && geo !== this.zoneGeo && geo !== this.normalRingGeo) geo.dispose()
     }
   }
 
-  /** Rebuild 3D guides, crown handles, normal vectors/gizmos, and SpeedTree SVG gizmos from current spec & skeleton. */
+  private clearLeafVisuals() {
+    for (const grp of [this.leafClumpMeshes, this.leafBrushZones]) {
+      for (const child of [...grp.children]) {
+        grp.remove(child)
+        const geo = (child as Mesh | LineSegments).geometry
+        if (geo && geo !== this.knobGeo && geo !== this.zoneGeo && geo !== this.normalRingGeo) geo.dispose()
+      }
+    }
+  }
+
+  /** Rebuild 3D guides, crown handles, leaf sculpting gizmos, normal vectors/gizmos, and SpeedTree SVG gizmos. */
   refresh(handles = this.dragHandles ?? this.host.spec().handles) {
     this.cachedSkeleton = this.host.skeleton?.()
     if (!this.enabled) return
@@ -756,12 +954,16 @@ export class CrownEditor {
 
     this.crownGroup.visible = this.subMode === 'crown'
     this.nodeGroup.visible = this.subMode === 'nodes'
+    this.leafGroup.visible = this.subMode === 'leaves'
     this.normalGroup.visible = this.subMode === 'normals'
     this.overlay.hidden = this.subMode !== 'nodes' && this.subMode !== 'crown'
     this.svg.style.display = this.subMode === 'nodes' ? '' : 'none'
 
     if (this.subMode === 'crown') {
       this.refreshCrown(spec, handles)
+      this.host.selectedBranch?.(undefined)
+    } else if (this.subMode === 'leaves') {
+      this.refreshLeaves(spec)
       this.host.selectedBranch?.(undefined)
     } else if (this.subMode === 'normals') {
       this.refreshNormals(spec)
@@ -771,6 +973,46 @@ export class CrownEditor {
     }
     this.group.updateMatrixWorld(true)
     this.syncOverlayGeometry(true)
+  }
+
+  private refreshLeaves(spec: TreeSpec) {
+    this.clearLeafVisuals()
+    const le = spec.leafEdits
+    const knobSize = Math.max(.08, spec.trunk.height * .020)
+    if (le) {
+      for (const cl of le.clumps) {
+        const sel = cl.id === this.selectedLeafClumpId
+        const knob = new Mesh(this.knobGeo, sel ? this.matLeafClumpSelected : this.matLeafClump)
+        knob.position.set(cl.position[0], cl.position[1], cl.position[2])
+        knob.scale.setScalar(sel ? knobSize * 1.25 : knobSize)
+        knob.renderOrder = 1002
+        knob.userData.leafClumpId = cl.id
+        this.leafClumpMeshes.add(knob)
+
+        const zone = new Mesh(this.zoneGeo, sel ? this.matLeafZoneSel : this.matLeafZone)
+        zone.position.set(cl.position[0], cl.position[1], cl.position[2])
+        const r = Math.max(.2, cl.radius)
+        const flat = clamp(cl.flatten, 0, .85)
+        zone.scale.set(r * (1 + flat * .45) * .5, r * Math.max(.24, 1 - flat * .64) * .5, r * (1 + flat * .38) * .5)
+        zone.renderOrder = 996
+        this.leafClumpMeshes.add(zone)
+      }
+      for (const b of le.brushes) {
+        const mat = b.kind === 'prune'
+          ? this.matLeafBrushPrune
+          : b.kind === 'scale'
+            ? this.matLeafBrushScale
+            : b.kind === 'tint'
+              ? this.matLeafBrushTint
+              : this.matLeafBrushDensify
+        const ring = new LineSegments(this.normalRingGeo, mat)
+        ring.position.set(b.position[0], b.position[1], b.position[2])
+        ring.scale.setScalar(b.radius)
+        ring.renderOrder = 995
+        this.leafBrushZones.add(ring)
+      }
+    }
+    this.leafCursorMat.color.set(this.leafCursorColorFor(this.leafTool))
   }
 
   private refreshNormals(spec: TreeSpec) {
@@ -1333,18 +1575,29 @@ export class CrownEditor {
     return this.raycaster
   }
 
-  private raycastFoliagePoint(e: PointerEvent): Vector3 | undefined {
+  private raycastFoliagePoint(e: PointerEvent, includeWood = false): Vector3 | undefined {
     const foliageRoot = this.host.foliageObject?.()
     if (!foliageRoot) return undefined
     const meshes: Mesh[] = []
     foliageRoot.traverse(o => {
-      if (o instanceof Mesh && o.visible && o.userData?.role === 'foliage' && o.name !== 'Ambient petals') meshes.push(o)
+      if (o instanceof Mesh && o.visible && o.name !== 'Ambient petals') {
+        const role = o.userData?.role
+        if (role === 'foliage' || (includeWood && role === 'wood')) meshes.push(o)
+      }
     })
     if (!meshes.length) return undefined
     const hits = this.ray(e).intersectObjects(meshes, false)
     if (!hits.length) return undefined
     this.group.updateMatrixWorld(true)
     return this.group.worldToLocal(hits[0].point.clone())
+  }
+
+  private pickLeafClumpKnob(e: PointerEvent): { id: number; knob: Mesh } | undefined {
+    const knobs = this.leafClumpMeshes.children.filter((c): c is Mesh => c instanceof Mesh && c.userData.leafClumpId !== undefined)
+    if (!knobs.length) return undefined
+    const hit = this.ray(e).intersectObjects(knobs, false)[0]
+    if (!hit) return undefined
+    return { id: hit.object.userData.leafClumpId as number, knob: hit.object as Mesh }
   }
 
   /** Depth-sorted front-to-back CrownHandle picking (supports ray hit + 16px screen radius for overlapping handles). */
@@ -1377,7 +1630,29 @@ export class CrownEditor {
   }
 
   private onCanvasHover = (e: PointerEvent) => {
-    if (!this.enabled || this.dragGizmo || this.dragSpline || this.dragRoot || this.dragNormalCenter || this.dragNormalBrush || this.dragCrown) return
+    if (!this.enabled || this.dragGizmo || this.dragSpline || this.dragRoot || this.dragNormalCenter || this.dragNormalBrush || this.dragLeafClump || this.dragLeafBrush || this.dragCrown) return
+    if (this.subMode === 'leaves') {
+      const hitClump = this.pickLeafClumpKnob(e)
+      if (hitClump) {
+        this.leafCursorMesh.visible = false
+        this.viewer.renderer.domElement.style.cursor = 'grab'
+        return
+      }
+      const includeWood = this.leafTool === 'clump' || this.leafTool === 'densify'
+      const pt = this.raycastFoliagePoint(e, includeWood)
+      if (pt) {
+        this.leafCursorMesh.position.copy(pt)
+        const rad = this.leafTool === 'clump' ? this.leafClumpRadius * .5 : this.leafBrushRadius
+        this.leafCursorMesh.scale.setScalar(rad)
+        this.leafCursorMat.color.set(this.leafCursorColorFor(this.leafTool))
+        this.leafCursorMesh.visible = true
+        this.viewer.renderer.domElement.style.cursor = 'crosshair'
+      } else {
+        this.leafCursorMesh.visible = false
+        this.viewer.renderer.domElement.style.cursor = ''
+      }
+      return
+    }
     if (this.subMode === 'normals') {
       if (this.normalTool !== 'center') {
         const pt = this.raycastFoliagePoint(e)
@@ -1458,6 +1733,7 @@ export class CrownEditor {
     this.hoverLine.visible = false
     this.hoverBadge.hidden = true
     this.normalCursorMesh.visible = false
+    this.leafCursorMesh.visible = false
   }
 
   private onCanvasDown = (e: PointerEvent) => {
@@ -1467,6 +1743,102 @@ export class CrownEditor {
     if (this.subMode === 'nodes') {
       // Allow free camera orbiting on drag; short click selects a branch in 3D!
       this.clickCandidate = { x: e.clientX, y: e.clientY }
+      return
+    }
+
+    if (this.subMode === 'leaves') {
+      const spec = this.host.spec()
+      if (!this.host.setLeafEdits) return
+      // 1. Clicking an existing hand-placed leaf clump knob selects & drags it in 3D!
+      const hitClump = this.pickLeafClumpKnob(e)
+      if (hitClump && this.leafTool !== 'erase') {
+        e.stopImmediatePropagation()
+        e.preventDefault()
+        this.selectedLeafClumpId = hitClump.id
+        const normal = new Vector3()
+        this.viewer.camera.getWorldDirection(normal)
+        const worldPos = hitClump.knob.getWorldPosition(new Vector3())
+        const plane = new Plane().setFromNormalAndCoplanarPoint(normal, worldPos)
+        const onPlane = new Vector3()
+        this.ray(e).ray.intersectPlane(plane, onPlane)
+        this.dragLeafClump = {
+          id: hitClump.id,
+          plane,
+          grab: worldPos.clone().sub(onPlane),
+          snapshot: this.snapshot(),
+          moved: false,
+        }
+        this.viewer.controls.enabled = false
+        this.refresh()
+        this.host.onStateChange?.()
+        return
+      }
+      // 2. Plant a new hand-placed leaf clump (only supported natively on broadleaf)
+      if (this.leafTool === 'clump') {
+        const localHit = this.raycastFoliagePoint(e, true)
+        if (localHit) {
+          e.stopImmediatePropagation()
+          e.preventDefault()
+          this.pushUndo(this.snapshot())
+          const cur = cloneLeafEditSpec(spec.leafEdits)
+          const nextId = Math.max(0, ...cur.clumps.map(c => c.id)) + 1
+          const clump: LeafClumpEdit = {
+            id: nextId,
+            position: xyz(localHit),
+            radius: this.leafClumpRadius,
+            flatten: this.leafClumpFlatten,
+            density: 1.25,
+            leafScale: 1,
+          }
+          cur.clumps.push(clump)
+          if (cur.clumps.length > 64) cur.clumps.shift()
+          this.selectedLeafClumpId = nextId
+          this.host.setLeafEdits(cur, true)
+          this.refresh()
+          this.host.onStateChange?.()
+          return
+        }
+        if (this.host.otherParts && this.host.focusPart) this.clickCandidate = { x: e.clientX, y: e.clientY }
+        return
+      }
+      // 3. Direct 3D foliage brush painting (densify / prune / scale / tint / erase)
+      const localHit = this.raycastFoliagePoint(e, this.leafTool === 'densify' || this.leafTool === 'erase')
+      if (localHit) {
+        e.stopImmediatePropagation()
+        e.preventDefault()
+        const snap = this.snapshot()
+        const cur = cloneLeafEditSpec(spec.leafEdits)
+        let changed = false
+        if (this.leafTool === 'erase') {
+          const rCut = this.leafBrushRadius * 1.1
+          const b0 = cur.brushes.length, c0 = cur.clumps.length
+          cur.brushes = cur.brushes.filter(b => Math.hypot(b.position[0] - localHit.x, b.position[1] - localHit.y, b.position[2] - localHit.z) > rCut)
+          cur.clumps = cur.clumps.filter(c => Math.hypot(c.position[0] - localHit.x, c.position[1] - localHit.y, c.position[2] - localHit.z) > rCut)
+          if (this.selectedLeafClumpId !== undefined && !cur.clumps.some(c => c.id === this.selectedLeafClumpId)) {
+            this.selectedLeafClumpId = cur.clumps[cur.clumps.length - 1]?.id
+          }
+          changed = cur.brushes.length !== b0 || cur.clumps.length !== c0
+        } else {
+          const nextId = Math.max(0, ...cur.brushes.map(b => b.id)) + 1
+          const sign = this.leafTool === 'scale' ? (e.altKey ? -this.leafScaleSign : this.leafScaleSign) : 1
+          const stroke: LeafBrushStroke = {
+            id: nextId,
+            kind: this.leafTool,
+            position: xyz(localHit),
+            radius: this.leafBrushRadius,
+            strength: Number((this.leafBrushStrength * sign).toFixed(3)),
+            ...(this.leafTool === 'tint' ? { color: this.leafBrushColor } : {}),
+          }
+          cur.brushes.push(stroke)
+          if (cur.brushes.length > 120) cur.brushes.shift()
+          changed = true
+        }
+        if (changed) this.host.setLeafEdits(hasLeafEdits(cur) ? cur : undefined, false)
+        this.dragLeafBrush = { lastLocal: localHit.clone(), snapshot: snap, changed }
+        this.viewer.controls.enabled = false
+        return
+      }
+      if (this.host.otherParts && this.host.focusPart) this.clickCandidate = { x: e.clientX, y: e.clientY }
       return
     }
 
@@ -1713,6 +2085,55 @@ export class CrownEditor {
       return
     }
 
+    if (this.dragLeafClump && this.host.setLeafEdits) {
+      const dc = this.dragLeafClump
+      const worldPt = new Vector3()
+      if (!this.ray(e).ray.intersectPlane(dc.plane, worldPt)) return
+      worldPt.add(dc.grab)
+      this.group.updateMatrixWorld(true)
+      const localPt = this.group.worldToLocal(worldPt)
+      const cur = cloneLeafEditSpec(this.host.spec().leafEdits)
+      const item = cur.clumps.find(c => c.id === dc.id)
+      if (!item) return
+      item.position = xyz(localPt)
+      dc.moved = true
+      this.host.setLeafEdits(cur, false)
+      return
+    }
+
+    if (this.dragLeafBrush && this.host.setLeafEdits) {
+      const db = this.dragLeafBrush
+      const localHit = this.raycastFoliagePoint(e, this.leafTool === 'densify' || this.leafTool === 'erase')
+      if (!localHit) return
+      const cur = cloneLeafEditSpec(this.host.spec().leafEdits)
+      if (this.leafTool === 'erase') {
+        const rCut = this.leafBrushRadius * 1.1
+        const b0 = cur.brushes.length, c0 = cur.clumps.length
+        cur.brushes = cur.brushes.filter(b => Math.hypot(b.position[0] - localHit.x, b.position[1] - localHit.y, b.position[2] - localHit.z) > rCut)
+        cur.clumps = cur.clumps.filter(c => Math.hypot(c.position[0] - localHit.x, c.position[1] - localHit.y, c.position[2] - localHit.z) > rCut)
+        if (cur.brushes.length !== b0 || cur.clumps.length !== c0) {
+          db.changed = true
+          this.host.setLeafEdits(hasLeafEdits(cur) ? cur : undefined, false)
+        }
+      } else if (this.leafTool !== 'clump' && localHit.distanceTo(db.lastLocal) >= Math.max(0.20, this.leafBrushRadius * 0.44)) {
+        const nextId = Math.max(0, ...cur.brushes.map(b => b.id)) + 1
+        const sign = this.leafTool === 'scale' ? (e.altKey ? -this.leafScaleSign : this.leafScaleSign) : 1
+        cur.brushes.push({
+          id: nextId,
+          kind: this.leafTool,
+          position: xyz(localHit),
+          radius: this.leafBrushRadius,
+          strength: Number((this.leafBrushStrength * sign).toFixed(3)),
+          ...(this.leafTool === 'tint' ? { color: this.leafBrushColor } : {}),
+        })
+        if (cur.brushes.length > 120) cur.brushes.shift()
+        db.lastLocal.copy(localHit)
+        db.changed = true
+        this.host.setLeafEdits(cur, false)
+      }
+      return
+    }
+
     if (this.dragNormalCenter && this.host.setNormalEdit) {
       const dc = this.dragNormalCenter
       const worldPt = new Vector3()
@@ -1827,6 +2248,30 @@ export class CrownEditor {
         this.commitBranchEdit(cur, true)
       }
       this.syncOverlayGeometry(true)
+      return
+    }
+
+    if (this.dragLeafClump) {
+      const dc = this.dragLeafClump
+      this.dragLeafClump = undefined
+      this.viewer.controls.enabled = true
+      if (dc.moved && this.host.setLeafEdits) {
+        this.pushUndo(dc.snapshot)
+        const cur = cloneLeafEditSpec(this.host.spec().leafEdits)
+        this.host.setLeafEdits(hasLeafEdits(cur) ? cur : undefined, true)
+      }
+      return
+    }
+
+    if (this.dragLeafBrush) {
+      const db = this.dragLeafBrush
+      this.dragLeafBrush = undefined
+      this.viewer.controls.enabled = true
+      if (db.changed && this.host.setLeafEdits) {
+        this.pushUndo(db.snapshot)
+        const cur = cloneLeafEditSpec(this.host.spec().leafEdits)
+        this.host.setLeafEdits(hasLeafEdits(cur) ? cur : undefined, true)
+      }
       return
     }
 
@@ -1953,17 +2398,21 @@ export class CrownEditor {
   }
 
   dispose() {
+    this.cancelActiveDrag()
     this.removeRenderListener()
     const el = this.viewer.renderer.domElement
     el.removeEventListener('pointerdown', this.onCanvasDown, { capture: true })
     el.removeEventListener('pointermove', this.onCanvasHover)
     el.removeEventListener('pointerleave', this.onCanvasLeave)
+    el.removeEventListener('pointercancel', this.onCancelActiveDrag)
     window.removeEventListener('pointermove', this.onWindowMove)
     window.removeEventListener('pointerup', this.onWindowUp)
+    window.removeEventListener('blur', this.onCancelActiveDrag)
     window.removeEventListener('keydown', this.onKeyDown)
     this.clearHandleMeshes()
     this.clearSelectTube()
     this.clearNormalZones()
+    this.clearLeafVisuals()
     foliageNormalView.uNormalDebug.value = 0
     this.wire.geometry.dispose(); this.wire.material.dispose()
     this.shell.geometry.dispose(); this.shell.material.dispose()
@@ -1974,6 +2423,10 @@ export class CrownEditor {
     this.normalVectors.geometry.dispose(); this.normalVectors.material.dispose()
     this.normalCenterCross.geometry.dispose(); this.normalCenterCross.material.dispose()
     this.normalCenterMat.dispose(); this.normalBrushMat.dispose(); this.normalCursorMat.dispose(); this.normalRingGeo.dispose()
+    this.matLeafClump.dispose(); this.matLeafClumpSelected.dispose()
+    this.matLeafZone.dispose(); this.matLeafZoneSel.dispose()
+    this.matLeafBrushDensify.dispose(); this.matLeafBrushPrune.dispose()
+    this.matLeafBrushScale.dispose(); this.matLeafBrushTint.dispose(); this.leafCursorMat.dispose()
     this.knobGeo.dispose(); this.zoneGeo.dispose()
     this.matShape.dispose(); this.matBackShape.dispose(); this.matHover.dispose()
     this.matSelected.dispose(); this.matBare.dispose()

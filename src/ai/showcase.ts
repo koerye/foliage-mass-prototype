@@ -490,6 +490,7 @@ export function wishingTreeShowcase(): AiSceneSpec {
     accent: 'none' as const,
   }
   const barkMeta = {
+    barkStyle: 'driftwood' as const,
     barkColor: '#b59a78',
     barkScale: .82,
     barkDetail: .46,

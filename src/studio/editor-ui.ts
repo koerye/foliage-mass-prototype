@@ -1,18 +1,19 @@
 // Shared SpeedTree-style Node Edit + Crown Sculpt toolbar markup & bindings
 // used identically by Classic Studio (broadleaf.html) and AI Mode (ai.html).
 import type { CrownHandle, LeafNormalMode, TreeSpec } from '../tree/spec'
-import type { CrownEditor, EditSubMode, NormalTool, SelectedBranchInfo } from './editor'
+import type { CrownEditor, EditSubMode, LeafTool, NormalTool, SelectedBranchInfo } from './editor'
 
 const fmt = new Intl.NumberFormat('zh-CN')
 
 export function editToolsHtml(toggleLabel = '✎ 节点编辑'): string {
   return `
 <div class="edit-tools" id="edit-tools">
-  <button id="edit-toggle" type="button" aria-pressed="false" title="开启 SpeedTree 风格枝干节点编辑、树冠塑形与树叶自定义法线编辑">${toggleLabel}</button>
+  <button id="edit-toggle" type="button" aria-pressed="false" title="开启 SpeedTree 风格枝干节点编辑、树冠塑形、树叶笔刷/补叶簇与树叶自定义法线编辑">${toggleLabel}</button>
   <div class="edit-group st-edit-panel" id="edit-group" hidden>
     <div class="st-mode-tabs" role="tablist" aria-label="编辑子模式">
       <button type="button" data-edit-sub="nodes" aria-pressed="true" title="SpeedTree 模式：直接点选三维枝干，拖拽弯弧/金色柄/曲线节点精细编辑">❖ 枝干</button>
       <button type="button" data-edit-sub="crown" aria-pressed="false" title="树冠包络控制点与裸枝区塑形">◎ 树冠</button>
+      <button type="button" data-edit-sub="leaves" aria-pressed="false" title="直接编辑树叶：3D 种植可拖拽补叶簇、增密/疏剪/放大缩小/局部染色笔刷">🍃 树叶</button>
       <button type="button" data-edit-sub="normals" aria-pressed="false" title="树叶自定义法线编辑：拖拽 3D 法线球心、树冠局部法线笔刷、RGB 法线视图与 3D 法线向量">↗ 法线</button>
     </div>
 
@@ -68,6 +69,57 @@ export function editToolsHtml(toggleLabel = '✎ 节点编辑'): string {
       </div>
       <label class="edit-radius" id="radius-row" hidden><span>影响半径</span><input id="handle-radius" type="range" min=".2" max="6" step=".05"><output id="handle-radius-out"></output></label>
       <p class="edit-hint" id="edit-hint">拖动橙色点微调树冠外廓；红色球为裸枝区。</p>
+    </div>
+
+    <div id="edit-leaves-pane" class="st-pane" hidden>
+      <div class="st-node-hud">
+        <div class="st-hud-head">
+          <span>🍃 树叶直接编辑</span>
+          <b id="st-leaf-count">叶簇 0 · 笔刷 0</b>
+        </div>
+        <div class="st-hud-grid">
+          <span>当前工具:</span><output id="st-leaf-tool-label">＋ 补叶簇</output>
+          <span>选中叶簇:</span><output id="st-leaf-sel">点击枝干/树冠种植或拖绿球</output>
+        </div>
+      </div>
+
+      <div class="st-btn-row" role="group" aria-label="树叶编辑工具">
+        <button type="button" data-leaf-tool="clump" aria-pressed="true" title="点击枝干/树冠种植可 3D 拖拽的局部补叶簇（阔叶树专用）">＋ 补叶簇</button>
+        <button type="button" data-leaf-tool="densify" aria-pressed="false" title="在树冠上按住涂刷，局部加密补叶（阔叶树专用）">🌿 增密刷</button>
+        <button type="button" data-leaf-tool="prune" aria-pressed="false" title="在树冠上按住涂刷，局部疏剪擦除叶片、雕出透空层次">✂ 疏剪刷</button>
+      </div>
+      <div class="st-btn-row" role="group" aria-label="树叶塑形与染色工具">
+        <button type="button" data-leaf-tool="scale" aria-pressed="false" title="在树冠上按住涂刷局部放大或缩小叶片（按住 Alt 反向）">⤢ 大小刷</button>
+        <button type="button" data-leaf-tool="tint" aria-pressed="false" title="在树冠上涂刷局部叶色（如秋叶红尖、向阳暖金、背阴深绿）">🎨 染色刷</button>
+        <button type="button" data-leaf-tool="erase" aria-pressed="false" title="点击/涂刷擦除附近的补叶簇与树叶笔刷">🧹 擦除</button>
+      </div>
+
+      <div class="st-sliders" id="st-leaf-brush-sliders">
+        <label class="st-slider"><span>半径</span><input id="st-leaf-rad" type="range" min="0.2" max="3.0" step="0.05" value="0.90"><output id="st-leaf-rad-out">0.90 m</output></label>
+        <label class="st-slider" id="st-leaf-str-row"><span>强度</span><input id="st-leaf-str" type="range" min="0.1" max="1" step="0.02" value="0.72"><output id="st-leaf-str-out">72%</output></label>
+        <div class="st-btn-row" id="st-leaf-scale-dir" hidden>
+          <button type="button" id="st-leaf-scale-up" aria-pressed="true">＋ 放大叶片</button>
+          <button type="button" id="st-leaf-scale-down" aria-pressed="false">－ 缩小叶片</button>
+        </div>
+        <label class="st-slider" id="st-leaf-color-row" hidden><span>叶色</span><input id="st-leaf-color" type="color" value="#e68c2e"><output id="st-leaf-color-out">#e68c2e</output></label>
+      </div>
+
+      <div class="st-sliders" id="st-leaf-clump-sliders" hidden>
+        <label class="st-slider"><span>半径</span><input id="st-clump-rad" type="range" min="0.2" max="3.0" step="0.05" value="0.85"><output id="st-clump-rad-out">0.85 m</output></label>
+        <label class="st-slider"><span>压扁</span><input id="st-clump-flat" type="range" min="0" max="0.85" step="0.02" value="0.34"><output id="st-clump-flat-out">34%</output></label>
+        <label class="st-slider"><span>密度</span><input id="st-clump-dens" type="range" min="0.3" max="3.0" step="0.05" value="1.25"><output id="st-clump-dens-out">1.25×</output></label>
+        <label class="st-slider"><span>叶大小</span><input id="st-clump-scale" type="range" min="0.4" max="2.2" step="0.05" value="1.00"><output id="st-clump-scale-out">1.00×</output></label>
+        <label class="st-slider"><span>叶色</span><input id="st-clump-tint" type="color" value="#84e034"><output id="st-clump-tint-out">0%</output></label>
+        <label class="st-slider"><span>染色</span><input id="st-clump-tint-str" type="range" min="0" max="1" step="0.02" value="0"><output id="st-clump-tint-str-out">0%</output></label>
+      </div>
+
+      <div class="st-btn-row">
+        <button type="button" id="st-leaf-undo" title="撤销上一步树叶编辑 (Ctrl+Z)" disabled>↩ 撤销</button>
+        <button type="button" id="st-leaf-del-clump" title="删除当前选中补叶簇 (Delete)" disabled>删除叶簇</button>
+        <button type="button" id="st-leaf-clear-brushes" title="仅清空涂刷笔刷">清空笔刷</button>
+        <button type="button" id="st-leaf-reset" title="重置全部补叶簇与树叶笔刷">重置叶编</button>
+      </div>
+      <p class="edit-hint" id="st-leaf-hint">点击树枝或树冠可种植 3D 补叶簇并拖动塑形；或切换增密/疏剪/大小/染色刷直接在树叶上涂刷，导出 GLB/LOD 完整保留。</p>
     </div>
 
     <div id="edit-normals-pane" class="st-pane" hidden>
@@ -133,8 +185,47 @@ export function bindEditToolsUi(opts: EditToolsOptions) {
   const group = byId('edit-group')
   const nodesPane = byId('edit-nodes-pane')
   const crownPane = byId('edit-crown-pane')
+  const leavesPane = byId('edit-leaves-pane')
   const normalsPane = byId('edit-normals-pane')
   const tabBtns = [...document.querySelectorAll<HTMLButtonElement>('[data-edit-sub]')]
+
+  const leafCountEl = byId('st-leaf-count')
+  const leafToolLabelEl = byId('st-leaf-tool-label')
+  const leafSelEl = byId('st-leaf-sel')
+  const leafToolBtns = [...document.querySelectorAll<HTMLButtonElement>('[data-leaf-tool]')]
+  const leafBrushSliders = byId('st-leaf-brush-sliders')
+  const leafRadEl = byId<HTMLInputElement>('st-leaf-rad')
+  const leafRadOut = byId('st-leaf-rad-out')
+  const leafStrRow = byId('st-leaf-str-row')
+  const leafStrEl = byId<HTMLInputElement>('st-leaf-str')
+  const leafStrOut = byId('st-leaf-str-out')
+  const leafScaleDirRow = byId('st-leaf-scale-dir')
+  const leafScaleUpBtn = byId<HTMLButtonElement>('st-leaf-scale-up')
+  const leafScaleDownBtn = byId<HTMLButtonElement>('st-leaf-scale-down')
+  const leafColorRow = byId('st-leaf-color-row')
+  const leafColorEl = byId<HTMLInputElement>('st-leaf-color')
+  const leafColorOut = byId('st-leaf-color-out')
+  const leafClumpSliders = byId('st-leaf-clump-sliders')
+  const clumpRadEl = byId<HTMLInputElement>('st-clump-rad')
+  const clumpRadOut = byId('st-clump-rad-out')
+  const clumpFlatEl = byId<HTMLInputElement>('st-clump-flat')
+  const clumpFlatOut = byId('st-clump-flat-out')
+  const clumpDensEl = byId<HTMLInputElement>('st-clump-dens')
+  const clumpDensOut = byId('st-clump-dens-out')
+  const clumpScaleEl = byId<HTMLInputElement>('st-clump-scale')
+  const clumpScaleOut = byId('st-clump-scale-out')
+  const clumpTintEl = byId<HTMLInputElement>('st-clump-tint')
+  const clumpTintOut = byId('st-clump-tint-out')
+  const clumpTintStrEl = byId<HTMLInputElement>('st-clump-tint-str')
+  const clumpTintStrOut = byId('st-clump-tint-str-out')
+  const leafUndoBtn = byId<HTMLButtonElement>('st-leaf-undo')
+  const leafDelClumpBtn = byId<HTMLButtonElement>('st-leaf-del-clump')
+  const leafClearBrushesBtn = byId<HTMLButtonElement>('st-leaf-clear-brushes')
+  const leafResetBtn = byId<HTMLButtonElement>('st-leaf-reset')
+  const leafHintEl = byId('st-leaf-hint')
+  const leafToolNames: Record<LeafTool, string> = {
+    clump: '＋ 补叶簇', densify: '🌿 增密刷', prune: '✂ 疏剪刷', scale: '⤢ 大小刷', tint: '🎨 染色刷', erase: '🧹 擦除',
+  }
 
   const normCountEl = byId('st-norm-count')
   const normModeEl = byId('st-norm-mode')
@@ -199,7 +290,7 @@ export function bindEditToolsUi(opts: EditToolsOptions) {
     const ed = opts.editor
     const sub: EditSubMode = ed?.subMode ?? 'nodes'
     const spec = opts.getSpec()
-    const ground = spec ? (spec.kind === 'grass' || spec.kind === 'fern' || spec.kind === 'flowerbed') : false
+    const ground = spec ? (spec.kind === 'grass' || spec.kind === 'fern' || spec.kind === 'flowerbed' || spec.kind === 'bamboo' || spec.kind === 'lotus') : false
     for (const btn of tabBtns) {
       const isNodes = btn.dataset.editSub === 'nodes'
       btn.disabled = isNodes && ground
@@ -207,10 +298,72 @@ export function bindEditToolsUi(opts: EditToolsOptions) {
     }
     nodesPane.hidden = sub !== 'nodes'
     crownPane.hidden = sub !== 'crown'
+    leavesPane.hidden = sub !== 'leaves'
     normalsPane.hidden = sub !== 'normals'
     undoBtn.disabled = !ed?.canUndo()
+    leafUndoBtn.disabled = !ed?.canUndo()
     normUndoBtn.disabled = !ed?.canUndo()
     resetAllBtn.disabled = !(spec?.branchEdits?.length)
+    const le = spec?.leafEdits
+    const isBroadleaf = !spec || spec.kind === 'broadleaf'
+    const curLeafTool: LeafTool = ed?.leafTool ?? 'clump'
+    leafCountEl.textContent = `叶簇 ${le?.clumps.length ?? 0} · 笔刷 ${le?.brushes.length ?? 0}`
+    leafToolLabelEl.textContent = leafToolNames[curLeafTool]
+    for (const b of leafToolBtns) {
+      const t = b.dataset.leafTool as LeafTool
+      b.disabled = !isBroadleaf && (t === 'clump' || t === 'densify')
+      b.setAttribute('aria-pressed', String(t === curLeafTool))
+    }
+    const selClump = ed?.getSelectedLeafClump()
+    leafSelEl.textContent = selClump
+      ? `叶簇 #${selClump.id} (${selClump.radius.toFixed(2)}m)`
+      : (isBroadleaf ? '点击枝干/树冠种植或拖绿球' : '非阔叶支持疏剪/大小/染色刷')
+    leafDelClumpBtn.disabled = !selClump
+    leafClearBrushesBtn.disabled = !(le?.brushes.length)
+    leafResetBtn.disabled = !(le && (le.clumps.length || le.brushes.length))
+    leafBrushSliders.hidden = curLeafTool === 'clump' && Boolean(selClump)
+    leafStrRow.hidden = curLeafTool === 'clump' || curLeafTool === 'erase'
+    leafScaleDirRow.hidden = curLeafTool !== 'scale'
+    leafColorRow.hidden = curLeafTool !== 'tint'
+    leafClumpSliders.hidden = !selClump
+    if (ed) {
+      const activeRad = curLeafTool === 'clump' ? ed.leafClumpRadius : ed.leafBrushRadius
+      leafRadEl.value = String(activeRad)
+      leafRadOut.textContent = `${activeRad.toFixed(2)} m`
+      leafStrEl.value = String(ed.leafBrushStrength)
+      leafStrOut.textContent = `${Math.round(ed.leafBrushStrength * 100)}%`
+      leafScaleUpBtn.setAttribute('aria-pressed', String(ed.leafScaleSign > 0))
+      leafScaleDownBtn.setAttribute('aria-pressed', String(ed.leafScaleSign < 0))
+      leafColorEl.value = ed.leafBrushColor
+      leafColorOut.textContent = ed.leafBrushColor
+    }
+    if (selClump) {
+      clumpRadEl.value = String(selClump.radius)
+      clumpRadOut.textContent = `${selClump.radius.toFixed(2)} m`
+      clumpFlatEl.value = String(selClump.flatten)
+      clumpFlatOut.textContent = `${Math.round(selClump.flatten * 100)}%`
+      clumpDensEl.value = String(selClump.density)
+      clumpDensOut.textContent = `${selClump.density.toFixed(2)}×`
+      clumpScaleEl.value = String(selClump.leafScale)
+      clumpScaleOut.textContent = `${selClump.leafScale.toFixed(2)}×`
+      const cTint = selClump.tint ?? '#84e034'
+      const cStr = selClump.tintStrength ?? 0
+      clumpTintEl.value = cTint
+      clumpTintOut.textContent = `${Math.round(cStr * 100)}%`
+      clumpTintStrEl.value = String(cStr)
+      clumpTintStrOut.textContent = `${Math.round(cStr * 100)}%`
+    }
+    leafHintEl.textContent = curLeafTool === 'clump'
+      ? '点击枝干/树冠种植 3D 补叶簇，拖动绿球移动位置，调压扁可雕盆景云片；Delete 删除选中。'
+      : curLeafTool === 'scale'
+        ? '按住涂刷树冠局部放大/缩小叶片（按住 Alt 键快速反向）；支持全部树种。'
+        : curLeafTool === 'tint'
+          ? '选定叶色后直接在树冠涂刷局部色彩（秋叶渐变/暖阳高光/背阴深色）。'
+          : curLeafTool === 'prune'
+            ? '在树冠上按住涂刷局部疏剪/镂空叶片，轻松雕出透光天窗与灵动剪影。'
+            : curLeafTool === 'densify'
+              ? '在稀疏树冠或裸枝附近涂刷，即时局部加密补叶。'
+              : '点击或涂刷擦除附近的补叶簇与树叶笔刷。'
     const ne = spec?.normalEdit
     normCountEl.textContent = `局部笔刷: ${ne?.brushes?.length ?? 0}`
     normModeEl.textContent = normModeLabels[ne?.mode ?? 'auto'] ?? '默认'
@@ -396,6 +549,89 @@ export function bindEditToolsUi(opts: EditToolsOptions) {
   radius.onchange = () => {
     const spec = opts.getSpec()
     if (spec) opts.onHandlesChange(spec.handles, true)
+  }
+
+  // Direct 3D Leaf Sculptor controls
+  for (const btn of leafToolBtns) {
+    btn.onclick = () => {
+      opts.editor?.setLeafTool(btn.dataset.leafTool as LeafTool)
+      syncModeTabs()
+    }
+  }
+  leafRadEl.oninput = () => {
+    const v = leafRadEl.valueAsNumber
+    leafRadOut.textContent = `${v.toFixed(2)} m`
+    if (opts.editor) {
+      if (opts.editor.leafTool === 'clump') opts.editor.leafClumpRadius = v
+      else opts.editor.leafBrushRadius = v
+    }
+  }
+  leafStrEl.oninput = () => {
+    const v = leafStrEl.valueAsNumber
+    leafStrOut.textContent = `${Math.round(v * 100)}%`
+    if (opts.editor) opts.editor.leafBrushStrength = v
+  }
+  leafScaleUpBtn.onclick = () => {
+    if (opts.editor) opts.editor.leafScaleSign = 1
+    syncModeTabs()
+  }
+  leafScaleDownBtn.onclick = () => {
+    if (opts.editor) opts.editor.leafScaleSign = -1
+    syncModeTabs()
+  }
+  leafColorEl.oninput = () => {
+    if (opts.editor) opts.editor.leafBrushColor = leafColorEl.value
+    leafColorOut.textContent = leafColorEl.value
+  }
+  const bindClumpSlider = (
+    input: HTMLInputElement,
+    out: HTMLElement,
+    fmtVal: (v: number) => string,
+    makePatch: (v: number) => Partial<import('../tree/spec').LeafClumpEdit>,
+  ) => {
+    input.oninput = () => {
+      const v = input.valueAsNumber
+      out.textContent = fmtVal(v)
+      opts.editor?.updateSelectedLeafClump(makePatch(v), false)
+    }
+    input.onchange = () => {
+      const v = input.valueAsNumber
+      opts.editor?.updateSelectedLeafClump(makePatch(v), true)
+    }
+  }
+  bindClumpSlider(clumpRadEl, clumpRadOut, v => `${v.toFixed(2)} m`, v => ({ radius: v }))
+  bindClumpSlider(clumpFlatEl, clumpFlatOut, v => `${Math.round(v * 100)}%`, v => ({ flatten: v }))
+  bindClumpSlider(clumpDensEl, clumpDensOut, v => `${v.toFixed(2)}×`, v => ({ density: v }))
+  bindClumpSlider(clumpScaleEl, clumpScaleOut, v => `${v.toFixed(2)}×`, v => ({ leafScale: v }))
+  clumpTintEl.oninput = () => {
+    const str = Math.max(.25, clumpTintStrEl.valueAsNumber)
+    clumpTintStrEl.value = String(str)
+    clumpTintStrOut.textContent = `${Math.round(str * 100)}%`
+    clumpTintOut.textContent = `${Math.round(str * 100)}%`
+    opts.editor?.updateSelectedLeafClump({ tint: clumpTintEl.value, tintStrength: str }, false)
+  }
+  clumpTintEl.onchange = () => {
+    const str = Math.max(.25, clumpTintStrEl.valueAsNumber)
+    opts.editor?.updateSelectedLeafClump({ tint: clumpTintEl.value, tintStrength: str }, true)
+  }
+  bindClumpSlider(clumpTintStrEl, clumpTintStrOut, v => {
+    clumpTintOut.textContent = `${Math.round(v * 100)}%`
+    return `${Math.round(v * 100)}%`
+  }, v => ({ tint: clumpTintEl.value, tintStrength: v }))
+  leafUndoBtn.onclick = () => {
+    if (opts.editor?.undo()) opts.onMessage?.('已撤销上一步树叶编辑')
+  }
+  leafDelClumpBtn.onclick = () => {
+    opts.editor?.removeSelectedLeafClump()
+    opts.onMessage?.('已删除选中补叶簇')
+  }
+  leafClearBrushesBtn.onclick = () => {
+    opts.editor?.clearLeafBrushes()
+    opts.onMessage?.('已清空树叶局部笔刷')
+  }
+  leafResetBtn.onclick = () => {
+    opts.editor?.resetLeafEdits()
+    opts.onMessage?.('已重置全部树叶编辑')
   }
 
   // Custom Leaf Normal Editor controls

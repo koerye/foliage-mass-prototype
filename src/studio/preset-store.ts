@@ -5,6 +5,7 @@ import type { Object3D } from 'three'
 import { parseAiScene, type AiSceneSpec } from '../ai/scene'
 import { parseTreeSpec, type TreeKind, type TreeSpec } from '../tree/spec'
 import { lightingPresets, type LightingPreset, type Viewer } from '../viewport'
+import { parseSavedTextureMap, type SavedTextureMap } from './texture-serialize'
 
 export type PresetScope = 'tree' | 'ai'
 export type StorageMode = 'file' | 'local'
@@ -21,6 +22,8 @@ export interface SavedPreset<T = TreeSpec | AiSceneSpec> {
   createdAt: string
   updatedAt: string
   payload: T
+  /** Optional serialized custom textures bound when saved from Tree Studio. */
+  textures?: SavedTextureMap
 }
 
 export interface PresetLibraryFile {
@@ -37,6 +40,7 @@ export interface SavePresetInput<T = TreeSpec | AiSceneSpec> {
   lighting: LightingPreset
   thumbnail: string
   payload: T
+  textures?: SavedTextureMap
 }
 
 const STORAGE_KEY = 'vegetation-studio:saved-presets:v1'
@@ -75,6 +79,7 @@ export function parsePresetItem(raw: unknown): SavedPreset | undefined {
     const triangles = typeof o.triangles === 'number' && Number.isFinite(o.triangles) && o.triangles >= 0
       ? Math.round(o.triangles)
       : 0
+    const textures = parseSavedTextureMap(o.textures)
     return {
       id: typeof o.id === 'string' && o.id.trim() ? o.id.trim() : makeId(scope),
       scope,
@@ -87,6 +92,7 @@ export function parsePresetItem(raw: unknown): SavedPreset | undefined {
       createdAt,
       updatedAt,
       payload,
+      ...(textures ? { textures } : {}),
     }
   } catch {
     return undefined
@@ -118,7 +124,11 @@ export function mergePresetLists(a: SavedPreset[], b: SavedPreset[]): SavedPrese
   const map = new Map<string, SavedPreset>()
   for (const item of [...a, ...b]) {
     const prev = map.get(item.id)
-    if (!prev || item.updatedAt >= prev.updatedAt) map.set(item.id, item)
+    if (!prev || item.updatedAt > prev.updatedAt) {
+      map.set(item.id, item)
+    } else if (item.updatedAt === prev.updatedAt) {
+      map.set(item.id, { ...prev, ...item, thumbnail: item.thumbnail || prev.thumbnail })
+    }
   }
   return sortPresets([...map.values()])
 }
@@ -137,6 +147,7 @@ export interface PresetStoreOptions {
 export interface PresetStore {
   readonly storageMode: StorageMode
   ready(): Promise<void>
+  reload(): Promise<SavedPreset[]>
   list<T = TreeSpec | AiSceneSpec>(scope?: PresetScope): SavedPreset<T>[]
   get<T = TreeSpec | AiSceneSpec>(id: string): SavedPreset<T> | undefined
   saveNew<T extends TreeSpec | AiSceneSpec>(input: SavePresetInput<T>): Promise<SavedPreset<T>>
@@ -184,8 +195,8 @@ export function createPresetStore(options: PresetStoreOptions = {}): PresetStore
     }
   }
 
-  const writeRemote = async (list: SavedPreset[]): Promise<boolean> => {
-    if (!apiUrl || !fetcher) return false
+  const writeRemote = async (list: SavedPreset[]): Promise<{ ok: boolean; error?: string }> => {
+    if (!apiUrl || !fetcher) return { ok: false }
     try {
       const resp = await fetcher(apiUrl, {
         method: 'PUT',
@@ -194,18 +205,63 @@ export function createPresetStore(options: PresetStoreOptions = {}): PresetStore
       })
       if (resp.ok) {
         mode = 'file'
-        return true
+        return { ok: true }
       }
-    } catch { /* fallback to localStorage */ }
-    return false
+      let msg = `HTTP ${resp.status}`
+      try { const j = await resp.json() as { error?: string }; if (j?.error) msg = j.error } catch {}
+      return { ok: false, error: msg }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
   }
 
-  const persist = async () => {
-    items = sortPresets(items)
-    writeLocal(items)
-    await writeRemote(items)
+  let writeChain: Promise<void> = Promise.resolve()
+  const runSerialized = <T>(op: () => Promise<T>): Promise<T> => {
+    const run = writeChain.then(op)
+    writeChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  const ASSET_SYNC_CHANNEL = 'vegetation-studio:asset-sync'
+  const syncChannel = typeof BroadcastChannel !== 'undefined' && apiUrl ? new BroadcastChannel(ASSET_SYNC_CHANNEL) : undefined
+  const broadcastSync = () => {
+    try { syncChannel?.postMessage({ kind: 'presets', ts: Date.now() }) } catch {}
+  }
+
+  const persistSnapshot = async (snapshot: SavedPreset[]) => {
+    if (mode === 'file') {
+      const res = await writeRemote(snapshot)
+      if (!res.ok) throw new Error(`预设写入本地磁盘失败：${res.error || '服务不可用'}`)
+      // Keep a slim localStorage copy without bulky thumbnails/textures when disk is authoritative
+      try {
+        storage?.setItem(STORAGE_KEY, JSON.stringify({
+          schemaVersion: 1,
+          items: snapshot.slice(0, 24).map(({ textures: _t, ...p }) => ({ ...p, thumbnail: '' })),
+        }))
+      } catch {}
+    } else {
+      writeLocal(snapshot)
+      await writeRemote(snapshot)
+    }
+    broadcastSync()
     notify()
   }
+
+  const mutateWithRollback = <T>(apply: () => { next?: SavedPreset[]; result: T }): Promise<T> =>
+    runSerialized(async () => {
+      const prevItems = items
+      const { next, result } = apply()
+      if (!next) return result
+      const sorted = sortPresets(next)
+      items = sorted
+      try {
+        await persistSnapshot(sorted)
+      } catch (err) {
+        items = prevItems
+        throw err
+      }
+      return result
+    })
 
   // Hydrate synchronously from localStorage first for instant UI render
   items = readLocal()
@@ -213,17 +269,32 @@ export function createPresetStore(options: PresetStoreOptions = {}): PresetStore
   const initPromise = (async () => {
     if (!apiUrl || !fetcher) return
     try {
-      const resp = await fetcher(apiUrl, { cache: 'no-store' })
+      const resp = await fetcher(apiUrl, { cache: 'no-cache' })
       if (!resp.ok) return
       const ct = resp.headers.get('content-type') || ''
       if (!ct.includes('application/json')) return
+      const persistedHeader = resp.headers.get('x-persisted')
       const remoteItems = parsePresetLibrary(await resp.json())
       mode = 'file'
+      if (persistedHeader === '1') {
+        // Disk file exists -> disk is authoritative (prevents deleted presets from resurrecting across ports/browsers)
+        items = remoteItems
+        notify()
+        return
+      }
+      if (persistedHeader === '0') {
+        if (items.length > 0) {
+          await writeRemote(items)
+        } else {
+          items = remoteItems
+        }
+        notify()
+        return
+      }
       const merged = mergePresetLists(remoteItems, items)
       const changed = merged.length !== items.length || JSON.stringify(merged.map(x => [x.id, x.updatedAt])) !== JSON.stringify(items.map(x => [x.id, x.updatedAt]))
       items = merged
       writeLocal(items)
-      // If local had newer/additional entries not yet on disk, sync them to disk
       if (merged.length !== remoteItems.length || merged.some((m, i) => remoteItems[i]?.id !== m.id || remoteItems[i]?.updatedAt !== m.updatedAt)) {
         await writeRemote(items)
       }
@@ -233,9 +304,39 @@ export function createPresetStore(options: PresetStoreOptions = {}): PresetStore
     }
   })()
 
+  const reload = async (): Promise<SavedPreset[]> => {
+    if (!apiUrl || !fetcher) {
+      const local = readLocal()
+      items = local
+      notify()
+      return items
+    }
+    try {
+      const resp = await fetcher(apiUrl, { cache: 'no-cache' })
+      if (!resp.ok) return items
+      const ct = resp.headers.get('content-type') || ''
+      if (!ct.includes('application/json')) return items
+      const remoteItems = parsePresetLibrary(await resp.json())
+      mode = 'file'
+      const prevSig = JSON.stringify(items.map(x => [x.id, x.updatedAt, x.name, Boolean(x.textures)]))
+      const nextSig = JSON.stringify(remoteItems.map(x => [x.id, x.updatedAt, x.name, Boolean(x.textures)]))
+      items = remoteItems
+      if (prevSig !== nextSig) notify()
+    } catch { /* keep cached items on transient error */ }
+    return items
+  }
+
+  if (syncChannel) {
+    syncChannel.onmessage = ev => {
+      const msg = ev.data as { kind?: string } | undefined
+      if (msg?.kind === 'presets') void reload()
+    }
+  }
+
   return {
     get storageMode() { return mode },
     ready: () => initPromise,
+    reload,
     list<T = TreeSpec | AiSceneSpec>(scope?: PresetScope) {
       return (scope ? items.filter(x => x.scope === scope) : items) as SavedPreset<T>[]
     },
@@ -244,71 +345,76 @@ export function createPresetStore(options: PresetStoreOptions = {}): PresetStore
     },
     async saveNew<T extends TreeSpec | AiSceneSpec>(input: SavePresetInput<T>) {
       await initPromise
-      const now = new Date().toISOString()
-      const name = input.name.trim().slice(0, 80) || '我的植物预设'
-      const payload = deepClone(input.payload)
-      payload.name = name
-      const entry: SavedPreset<T> = {
-        id: makeId(input.scope),
-        scope: input.scope,
-        name,
-        kind: input.kind,
-        kindLabel: input.kindLabel,
-        triangles: Math.max(0, Math.round(input.triangles)),
-        lighting: input.lighting,
-        thumbnail: safeThumbRe.test(input.thumbnail) ? input.thumbnail : '',
-        createdAt: now,
-        updatedAt: now,
-        payload,
-      }
-      items = [entry, ...items]
-      await persist()
-      return entry
+      return mutateWithRollback(() => {
+        const now = new Date().toISOString()
+        const name = input.name.trim().slice(0, 80) || '我的植物预设'
+        const payload = deepClone(input.payload)
+        payload.name = name
+        const cleanTex = parseSavedTextureMap(input.textures)
+        const entry: SavedPreset<T> = {
+          id: makeId(input.scope),
+          scope: input.scope,
+          name,
+          kind: input.kind,
+          kindLabel: input.kindLabel,
+          triangles: Math.max(0, Math.round(input.triangles)),
+          lighting: input.lighting,
+          thumbnail: safeThumbRe.test(input.thumbnail) ? input.thumbnail : '',
+          createdAt: now,
+          updatedAt: now,
+          payload,
+          ...(cleanTex ? { textures: cleanTex } : {}),
+        }
+        return { next: [entry, ...items], result: entry }
+      })
     },
     async overwrite<T extends TreeSpec | AiSceneSpec>(id: string, input: Omit<SavePresetInput<T>, 'scope' | 'name'> & { name?: string }) {
       await initPromise
-      const idx = items.findIndex(x => x.id === id)
-      if (idx < 0) throw new Error('找不到要更新的预设')
-      const prev = items[idx]
-      const name = (input.name ?? prev.name).trim().slice(0, 80) || prev.name
-      const payload = deepClone(input.payload)
-      payload.name = name
-      const updated: SavedPreset<T> = {
-        ...prev,
-        name,
-        kind: input.kind,
-        kindLabel: input.kindLabel,
-        triangles: Math.max(0, Math.round(input.triangles)),
-        lighting: input.lighting,
-        thumbnail: safeThumbRe.test(input.thumbnail) ? input.thumbnail : prev.thumbnail,
-        updatedAt: new Date().toISOString(),
-        payload,
-      }
-      items = items.map((x, i) => i === idx ? updated : x)
-      await persist()
-      return updated
+      return mutateWithRollback(() => {
+        const idx = items.findIndex(x => x.id === id)
+        if (idx < 0) throw new Error('找不到要更新的预设')
+        const prev = items[idx]
+        const name = (input.name ?? prev.name).trim().slice(0, 80) || prev.name
+        const payload = deepClone(input.payload)
+        payload.name = name
+        const cleanTex = input.textures !== undefined ? parseSavedTextureMap(input.textures) : prev.textures
+        const { textures: _oldTex, ...prevRest } = prev
+        const updated: SavedPreset<T> = {
+          ...prevRest,
+          name,
+          kind: input.kind,
+          kindLabel: input.kindLabel,
+          triangles: Math.max(0, Math.round(input.triangles)),
+          lighting: input.lighting,
+          thumbnail: safeThumbRe.test(input.thumbnail) ? input.thumbnail : prev.thumbnail,
+          updatedAt: new Date().toISOString(),
+          payload,
+          ...(cleanTex ? { textures: cleanTex } : {}),
+        }
+        return { next: items.map((x, i) => i === idx ? updated : x), result: updated }
+      })
     },
     async rename(id: string, nextName: string) {
       await initPromise
-      const idx = items.findIndex(x => x.id === id)
-      if (idx < 0) throw new Error('找不到要重命名的预设')
-      const name = nextName.trim().slice(0, 80)
-      if (!name) throw new Error('预设名称不能为空')
-      const prev = items[idx]
-      const payload = deepClone(prev.payload)
-      payload.name = name
-      const updated: SavedPreset = { ...prev, name, updatedAt: new Date().toISOString(), payload }
-      items = items.map((x, i) => i === idx ? updated : x)
-      await persist()
-      return updated
+      return mutateWithRollback(() => {
+        const idx = items.findIndex(x => x.id === id)
+        if (idx < 0) throw new Error('找不到要重命名的预设')
+        const name = nextName.trim().slice(0, 80)
+        if (!name) throw new Error('预设名称不能为空')
+        const prev = items[idx]
+        const payload = deepClone(prev.payload)
+        payload.name = name
+        const updated: SavedPreset = { ...prev, name, updatedAt: new Date().toISOString(), payload }
+        return { next: items.map((x, i) => i === idx ? updated : x), result: updated }
+      })
     },
     async remove(id: string) {
       await initPromise
-      const before = items.length
-      items = items.filter(x => x.id !== id)
-      if (items.length === before) return false
-      await persist()
-      return true
+      return mutateWithRollback(() => {
+        const next = items.filter(x => x.id !== id)
+        if (next.length === items.length) return { result: false }
+        return { next, result: true }
+      })
     },
     exportBundle(scope?: PresetScope): PresetLibraryFile {
       const list = scope ? items.filter(x => x.scope === scope) : items
@@ -316,18 +422,18 @@ export function createPresetStore(options: PresetStoreOptions = {}): PresetStore
     },
     async importBundle(raw: unknown, scopeFilter?: PresetScope) {
       await initPromise
-      const parsed = parsePresetLibrary(raw).filter(x => !scopeFilter || x.scope === scopeFilter)
-      if (!parsed.length) throw new Error('文件中没有有效的预设条目')
-      let added = 0, updated = 0
-      const map = new Map(items.map(x => [x.id, x]))
-      for (const entry of parsed) {
-        if (map.has(entry.id)) updated++
-        else added++
-        map.set(entry.id, entry)
-      }
-      items = sortPresets([...map.values()])
-      await persist()
-      return { added, updated }
+      return mutateWithRollback(() => {
+        const parsed = parsePresetLibrary(raw).filter(x => !scopeFilter || x.scope === scopeFilter)
+        if (!parsed.length) throw new Error('文件中没有有效的预设条目')
+        let added = 0, updated = 0
+        const map = new Map(items.map(x => [x.id, x]))
+        for (const entry of parsed) {
+          if (map.has(entry.id)) updated++
+          else added++
+          map.set(entry.id, entry)
+        }
+        return { next: [...map.values()], result: { added, updated } }
+      })
     },
     subscribe(listener: () => void) {
       listeners.add(listener)

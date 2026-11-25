@@ -2,6 +2,9 @@
 // Roughness / HeightField channels) for whole-tree default preset persistence.
 import type { Texture } from 'three'
 import { dataUrlToThreeTexture } from '../texgraph/engine'
+import { attachTextureGraphSource, readTextureGraphSource } from '../texgraph/library-ui'
+import { cloneGraph, parseTextureGraph } from '../texgraph/nodes'
+import type { TextureGraph } from '../texgraph/types'
 import { editableTextureSlots, type EditableTextureSlot, type TextureRegistry } from './texture-slots'
 
 export interface SavedSlotTexture {
@@ -10,6 +13,9 @@ export interface SavedSlotTexture {
   normalDataUrl?: string
   roughnessDataUrl?: string
   heightDataUrl?: string
+  savedId?: string
+  templateId?: string
+  graph?: TextureGraph
 }
 
 export type SavedTextureMap = Partial<Record<EditableTextureSlot, SavedSlotTexture>>
@@ -100,12 +106,16 @@ export function serializeThreeTexture(tex: Texture): SavedSlotTexture | undefine
   const normalDataUrl = ud.normalMap ? textureImageToDataUrl(ud.normalMap as Texture) : undefined
   const roughnessDataUrl = ud.roughnessMap ? textureImageToDataUrl(ud.roughnessMap as Texture) : undefined
   const heightDataUrl = ud.heightField ? heightFieldToDataUrl(ud.heightField) : undefined
+  const src = readTextureGraphSource(tex)
   return {
     name: (tex.name || 'custom_texture').slice(0, 80),
     dataUrl,
     ...(normalDataUrl ? { normalDataUrl } : {}),
     ...(roughnessDataUrl ? { roughnessDataUrl } : {}),
     ...(heightDataUrl ? { heightDataUrl } : {}),
+    ...(src?.savedId ? { savedId: src.savedId } : {}),
+    ...(src?.templateId ? { templateId: src.templateId } : {}),
+    ...(src?.graph ? { graph: cloneGraph(src.graph) } : {}),
   }
 }
 
@@ -130,12 +140,21 @@ export function parseSavedTextureMap(raw: unknown): SavedTextureMap | undefined 
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
     const e = entry as Record<string, unknown>
     if (!isSafeDataUrl(e.dataUrl)) continue
+    let parsedGraph: TextureGraph | undefined
+    if (e.graph && typeof e.graph === 'object') {
+      try { parsedGraph = parseTextureGraph(e.graph) } catch { parsedGraph = undefined }
+    }
+    const savedId = typeof e.savedId === 'string' && e.savedId.trim() ? e.savedId.trim().slice(0, 80) : undefined
+    const templateId = typeof e.templateId === 'string' && e.templateId.trim() ? e.templateId.trim().slice(0, 80) : undefined
     out[slot] = {
       name: typeof e.name === 'string' && e.name.trim() ? e.name.trim().slice(0, 80) : 'custom_texture',
       dataUrl: e.dataUrl,
       ...(isSafeDataUrl(e.normalDataUrl) ? { normalDataUrl: e.normalDataUrl } : {}),
       ...(isSafeDataUrl(e.roughnessDataUrl) ? { roughnessDataUrl: e.roughnessDataUrl } : {}),
       ...(isSafeDataUrl(e.heightDataUrl) ? { heightDataUrl: e.heightDataUrl } : {}),
+      ...(savedId ? { savedId } : {}),
+      ...(templateId ? { templateId } : {}),
+      ...(parsedGraph ? { graph: parsedGraph } : {}),
     }
     count++
   }
@@ -150,11 +169,19 @@ export async function decodeSavedTextureMap(
   const entries = Object.entries(saved) as [EditableTextureSlot, SavedSlotTexture][]
   await Promise.all(entries.map(async ([slot, item]) => {
     try {
-      decoded[slot] = await dataUrlToThreeTexture(item.dataUrl, slot, item.name, {
+      const tex = await dataUrlToThreeTexture(item.dataUrl, slot, item.name, {
         normalDataUrl: item.normalDataUrl,
         roughnessDataUrl: item.roughnessDataUrl,
         heightDataUrl: item.heightDataUrl,
       })
+      if (item.graph || item.savedId || item.templateId) {
+        attachTextureGraphSource(tex, {
+          ...(item.graph ? { graph: item.graph } : {}),
+          ...(item.savedId ? { savedId: item.savedId } : {}),
+          ...(item.templateId ? { templateId: item.templateId } : {}),
+        })
+      }
+      decoded[slot] = tex
     } catch {
       // Skip unreadable slot image gracefully
     }

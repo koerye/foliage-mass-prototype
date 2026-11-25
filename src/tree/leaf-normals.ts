@@ -207,7 +207,7 @@ export function applyCustomLeafNormals(
   const projCenter = customNormalCenter(env, edit)
   const rx = Math.max(0.25, env.width)
   const ry = Math.max(0.25, env.height * 0.5)
-  const rz = Math.max(0.25, env.depth)
+  const rz = Math.max(0.25, env.width * env.depth)
 
   const azRad = (edit.azimuth * Math.PI) / 180
   const elRad = (edit.elevation * Math.PI) / 180

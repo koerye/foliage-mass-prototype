@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "vegetation-studio": {
+      "command": "node",
+      "args": [
+        "e:/YYeGame/GPT/foliage-mass-prototype/mcp/server.mjs",
+        "--token-file",
+        "e:/YYeGame/GPT/foliage-mass-prototype/.vegetation_studio_mcp.json"
+      ]
+    }
+  }
+}

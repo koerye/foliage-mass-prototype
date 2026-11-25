@@ -11,7 +11,7 @@
 .pl-save-btn:hover { background: #e1efe5 !important; }
 
 .pl-drawer {
-  position: fixed; top: 70px; right: 0; bottom: 0; width: min(396px, 94vw);
+  position: fixed; top: var(--studio-top, 70px); right: 0; bottom: 0; width: min(396px, 94vw);
   z-index: 40; display: flex; flex-direction: column; overflow: hidden;
   background: #fafaf4; border-left: 1px solid #d5dacb;
   box-shadow: -10px 0 32px rgba(28, 44, 32, .12);
@@ -21,7 +21,7 @@
     grid-template-columns: minmax(0, 1fr) 396px !important;
   }
   .pl-drawer {
-    top: 83px; right: 17px; bottom: 13px; width: 396px;
+    top: calc(var(--studio-top, 70px) + 13px); right: 17px; bottom: 13px; width: 396px;
     border: 1px solid #d5dacb; border-radius: 10px;
     box-shadow: 0 8px 28px rgba(28, 44, 32, .10);
   }
@@ -216,24 +216,46 @@
 }
 .pl-foot-btns button:hover { background: #edf2ea; }
 
-/* GLB Export Options Popover */
+/* GLB / glTF+TEX / FBX+TEX Export Options Popover */
 .glb-popover {
-  position: fixed; z-index: 60; width: min(368px, calc(100vw - 20px));
-  max-height: calc(100vh - 64px); overflow-y: auto;
+  position: fixed; z-index: 60; width: min(404px, calc(100vw - 20px));
+  max-height: calc(100vh - 76px); overflow: hidden;
   background: #fcfbf5; border: 1px solid #cdd5c2; border-radius: 11px;
   box-shadow: 0 12px 34px rgba(24, 42, 28, .18);
-  padding: 11px 12px; display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 11px; display: flex; flex-direction: column; gap: 7px;
 }
 .glb-popover[hidden] { display: none; }
 .glb-pop-head {
+  flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between;
   padding-bottom: 6px; border-bottom: 1px solid #e4e7dc; font-size: 13px; color: #223d2a;
+}
+.glb-fmt-tabs {
+  flex: 0 0 auto;
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px;
+  padding: 3px; border-radius: 8px; background: #eef1e6; border: 1px solid #dce2d2;
+}
+.glb-fmt-tabs button {
+  min-height: 28px; padding: 3px 6px; border-radius: 6px; border: 1px solid transparent;
+  background: transparent; color: #3a5240; font-size: 11px; font-weight: 600; cursor: pointer;
+}
+.glb-fmt-tabs button:hover { background: #e3ead9; }
+.glb-fmt-tabs button[aria-pressed="true"] {
+  background: #234b30; color: #fff; border-color: #1c3d27; box-shadow: 0 1px 3px rgba(24,52,32,.18);
+}
+.glb-fmt-note {
+  flex: 0 0 auto;
+  font-size: 10.5px; color: #4c6452; line-height: 1.35; margin: -2px 0 0;
+  padding: 5px 8px; border-radius: 6px; background: #f3f7ef; border: 1px dashed #cad9c4;
 }
 .glb-pop-close {
   min-height: 24px; padding: 2px 7px; font-size: 11px; border-radius: 5px;
   border: 1px solid #d8ded0; background: #fff; color: #4c6250; cursor: pointer;
 }
-.glb-pop-opts { display: flex; flex-direction: column; gap: 6px; }
+.glb-pop-opts {
+  flex: 1 1 auto; min-height: 80px; overflow-y: auto; padding-right: 3px;
+  display: flex; flex-direction: column; gap: 6px;
+}
 .glb-opt-row {
   display: grid; grid-template-columns: 18px 1fr; gap: 8px; align-items: start;
   padding: 7px 8px; border-radius: 7px; border: 1px solid #e3e7da; background: #f6f7f0; cursor: pointer;
@@ -289,6 +311,7 @@
 }
 .s-curve-pt:hover { fill: #ffe047; r: 6.2; }
 .glb-pop-preview {
+  flex: 0 0 auto;
   padding: 7px 9px; border-radius: 7px; background: #eef4ec; border: 1px solid #cfe0cc;
   font-size: 11px; color: #234b30; display: flex; flex-direction: column; gap: 5px;
 }
@@ -302,6 +325,17 @@
   font-style: normal; font-size: 10px; padding: 2px 6px; border-radius: 4px;
   background: #fff; border: 1px solid #cddbc9; color: #2b4e36; font-family: Consolas, monospace;
 }
-.glb-pop-foot { display: flex; justify-content: flex-end; gap: 6px; }
+.glb-mat-chips i.is-vcol {
+  background: #fff8eb; border-color: #e6caa0; color: #7c4d14;
+}
+.glb-vcol-badge {
+  display: inline-block; margin-left: 4px; padding: 0 4px; border-radius: 3px;
+  background: #f5dfb8; color: #6e410c; font-family: system-ui, sans-serif; font-size: 9.5px; font-weight: 600;
+}
+.glb-vcol-hint {
+  font-size: 10.5px; color: #7d4f16; background: #fff7e6; border: 1px solid #edd4a6;
+  border-radius: 5px; padding: 4px 7px; line-height: 1.35;
+}
+.glb-pop-foot { flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 6px; padding-top: 2px; }
 .glb-pop-foot button { min-height: 30px; font-size: 12px; padding: 4px 12px; }
 .glb-warn { color: #9c3838; }

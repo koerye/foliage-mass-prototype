@@ -1,19 +1,75 @@
 {
   "name": "foliage-mass-prototype",
   "version": "1.0.0",
+  "description": "Vegetation Studio — Stylized Procedural Trees, Plants, Rocks & Scene Assembly Workbench with MCP Control",
   "private": true,
   "type": "module",
+  "main": "electron/main.mjs",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "test": "vitest run --maxWorkers=4 --testTimeout=30000",
-    "preview": "vite preview --host 127.0.0.1"
+    "test": "vitest run --maxWorkers=2 --testTimeout=30000",
+    "preview": "vite preview --host 127.0.0.1",
+    "electron": "npm run build && electron electron/main.mjs",
+    "electron:dev": "node electron/dev-runner.mjs",
+    "mcp": "node mcp/server.mjs",
+    "dist:win": "npm run build && electron-builder --win dir portable"
+  },
+  "build": {
+    "appId": "com.yyegame.vegetation-studio",
+    "productName": "Vegetation Studio",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "mcp/**/*",
+      "scripts/presets-plugin.mjs",
+      "scripts/textures-plugin.mjs",
+      "!electron/dev-runner.mjs"
+    ],
+    "extraResources": [
+      {
+        "from": "mcp",
+        "to": "mcp"
+      },
+      {
+        "from": "user-presets",
+        "to": "seed-data/user-presets",
+        "filter": ["**/*", "!**/*.bak"]
+      },
+      {
+        "from": "user-textures",
+        "to": "seed-data/user-textures",
+        "filter": ["**/*", "!**/*.bak"]
+      }
+    ],
+    "win": {
+      "icon": "electron/icon.ico",
+      "target": [
+        {
+          "target": "dir",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "Vegetation-Studio-${version}-portable.exe"
+    }
   },
   "dependencies": {
     "three": "^0.184.0"
   },
   "devDependencies": {
     "@types/three": "^0.184.0",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.8",
     "vitest": "^4.1.12"

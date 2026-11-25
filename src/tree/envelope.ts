@@ -74,39 +74,43 @@ export class CrownEnvelope {
 
   constructor(spec: TreeSpec, axis = new Vector3(), bounds?: { y0: number; y1: number; width: number }) {
     const { trunk, crown } = spec
+    const safeNum = (v: number, fallback: number) => (Number.isFinite(v) ? v : fallback)
     this.kind = spec.kind
-    this.y0 = bounds ? bounds.y0 : trunk.height * crown.base
-    this.y1 = Math.max(this.y0 + .3, bounds ? bounds.y1 : trunk.height * crown.top)
-    this.width = Math.max(.2, bounds ? bounds.width : crown.width)
-    this.axis = new Vector3(axis.x, 0, axis.z)
-    this.depth = crown.depth
-    this.n = Math.max(1.2, crown.roundness)
-    this.topBias = crown.topBias
-    this.cone = crown.coneShape
-    this.irregularity = crown.irregularity
+    const y0Raw = bounds ? safeNum(bounds.y0, 0) : safeNum(trunk.height, 4) * safeNum(crown.base, 0.3)
+    const y1Raw = bounds ? safeNum(bounds.y1, y0Raw + 1) : safeNum(trunk.height, 4) * safeNum(crown.top, 1)
+    this.y0 = y0Raw
+    this.y1 = Math.max(this.y0 + .3, y1Raw)
+    this.width = Math.max(.2, safeNum(bounds ? bounds.width : crown.width, 1))
+    this.axis = new Vector3(safeNum(axis.x, 0), 0, safeNum(axis.z, 0))
+    this.depth = Math.max(1e-4, safeNum(crown.depth, 1))
+    this.n = Math.max(1.2, safeNum(crown.roundness, 2))
+    this.topBias = Math.max(1e-4, safeNum(crown.topBias, 1))
+    this.cone = Math.max(1e-4, safeNum(crown.coneShape, 1))
+    this.irregularity = Math.max(0, Math.min(2, safeNum(crown.irregularity, 0)))
     this.profileCurve = crown.profileCurve && crown.profileCurve.length >= 2
       ? [...crown.profileCurve].sort((a, b) => a[0] - b[0])
       : undefined
     const random = rng(seedFor(spec.seed, 77))
     this.phases = [random(), random(), random()].map(x => x * Math.PI * 2)
     this.shapes = spec.handles.filter(h => h.kind === 'shape')
-      .map(h => ({ anchor: v3(h.anchor), offset: v3(h.offset), radius: h.radius }))
-    this.bares = spec.handles.filter(h => h.kind === 'bare').map(h => ({ center: v3(h.anchor), radius: h.radius }))
+      .map(h => ({ anchor: v3(h.anchor), offset: v3(h.offset), radius: Math.max(1e-4, safeNum(h.radius, 1)) }))
+    this.bares = spec.handles.filter(h => h.kind === 'bare')
+      .map(h => ({ center: v3(h.anchor), radius: Math.max(1e-4, safeNum(h.radius, 1)) }))
   }
 
-  get height() { return this.y1 - this.y0 }
+  get height() { return Math.max(1e-4, this.y1 - this.y0) }
 
   /** angular radius factor (depth ellipse + irregular lobes) */
   angular(theta: number) {
     const c = Math.cos(theta), s = Math.sin(theta) / this.depth
-    const ellipse = 1 / Math.sqrt(c * c + s * s)
+    const ellipse = 1 / Math.max(1e-4, Math.sqrt(c * c + s * s))
     const [a, b] = this.phases
-    return ellipse * (1 + this.irregularity * .22 * (Math.sin(2 * theta + a) * .6 + Math.sin(3 * theta + b) * .4))
+    return Math.max(1e-4, ellipse * (1 + this.irregularity * .22 * (Math.sin(2 * theta + a) * .6 + Math.sin(3 * theta + b) * .4)))
   }
 
   private remap(u: number) {
     // broadleaf: topBias > 1 moves the widest section up
-    return u <= 0 ? u : u >= 1 ? u : u ** (1 / this.topBias)
+    return u <= 0 ? u : u >= 1 ? u : u ** (1 / Math.max(1e-4, this.topBias))
   }
 
   /** normalized profile radius at crown height fraction u (modulated by optional vertical profileCurve) */
@@ -128,13 +132,13 @@ export class CrownEnvelope {
 
   /** normalized radius in base space: <1 inside, 1 on the surface */
   rhoBase(q: Vector3) {
-    const u = (q.y - this.y0) / this.height
+    const u = (q.y - this.y0) / Math.max(1e-4, this.height)
     const dx = q.x - this.axis.x, dz = q.z - this.axis.z
     const h = Math.hypot(dx, dz), theta = Math.atan2(dz, dx)
-    const ring = this.width * this.angular(theta)
+    const ring = Math.max(1e-4, this.width * this.angular(theta))
     if (this.kind === 'conifer') {
       if (u >= 1) return 1 + (u - 1) * 6 + h / ring
-      const r = ring * Math.max(.015, this.profile(u))
+      const r = Math.max(1e-4, ring * Math.max(.015, this.profile(u)))
       const radial = h / r
       return u < 0 ? Math.max(radial, 1 - u * 4) : radial
     }
@@ -146,7 +150,7 @@ export class CrownEnvelope {
   displacement(p: Vector3, target = new Vector3()) {
     target.set(0, 0, 0)
     for (const h of this.shapes) {
-      const w = falloff(p.distanceTo(h.anchor) / h.radius)
+      const w = falloff(p.distanceTo(h.anchor) / Math.max(1e-4, h.radius))
       if (w > 0) target.addScaledVector(h.offset, w)
     }
     return target
@@ -198,7 +202,7 @@ export class CrownEnvelope {
   /** 0..1 bare-zone strength (1 = fully bare) */
   bare(p: Vector3) {
     let b = 0
-    for (const z of this.bares) b = Math.max(b, falloff(p.distanceTo(z.center) / z.radius) ** .25)
+    for (const z of this.bares) b = Math.max(b, falloff(p.distanceTo(z.center) / Math.max(1e-4, z.radius)) ** .25)
     return b
   }
 

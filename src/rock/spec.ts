@@ -363,8 +363,18 @@ export function rockPresetSpec(id: RockPresetId): RockSpec {
 }
 
 export function parseRockSpec(raw: unknown): RockSpec {
-  const obj = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
-  const pid = rockPresetIds.includes(obj.preset as RockPresetId)
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('石头配置必须是 JSON 对象')
+  }
+  const obj = raw as Record<string, unknown>
+  // Strict whitelist: require a rock `shape` object or a known built-in rock `preset`
+  // so empty `{}` or unrelated JSON payloads (TreeSpec, AiSceneSpec, AssemblySceneSpec, TexGraph) are cleanly rejected.
+  const hasRockShape = Boolean(obj.shape && typeof obj.shape === 'object' && !Array.isArray(obj.shape))
+  const hasKnownPreset = typeof obj.preset === 'string' && rockPresetIds.includes(obj.preset as RockPresetId)
+  if (!hasRockShape && !hasKnownPreset) {
+    throw new Error('这不是石头参数 JSON（请导入 .rock.json 或包含 shape/preset 的石头配置）')
+  }
+  const pid = hasKnownPreset
     ? (obj.preset as RockPresetId)
     : 'boulder-sand-cap'
   const base = rockPresetSpec(pid)

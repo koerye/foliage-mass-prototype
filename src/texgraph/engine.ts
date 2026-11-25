@@ -2049,7 +2049,7 @@ export class TextureGraphEvaluator {
     h: number,
   ): Record<string, ImageBuffer> {
     const def = nodeDefinitions[node.type]
-    const primaryIn = inputs.input ?? inputs.base ?? inputs.height ?? inputs.leafA ?? inputs.leaf
+    const primaryIn = inputs.input ?? inputs.base ?? inputs.height ?? inputs.leafA ?? inputs.slotA ?? inputs.leaf
     const out: Record<string, ImageBuffer> = {}
     for (const port of def.outputs) {
       if (port.type === 'label') {
@@ -2277,6 +2277,7 @@ export function renderLitPbrPreview(
   lightAzimuth: number,
   lightElevation: number,
   tile2x2 = false,
+  checkerboard = true,
 ) {
   const w = out.width, h = out.height
   const base = out.baseColor.data
@@ -2319,11 +2320,13 @@ export function renderLitPbrPreview(
   const g = canvas.getContext('2d')!
   const cw = canvas.width, ch = canvas.height
   g.clearRect(0, 0, cw, ch)
-  const cell = Math.max(8, Math.round(cw / 16))
-  for (let y = 0; y < ch; y += cell) {
-    for (let x = 0; x < cw; x += cell) {
-      g.fillStyle = ((x / cell + y / cell) & 1) === 0 ? '#2b3136' : '#21262a'
-      g.fillRect(x, y, cell, cell)
+  if (checkerboard) {
+    const cell = Math.max(8, Math.round(cw / 16))
+    for (let y = 0; y < ch; y += cell) {
+      for (let x = 0; x < cw; x += cell) {
+        g.fillStyle = ((x / cell + y / cell) & 1) === 0 ? '#2b3136' : '#21262a'
+        g.fillRect(x, y, cell, cell)
+      }
     }
   }
   if (tile2x2) {

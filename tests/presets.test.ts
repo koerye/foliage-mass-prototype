@@ -10,6 +10,9 @@ import { presetSpec, type TreeSpec } from '../src/tree/spec'
 import { aiShowcases, sakuraBonsaiShowcase } from '../src/ai/showcase'
 import { createHiddenShowcaseStore } from '../src/ai/showcase-store'
 import type { AiSceneSpec } from '../src/ai/scene'
+import { createDefaultOverrideStore } from '../src/studio/default-overrides'
+import { createAssemblySceneStore } from '../src/assembly/store'
+import { blankAssemblyScene } from '../src/assembly/spec'
 
 function memoryStorage(): StorageLike & { data: Map<string, string> } {
   const data = new Map<string, string>()
@@ -346,5 +349,163 @@ describe('ai hidden-showcase store', () => {
     })
     await offline.ready()
     expect(offline.storageMode).toBe('local')
+  })
+
+  it('REQ-C4: rolls back in-memory state on disk write failure across all 4 stores and enforces readOnly default overrides', async () => {
+    // 1. PresetStore rollback on 500
+    let failPut = false
+    const presetStore = createPresetStore({
+      storage: memoryStorage(),
+      apiUrl: '/api/presets',
+      fetcher: (async (_url, init) => {
+        if (init?.method === 'PUT') {
+          if (failPut) return new Response(JSON.stringify({ error: 'disk full' }), { status: 500, headers: { 'content-type': 'application/json' } })
+          return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ schemaVersion: 1, items: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'x-persisted': '1' },
+        })
+      }) as typeof fetch,
+    })
+    await presetStore.ready()
+    const saved = await presetStore.saveNew({
+      scope: 'tree',
+      name: '原始松树',
+      kind: 'broadleaf',
+      kindLabel: '阔叶树',
+      triangles: 1000,
+      lighting: 'neutral',
+      thumbnail: VALID_THUMB,
+      payload: presetSpec('broadleaf-round'),
+    })
+    expect(presetStore.list()).toHaveLength(1)
+
+    failPut = true
+    await expect(presetStore.saveNew({
+      scope: 'tree',
+      name: '失败条目',
+      kind: 'broadleaf',
+      kindLabel: '阔叶树',
+      triangles: 500,
+      lighting: 'neutral',
+      thumbnail: '',
+      payload: presetSpec('broadleaf-round'),
+    })).rejects.toThrow(/disk full/)
+    expect(presetStore.list().map(x => x.id)).toEqual([saved.id])
+
+    await expect(presetStore.rename(saved.id, '改名失败')).rejects.toThrow(/disk full/)
+    expect(presetStore.get(saved.id)?.name).toBe('原始松树')
+
+    await expect(presetStore.remove(saved.id)).rejects.toThrow(/disk full/)
+    expect(presetStore.list().map(x => x.id)).toEqual([saved.id])
+
+    // 2. HiddenShowcaseStore throws & rolls back on disk write failure + serializes writes
+    let failHidden = true
+    const hiddenStore = createHiddenShowcaseStore({
+      validIds,
+      storage: memoryStorage(),
+      apiUrl: '/api/hidden-showcases',
+      fetcher: (async (_url, init) => {
+        if (init?.method === 'PUT') {
+          if (failHidden) return new Response(JSON.stringify({ error: 'readonly fs' }), { status: 500, headers: { 'content-type': 'application/json' } })
+          return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ schemaVersion: 1, persisted: true, hiddenIds: ['sakura'] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }) as typeof fetch,
+    })
+    await hiddenStore.ready()
+    expect(hiddenStore.listHiddenIds()).toEqual(['sakura'])
+    await expect(hiddenStore.hide('wishing-tree')).rejects.toThrow(/readonly fs/)
+    expect(hiddenStore.listHiddenIds()).toEqual(['sakura'])
+    await expect(hiddenStore.restore('sakura')).rejects.toThrow(/readonly fs/)
+    expect(hiddenStore.listHiddenIds()).toEqual(['sakura'])
+    failHidden = false
+    await expect(hiddenStore.hide('wishing-tree')).resolves.toBe(true)
+    expect(hiddenStore.listHiddenIds()).toEqual(['sakura', 'wishing-tree'])
+
+    // 3. DefaultOverrideStore rollback + readOnly guard
+    let failOverride = true
+    let readOnlyPuts = 0
+    const overrideStore = createDefaultOverrideStore<'a' | 'b', { v: number }>({
+      scope: 'rock',
+      validIds: ['a', 'b'],
+      parse: raw => ({ v: Number((raw as { v?: number })?.v ?? 0) }),
+      storage: memoryStorage(),
+      apiUrl: '/api/default-presets',
+      fetcher: (async (_url, init) => {
+        if (init?.method === 'PUT') {
+          if (failOverride) return new Response(JSON.stringify({ error: 'EACCES' }), { status: 500, headers: { 'content-type': 'application/json' } })
+          return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ schemaVersion: 1, persisted: true, rock: { a: { v: 1 } } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }) as typeof fetch,
+    })
+    await overrideStore.ready()
+    expect(overrideStore.get('a')).toEqual({ v: 1 })
+    await expect(overrideStore.save('a', { v: 99 })).rejects.toThrow(/EACCES/)
+    expect(overrideStore.get('a')).toEqual({ v: 1 })
+    await expect(overrideStore.resetOne('a')).rejects.toThrow(/EACCES/)
+    expect(overrideStore.get('a')).toEqual({ v: 1 })
+
+    const seededLocal = memoryStorage()
+    seededLocal.setItem('ro-test-key', JSON.stringify({ schemaVersion: 1, overrides: { a: { v: 7 } } }))
+    const readOnlyStore = createDefaultOverrideStore<'a' | 'b', { v: number }>({
+      scope: 'rock',
+      validIds: ['a', 'b'],
+      readOnly: true,
+      storageKey: 'ro-test-key',
+      parse: raw => ({ v: Number((raw as { v?: number })?.v ?? 0) }),
+      storage: seededLocal,
+      apiUrl: '/api/default-presets',
+      fetcher: (async (_url, init) => {
+        if (init?.method === 'PUT') { readOnlyPuts++; return new Response('ok') }
+        return new Response(JSON.stringify({ schemaVersion: 1, persisted: false, rock: {} }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }) as typeof fetch,
+    })
+    await readOnlyStore.ready()
+    expect(readOnlyPuts).toBe(0)
+    await expect(readOnlyStore.save('a', { v: 2 })).rejects.toThrow(/只读/)
+
+    // 4. AssemblySceneStore rollback on 500
+    let failScene = false
+    const sceneStore = createAssemblySceneStore({
+      storage: memoryStorage(),
+      apiUrl: '/api/scenes',
+      fetcher: (async (_url, init) => {
+        if (init?.method === 'PUT') {
+          if (failScene) return new Response(JSON.stringify({ error: 'ENOSPC' }), { status: 500, headers: { 'content-type': 'application/json' } })
+          return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ schemaVersion: 1, items: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'x-persisted': '1' },
+        })
+      }) as typeof fetch,
+    })
+    await sceneStore.ready()
+    const sc = await sceneStore.saveNew({
+      name: '地块A',
+      itemCount: 0,
+      triangles: 0,
+      thumbnail: '',
+      scene: blankAssemblyScene('地块A'),
+    })
+    expect(sceneStore.list()).toHaveLength(1)
+
+    failScene = true
+    await expect(sceneStore.rename(sc.id, '改名失败')).rejects.toThrow(/ENOSPC/)
+    expect(sceneStore.get(sc.id)?.name).toBe('地块A')
+    await expect(sceneStore.remove(sc.id)).rejects.toThrow(/ENOSPC/)
+    expect(sceneStore.list().map(x => x.id)).toEqual([sc.id])
   })
 })

@@ -455,6 +455,20 @@ export function computeScribbleMask(source: PixelBuffer, strokes: Uint8Array): U
       }
     }
   }
+  // If user only painted red background-erase strokes without green foreground strokes,
+  // auto-seed foreground samples from the central non-erased region so red-only erase works naturally!
+  if (!fgSamples.length && bgSamples.length) {
+    const xLo = Math.floor(W * 0.22), xHi = Math.ceil(W * 0.78)
+    const yLo = Math.floor(H * 0.16), yHi = Math.ceil(H * 0.84)
+    for (let y = yLo; y < yHi; y += 2) {
+      for (let x = xLo; x < xHi; x += 2) {
+        const i = y * W + x
+        if (strokes[i] !== 2 && data[i * 4 + 3] >= 48) {
+          fgSamples.push([data[i * 4], data[i * 4 + 1], data[i * 4 + 2]])
+        }
+      }
+    }
+  }
   if (!fgSamples.length) return new Uint8Array(N)
 
   // Quantize color prototypes via greedy farthest-point sampling (up to 10 clusters each)
@@ -594,15 +608,39 @@ export function analyzePlantImage(source: PixelBuffer, imageName = '参考图植
       const sy = Math.min(mh - 1, Math.floor((y + .5) * mh / H))
       for (let x = 0; x < W; x++) {
         const sx = Math.min(mw - 1, Math.floor((x + .5) * mw / W))
-        const keep = options.customMask[sy * mw + sx] > 0
-        fg[y * W + x] = keep ? 1 : 0
-        extBg[y * W + x] = keep ? 0 : 1
+        fg[y * W + x] = options.customMask[sy * mw + sx] > 0 ? 1 : 0
       }
+    }
+    // Flood-fill true exterior background so interior canopy holes are accurately counted in canopyPorosity!
+    const queue = new Int32Array(N)
+    let head = 0, tail = 0
+    const pushExt = (i: number) => { if (!extBg[i] && !fg[i]) { extBg[i] = 1; queue[tail++] = i } }
+    for (let x = 0; x < W; x++) { pushExt(x); pushExt((H - 1) * W + x) }
+    for (let y = 1; y < H - 1; y++) { pushExt(y * W); pushExt(y * W + W - 1) }
+    while (head < tail) {
+      const idx = queue[head++]
+      const x = idx % W, y = (idx - x) / W
+      if (x > 0) pushExt(idx - 1)
+      if (x + 1 < W) pushExt(idx + 1)
+      if (y > 0) pushExt(idx - W)
+      if (y + 1 < H) pushExt(idx + W)
     }
   } else if (useAlpha) {
     for (let i = 0; i < N; i++) {
       if (data[i * 4 + 3] >= 48) fg[i] = 1
-      else extBg[i] = 1
+    }
+    const queue = new Int32Array(N)
+    let head = 0, tail = 0
+    const pushExt = (i: number) => { if (!extBg[i] && !fg[i]) { extBg[i] = 1; queue[tail++] = i } }
+    for (let x = 0; x < W; x++) { pushExt(x); pushExt((H - 1) * W + x) }
+    for (let y = 1; y < H - 1; y++) { pushExt(y * W); pushExt(y * W + W - 1) }
+    while (head < tail) {
+      const idx = queue[head++]
+      const x = idx % W, y = (idx - x) / W
+      if (x > 0) pushExt(idx - 1)
+      if (x + 1 < W) pushExt(idx + 1)
+      if (y > 0) pushExt(idx - W)
+      if (y + 1 < H) pushExt(idx + W)
     }
   } else {
     const queue = new Int32Array(N)
@@ -1063,12 +1101,13 @@ export function analyzePlantImage(source: PixelBuffer, imageName = '参考图植
     const rootWidthPx = tracedMain ? tracedMain.rootRadiusPx * 2 : (rootSlice.length ? median(rootSlice.map(s => s.w)) : treeW * .08)
     const midWidthPx = tracedMain ? tracedMain.midRadiusPx * 2 : (midSlice.length ? median(midSlice.map(s => s.w)) : rootWidthPx * .72)
 
-    // S-curve wobble measured as max lateral excursion from root->fork chord
+    // S-curve wobble measured as max lateral excursion from root->fork chord (y0 >= y1 in image coordinates!)
     let maxDevPx = 0
     if (trunkTrace.length >= 4) {
       const y0 = trunkTrace[trunkTrace.length - 1].y, y1 = trunkTrace[0].y
+      const dy = Math.max(1, Math.abs(y0 - y1))
       for (const s of trunkTrace) {
-        const t = (s.y - y0) / Math.max(1, y1 - y0)
+        const t = MathUtils.clamp(Math.abs(y0 - s.y) / dy, 0, 1)
         const chordX = MathUtils.lerp(rootX, forkX, t)
         maxDevPx = Math.max(maxDevPx, Math.abs(s.cx - chordX))
       }
@@ -1395,11 +1434,14 @@ export function analyzePlantImage(source: PixelBuffer, imageName = '参考图植
     broadleaf: foliageStyle === 'blossom' ? '观花阔叶树 / 樱花盆景' : '阔叶树',
     conifer: '针叶树',
     palm: '棕榈树',
+    bamboo: '竹子',
+    lotus: '荷花',
     grass: '草丛',
     fern: '蕨类',
     flowerbed: '花丛',
   }
   const styleNames: Record<LeafStyle, string> = {
+    painted: '手绘色块叶簇', feathery: '羽叶细枝',
     default: '标准阔叶', cloud: '厚涂圆云叶', oak: '手绘厚涂橡叶叠簇', bush: '翠绿尖叶灌木簇', sakura: '樱花柔瓣簇', maple: '枫叶五角簇', willow: '垂柳细长丝', flower: '通用花簇',
   }
   const summaryParts = [

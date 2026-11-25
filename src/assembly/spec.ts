@@ -14,6 +14,56 @@ export type PathLayout = 'birch-curve' | 'boulder-trail' | 'straight' | 'none'
 export type BackdropTheme = 'diorama-dark' | 'ghibli' | 'neutral' | 'forest' | 'sakura' | 'celestial'
 export type AssemblyBarkStyle = 'default' | 'birch' | 'driftwood' | 'moss'
 export type AssemblyCameraPreset = 'iso' | 'illustration' | 'front' | 'side' | 'top'
+export type RefCompareMode = 'off' | 'pip' | 'wipe' | 'overlay' | 'split'
+export type GrassSpeciesId = 'broad' | 'narrow' | 'dense' | 'reed' | 'clover'
+export type GrassRvtMode = 'off' | 'root-blend' | 'full-tint' | 'normal-only'
+
+export interface GrassRvtSpec {
+  mode: GrassRvtMode
+  /** 0..1 ground-to-grass color fusion strength */
+  strength: number
+  /** Height (m) over which root RVT color & normal blend fades out */
+  fadeHeight: number
+  /** 0..1 shading normal alignment toward ground Up (0,1,0) */
+  normalBlend: number
+  /** Also fuse placed grass assets (GrassBlades) in addition to brush grass */
+  affectPlacedGrass: boolean
+}
+
+export function defaultGrassRvtSpec(overrides: Partial<GrassRvtSpec> = {}): GrassRvtSpec {
+  return {
+    mode: 'root-blend',
+    strength: 0.9,
+    fadeHeight: 0.26,
+    normalBlend: 0.82,
+    affectPlacedGrass: true,
+    ...overrides,
+  }
+}
+
+export interface AssemblyReferenceSpec {
+  /** Image URL (relative ./showcases/..., /..., or data:image/... base64 DataURL) */
+  src: string
+  name?: string
+  mode?: RefCompareMode
+  opacity?: number
+  split?: number
+  scale?: number
+  offsetX?: number
+  offsetY?: number
+}
+
+export interface GrassPaintCluster {
+  x: number
+  y: number
+  z: number
+  yaw: number
+  scale: number
+  tiltX: number
+  tiltZ: number
+  species: GrassSpeciesId
+  tint: string
+}
 
 export interface AssemblyGroundSpec {
   style: GroundStyle
@@ -26,6 +76,8 @@ export interface AssemblyGroundSpec {
   pathColor: string
   pathWidth: number
   seed: number
+  /** Optional procedural micro-turf baked into the diorama tile (default false so clearing items leaves a clean slab). */
+  builtInTurf?: boolean
 }
 
 export interface AssemblyItem {
@@ -55,6 +107,11 @@ export interface AssemblySceneSpec {
   wind: boolean
   ground: AssemblyGroundSpec
   cameraPreset?: AssemblyCameraPreset
+  reference?: AssemblyReferenceSpec
+  grassPaint?: GrassPaintCluster[]
+  /** Optional PNG DataURL overlay storing custom Terrain Material Paint Brush strokes */
+  groundPaint?: string
+  rvt?: GrassRvtSpec
   items: AssemblyItem[]
 }
 
@@ -95,7 +152,11 @@ const VALID_CATEGORIES = new Set<AssemblyCategory>(Object.keys(categoryLabels) a
 const VALID_BARK_STYLES = new Set<AssemblyBarkStyle>(['default', 'birch', 'driftwood', 'moss'])
 const VALID_LEAF_SOURCES = new Set<string>(leafTextureSources)
 const VALID_CAMERAS = new Set<AssemblyCameraPreset>(['iso', 'illustration', 'front', 'side', 'top'])
+const VALID_REF_MODES = new Set<RefCompareMode>(['off', 'pip', 'wipe', 'overlay', 'split'])
+const VALID_GRASS_SPECIES = new Set<GrassSpeciesId>(['broad', 'narrow', 'dense', 'reed', 'clover'])
+const VALID_RVT_MODES = new Set<GrassRvtMode>(['off', 'root-blend', 'full-tint', 'normal-only'])
 const HEX_RE = /^#[0-9a-fA-F]{6}$/
+const SAFE_REF_SRC_RE = /^(?:data:image\/(?:png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+|\.{0,2}\/[\w./%-]+\.(?:png|jpe?g|webp|gif)(?:\?[\w=&.%-]*)?|https?:\/\/[^\s"'<>]+)$/i
 
 function clamp(v: number, lo: number, hi: number, fallback: number): number {
   const n = Number(v)
@@ -117,6 +178,9 @@ function parseVec3(raw: unknown, fallback: [number, number, number], lo: number,
 }
 
 export function cloneJson<T>(v: T): T {
+  if (typeof structuredClone === 'function') {
+    try { return structuredClone(v) } catch { /* fallback below */ }
+  }
   return JSON.parse(JSON.stringify(v)) as T
 }
 
@@ -137,6 +201,7 @@ export function defaultGroundSpec(overrides: Partial<AssemblyGroundSpec> = {}): 
     pathColor: '#d9b97e',
     pathWidth: 1.0,
     seed: 2026,
+    builtInTurf: false,
     ...overrides,
   }
 }
@@ -157,7 +222,8 @@ export function blankAssemblyScene(name = '空白场景组装'): AssemblySceneSp
 
 export function inferCategoryFromTree(spec: TreeSpec): AssemblyCategory {
   if (spec.kind === 'grass' || spec.kind === 'fern') return 'grass'
-  if (spec.kind === 'flowerbed') return 'flower'
+  if (spec.kind === 'flowerbed' || spec.kind === 'lotus') return 'flower'
+  if (spec.kind === 'bamboo') return 'tree'
   if (spec.kind === 'broadleaf') {
     const noLeaves = spec.leaves.leavesPerTwig <= 0 && spec.leaves.clumpFill <= 0 && spec.leaves.twigLength <= 0.01
     if (noLeaves) return 'deadwood'
@@ -244,6 +310,7 @@ export function parseAssemblyGround(raw: unknown): AssemblyGroundSpec {
     pathColor: parseHex(g.pathColor, d.pathColor),
     pathWidth: clamp(g.pathWidth as number, 0.25, 2.2, d.pathWidth),
     seed: Math.max(1, Math.round(clamp(g.seed as number, 1, 999999, d.seed))),
+    builtInTurf: typeof g.builtInTurf === 'boolean' ? g.builtInTurf : false,
   }
 }
 
@@ -298,6 +365,63 @@ export function parseAssemblyItem(raw: unknown): AssemblyItem | undefined {
   }
 }
 
+export function parseAssemblyReference(raw: unknown): AssemblyReferenceSpec | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const o = raw as Record<string, unknown>
+  const src = typeof o.src === 'string' ? o.src.trim() : ''
+  if (!src || src.length > 8_000_000 || !SAFE_REF_SRC_RE.test(src)) return undefined
+  const mode = VALID_REF_MODES.has(o.mode as RefCompareMode) ? (o.mode as RefCompareMode) : 'wipe'
+  return {
+    src,
+    ...(typeof o.name === 'string' && o.name.trim() ? { name: o.name.trim().slice(0, 80) } : {}),
+    mode,
+    opacity: clamp(o.opacity as number, 0.05, 1, 0.55),
+    split: clamp(o.split as number, 0.02, 0.98, 0.5),
+    scale: clamp(o.scale as number, 0.4, 2.5, 1),
+    offsetX: clamp(o.offsetX as number, -60, 60, 0),
+    offsetY: clamp(o.offsetY as number, -60, 60, 0),
+  }
+}
+
+export function parseGrassPaint(raw: unknown): GrassPaintCluster[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined
+  const out: GrassPaintCluster[] = []
+  const maxItems = Math.min(raw.length, 30000)
+  for (let i = 0; i < maxItems; i++) {
+    const entry = raw[i]
+    if (!entry || typeof entry !== 'object') continue
+    const e = entry as Record<string, unknown>
+    const species = VALID_GRASS_SPECIES.has(e.species as GrassSpeciesId)
+      ? (e.species as GrassSpeciesId)
+      : 'broad'
+    out.push({
+      x: Number(clamp(e.x as number, -60, 60, 0).toFixed(3)),
+      y: Number(clamp(e.y as number, -10, 20, 0).toFixed(3)),
+      z: Number(clamp(e.z as number, -60, 60, 0).toFixed(3)),
+      yaw: Number(clamp(e.yaw as number, -360, 360, 0).toFixed(1)),
+      scale: Number(clamp(e.scale as number, 0.18, 3.5, 1).toFixed(3)),
+      tiltX: Number(clamp(e.tiltX as number, -45, 45, 0).toFixed(1)),
+      tiltZ: Number(clamp(e.tiltZ as number, -45, 45, 0).toFixed(1)),
+      species,
+      tint: parseHex(e.tint, '#ffffff'),
+    })
+  }
+  return out.length > 0 ? out : undefined
+}
+
+export function parseGrassRvt(raw: unknown): GrassRvtSpec | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const o = raw as Record<string, unknown>
+  const d = defaultGrassRvtSpec()
+  return {
+    mode: VALID_RVT_MODES.has(o.mode as GrassRvtMode) ? (o.mode as GrassRvtMode) : d.mode,
+    strength: Number(clamp(o.strength as number, 0, 1, d.strength).toFixed(2)),
+    fadeHeight: Number(clamp(o.fadeHeight as number, 0.05, 0.85, d.fadeHeight).toFixed(2)),
+    normalBlend: Number(clamp(o.normalBlend as number, 0, 1, d.normalBlend).toFixed(2)),
+    affectPlacedGrass: typeof o.affectPlacedGrass === 'boolean' ? o.affectPlacedGrass : d.affectPlacedGrass,
+  }
+}
+
 export function parseAssemblyScene(raw: unknown): AssemblySceneSpec {
   const base = blankAssemblyScene()
   if (!raw || typeof raw !== 'object') return base
@@ -318,6 +442,12 @@ export function parseAssemblyScene(raw: unknown): AssemblySceneSpec {
     seenIds.add(parsed.id)
     items.push(parsed)
   }
+  const reference = parseAssemblyReference(o.reference)
+  const grassPaint = parseGrassPaint(o.grassPaint)
+  const groundPaint = typeof o.groundPaint === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(o.groundPaint) && o.groundPaint.length <= 6_000_000
+    ? o.groundPaint
+    : undefined
+  const rvt = parseGrassRvt(o.rvt)
   return {
     version: 1,
     name: typeof o.name === 'string' && o.name.trim() ? o.name.trim().slice(0, 80) : base.name,
@@ -329,6 +459,10 @@ export function parseAssemblyScene(raw: unknown): AssemblySceneSpec {
     cameraPreset: VALID_CAMERAS.has(o.cameraPreset as AssemblyCameraPreset)
       ? (o.cameraPreset as AssemblyCameraPreset)
       : 'iso',
+    ...(reference ? { reference } : {}),
+    ...(grassPaint ? { grassPaint } : {}),
+    ...(groundPaint ? { groundPaint } : {}),
+    ...(rvt ? { rvt } : {}),
     items,
   }
 }

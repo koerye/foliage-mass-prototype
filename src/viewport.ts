@@ -56,7 +56,7 @@ export type LightingPreset = keyof typeof lightingPresets
 export const background = lightingPresets.neutral.bg
 
 export class Viewer {
-  readonly renderer = new WebGLRenderer({ alpha: false, antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: false })
+  readonly renderer = new WebGLRenderer({ alpha: true, antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: false })
   readonly scene = new Scene()
   readonly camera = new OrthographicCamera(-6, 6, 6, -6, .025, 140)
   readonly controls: OrbitControls
@@ -72,6 +72,7 @@ export class Viewer {
   private observer: ResizeObserver
   private frameId = 0
   private frameHeight = 7.2
+  private frameWidth = 0
   private shownHeight = 6
   private fixedView: Camera = 'angle'
   private view: View = 'final'
@@ -80,7 +81,14 @@ export class Viewer {
   private config?: TreeMassConfig
   private readonly renderListeners = new Set<() => void>()
 
-  constructor(readonly host: HTMLElement, private readonly onStats = (_fps: number, _calls: number) => {}) {
+  private readonly onContextLostHandler: (ev: Event) => void
+  private readonly onContextRestoredHandler: () => void
+
+  constructor(
+    readonly host: HTMLElement,
+    private readonly onStats = (_fps: number, _calls: number) => {},
+    onContextChange?: (lost: boolean) => void,
+  ) {
     this.renderer.outputColorSpace = SRGBColorSpace
     this.renderer.toneMapping = ACESFilmicToneMapping
     this.renderer.toneMappingExposure = lightingPresets.neutral.exposure
@@ -90,7 +98,18 @@ export class Viewer {
     this.renderer.shadowMap.autoUpdate = false
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.55))
     this.renderer.domElement.setAttribute('aria-label', '三维树冠预览')
+    this.onContextLostHandler = (ev: Event) => {
+      ev.preventDefault()
+      onContextChange?.(true)
+    }
+    this.onContextRestoredHandler = () => {
+      this.refreshShadows()
+      onContextChange?.(false)
+    }
+    this.renderer.domElement.addEventListener('webglcontextlost', this.onContextLostHandler)
+    this.renderer.domElement.addEventListener('webglcontextrestored', this.onContextRestoredHandler)
     host.append(this.renderer.domElement)
+    this.floor.name = 'StudioShadowFloor'
     this.floor.rotation.x = -Math.PI / 2
     this.floor.position.y = -.015
     this.floor.receiveShadow = true
@@ -100,7 +119,7 @@ export class Viewer {
     this.key.shadow.bias = -.00035
     this.key.shadow.normalBias = .035
     this.key.shadow.radius = 3.8
-    Object.assign(this.key.shadow.camera, { left: -8, right: 8, top: 8, bottom: -8, far: 60 })
+    Object.assign(this.key.shadow.camera, { left: -8, right: 8, top: 8, bottom: -8, far: 120 })
     this.key.shadow.camera.updateProjectionMatrix()
     this.fill.position.set(-7, 3, -4)
     this.scene.add(this.floor, this.key, this.fill, this.hemi)
@@ -112,13 +131,19 @@ export class Viewer {
     this.controls.maxPolarAngle = Math.PI * .57
     this.observer = new ResizeObserver(this.resize)
     this.observer.observe(this.host)
+    window.addEventListener('pagehide', this.onPageHide)
     this.resize()
     this.frameId = requestAnimationFrame(this.animate)
   }
 
+  private onPageHide = () => {
+    cancelAnimationFrame(this.frameId)
+    this.dispose()
+  }
+
   private resize = () => {
     const width = Math.max(1, this.host.clientWidth), height = Math.max(1, this.host.clientHeight)
-    const scale = Math.max(this.frameHeight, this.shownHeight * .74 / (width / height))
+    const scale = Math.max(this.frameHeight, (this.frameWidth || this.shownHeight * .74) / (width / height))
     this.renderer.setSize(width, height, false)
     this.camera.top = scale / 2
     this.camera.bottom = -this.camera.top
@@ -184,8 +209,9 @@ export class Viewer {
   }
 
   setLighting(preset: LightingPreset) {
-    this.lighting = preset
-    const p = lightingPresets[preset]
+    const resolved: LightingPreset = Object.prototype.hasOwnProperty.call(lightingPresets, preset) ? preset : 'neutral'
+    this.lighting = resolved
+    const p = lightingPresets[resolved]
     this.scene.background = new Color(p.bg)
     this.key.color.set(p.keyColor)
     this.key.intensity = p.keyIntensity
@@ -202,22 +228,32 @@ export class Viewer {
 
   private animLighting() {
     const h = this.shownHeight
-    const [dx, dy, dz] = lightingPresets[this.lighting].keyDir
+    const [dx, dy, dz] = (lightingPresets[this.lighting] ?? lightingPresets.neutral).keyDir
     this.key.position.set(h * dx, h * dy, h * dz)
     Object.assign(this.key.shadow.camera, { left: -h * 1.28, right: h * 1.28, top: h * 1.28, bottom: -h * 1.28 })
     this.key.shadow.camera.updateProjectionMatrix()
     this.renderer.shadowMap.needsUpdate = true
   }
 
-  frame(view: Camera, center?: Vector3) {
+  frame(view: Camera, center?: Vector3, bounds?: Box3) {
     this.fixedView = view
     const h = this.shownHeight
-    const focus = center ?? new Vector3(0, h * .495, 0)
+    const focus = center ?? bounds?.getCenter(new Vector3()) ?? new Vector3(0, h * .495, 0)
+    const direction = new Vector3(...cameraMap[view]).normalize()
     this.frameHeight = h * 1.19
+    this.frameWidth = 0
+    if (bounds && !bounds.isEmpty()) {
+      const size = bounds.getSize(new Vector3())
+      const right = new Vector3().crossVectors(this.camera.up, direction).normalize()
+      const up = new Vector3().crossVectors(direction, right)
+      const projectedSize = (axis: Vector3) =>
+        Math.abs(axis.x) * size.x + Math.abs(axis.y) * size.y + Math.abs(axis.z) * size.z
+      this.frameHeight = projectedSize(up) * 1.14
+      this.frameWidth = projectedSize(right) * 1.14
+    }
     this.controls.enableDamping = false
     this.controls.update()
     this.controls.target.copy(focus)
-    const direction = new Vector3(...cameraMap[view]).normalize()
     this.camera.position.copy(focus).addScaledVector(direction, h * 2.50)
     this.camera.zoom = 1
     this.resize()
@@ -225,9 +261,59 @@ export class Viewer {
     this.controls.enableDamping = true
   }
 
-  snapshot() {
-    this.renderer.render(this.scene, this.camera)
-    return this.renderer.domElement.toDataURL('image/png')
+  snapshot(options?: { transparent?: boolean; hide?: (Object3D | undefined)[] }): string {
+    const transparent = Boolean(options?.transparent)
+    if (!transparent && !options?.hide?.length) {
+      this.renderer.render(this.scene, this.camera)
+      return this.renderer.domElement.toDataURL('image/png')
+    }
+
+    const prevBg = this.scene.background
+    const prevFog = this.scene.fog
+    const prevFloorVisible = this.floor.visible
+    const prevClearColor = new Color()
+    this.renderer.getClearColor(prevClearColor)
+    const prevClearAlpha = this.renderer.getClearAlpha()
+
+    const hiddenStates: [Object3D, boolean][] = []
+    const hideOnce = new Set<Object3D>()
+    const markHide = (obj: Object3D | undefined) => {
+      if (!obj || hideOnce.has(obj)) return
+      hideOnce.add(obj)
+      hiddenStates.push([obj, obj.visible])
+      obj.visible = false
+    }
+
+    try {
+      if (options?.hide) {
+        for (const obj of options.hide) markHide(obj)
+      }
+      if (transparent) {
+        this.scene.background = null
+        this.scene.fog = null
+        markHide(this.floor)
+        for (const child of this.scene.children) {
+          if (
+            child === this.floor
+            || child.name === 'StudioShadowFloor'
+            || child.name === 'crown-editor'
+            || child.userData?.exportIgnore === true
+          ) {
+            markHide(child)
+          }
+        }
+        this.renderer.setClearColor(0x000000, 0)
+      }
+      this.renderer.render(this.scene, this.camera)
+      return this.renderer.domElement.toDataURL('image/png')
+    } finally {
+      this.scene.background = prevBg
+      this.scene.fog = prevFog
+      for (const [obj, wasVisible] of hiddenStates) obj.visible = wasVisible
+      this.floor.visible = prevFloorVisible
+      this.renderer.setClearColor(prevClearColor, prevClearAlpha)
+      try { this.renderer.render(this.scene, this.camera) } catch { /* ignore restore render failure */ }
+    }
   }
 
   addRenderListener(fn: () => void) {
@@ -256,6 +342,7 @@ export class Viewer {
 
   dispose() {
     cancelAnimationFrame(this.frameId)
+    window.removeEventListener('pagehide', this.onPageHide)
     this.observer.disconnect()
     this.controls.dispose()
     this.asset?.dispose()

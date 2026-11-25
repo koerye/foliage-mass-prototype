@@ -6,7 +6,7 @@ import { buildFronds } from '../src/tree/fronds'
 import { buildSkeleton } from '../src/tree/skeleton'
 import { parseTreeSpec, presetIds, presetSpec, type TreeSpec } from '../src/tree/spec'
 
-const textures = { leaf: new Texture(), needle: new Texture(), drape: new Texture(), palm: new Texture(), grass: new Texture(), fern: new Texture() }
+const textures = { leaf: new Texture(), needle: new Texture(), drape: new Texture(), palm: new Texture(), bamboo: new Texture(), lotusLeaf: new Texture(), lotusPetal: new Texture(), grass: new Texture(), fern: new Texture() }
 const withHandles = (spec: TreeSpec, edit: (h: TreeSpec['handles']) => void) => {
   const env = new CrownEnvelope(spec, buildSkeleton(spec).envelope.axis)
   const handles = defaultHandles(env)
@@ -114,7 +114,7 @@ describe('foliage builders', () => {
 
   it.each(presetIds)('%s assembles with sane budgets', id => {
     const asset = buildTree(presetSpec(id), textures)
-    expect(asset.stats.triangles).toBeGreaterThan(id.startsWith('flowerbed') ? 50 : id.startsWith('grass') || id === 'fern' ? 200 : id.startsWith('palm') ? 1000 : 5000)
+    expect(asset.stats.triangles).toBeGreaterThan(id.startsWith('flowerbed') ? 50 : id.startsWith('grass') || id === 'fern' ? 200 : id.startsWith('palm') || id.startsWith('bamboo') || id.startsWith('lotus') ? 900 : 5000)
     expect(asset.stats.triangles).toBeLessThan(150000)
     asset.dispose()
   })

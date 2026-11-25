@@ -36,33 +36,44 @@ export function optimizeAt(level: number, targetTriangles = 3000): OptimizeSpec 
 /**
  * Binary-search the lowest optimization level that brings the tree's triangle
  * count at or below `target` (preserving maximum visual fidelity for the budget).
+ * Reuses a single cached skeleton & unreduced foliage placement via `remeshForOptimize`.
  */
 export function solveForTriangleBudget(spec: TreeSpec, textures: TreeTextures, target: number) {
   const goal = Math.max(100, Math.round(target))
-  const measure = (level: number) => {
-    const opt = optimizeAt(level, goal)
-    const asset = buildTree({ ...spec, optimize: opt }, textures)
-    const triangles = asset.stats.triangles
-    asset.dispose()
-    return { opt, triangles }
-  }
-  const base = measure(0)
-  if (base.triangles <= goal) return { optimize: base.opt, before: base.triangles, after: base.triangles, reached: true }
-  const minPossible = measure(1)
-  if (minPossible.triangles >= goal) {
-    return { optimize: minPossible.opt, before: base.triangles, after: minPossible.triangles, reached: minPossible.triangles <= goal }
-  }
-  let lo = 0, hi = 1
-  let best = minPossible
-  for (let i = 0; i < 7; i++) {
-    const mid = (lo + hi) * .5
-    const cur = measure(mid)
-    if (cur.triangles <= goal) {
-      best = cur
-      hi = mid
-    } else {
-      lo = mid
+  const baseOpt = optimizeAt(0, goal)
+  const asset = buildTree({ ...spec, optimize: baseOpt }, textures)
+  try {
+    const before = asset.stats.triangles
+    if (before <= goal) return { optimize: baseOpt, before, after: before, reached: true }
+    const measure = (level: number) => {
+      const opt = optimizeAt(level, goal)
+      const nextSpec = { ...spec, optimize: opt }
+      if (asset.remeshForOptimize(nextSpec)) {
+        return { opt, triangles: asset.stats.triangles }
+      }
+      const fallback = buildTree(nextSpec, textures)
+      const triangles = fallback.stats.triangles
+      fallback.dispose()
+      return { opt, triangles }
     }
+    const minPossible = measure(1)
+    if (minPossible.triangles >= goal) {
+      return { optimize: minPossible.opt, before, after: minPossible.triangles, reached: minPossible.triangles <= goal }
+    }
+    let lo = 0, hi = 1
+    let best = minPossible
+    for (let i = 0; i < 7; i++) {
+      const mid = (lo + hi) * .5
+      const cur = measure(mid)
+      if (cur.triangles <= goal) {
+        best = cur
+        hi = mid
+      } else {
+        lo = mid
+      }
+    }
+    return { optimize: best.opt, before, after: best.triangles, reached: true }
+  } finally {
+    asset.dispose()
   }
-  return { optimize: best.opt, before: base.triangles, after: best.triangles, reached: true }
 }

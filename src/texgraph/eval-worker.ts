@@ -1,6 +1,9 @@
-// Dedicated Web Worker for non-blocking procedural texture graph evaluation.
+// Dedicated Web Worker for non-blocking procedural texture graph evaluation & reference optimization.
 // Shares the exact same pure-TS TextureGraphEvaluator core as Node CLI & Vitest!
+import { optimizeGraphAgainstReference, type OptimizeOptions, type OptimizeResult } from './agent-api'
 import { bufferToRgbaBytes, TextureGraphEvaluator } from './engine'
+import type { RgbaImageData } from './image-utils'
+import { analyzeReferenceImage, type RefAnalysisResult } from './ref-analyze'
 import type { ImageBuffer, MaterialOutputResult, TextureGraph } from './types'
 
 export interface WorkerEvalRequest {
@@ -16,7 +19,26 @@ export interface WorkerClearRequest {
   type: 'clear'
 }
 
-export type WorkerIncomingMessage = WorkerEvalRequest | WorkerClearRequest
+export interface WorkerAnalyzeRefRequest {
+  type: 'analyze_ref'
+  reqId: number
+  ref: RgbaImageData
+  opts?: { name?: string; resolution?: 256 | 512 | 1024 }
+}
+
+export interface WorkerOptimizeRefRequest {
+  type: 'optimize_ref'
+  reqId: number
+  graph: TextureGraph
+  ref: RgbaImageData
+  opts?: Omit<OptimizeOptions, 'signal'>
+}
+
+export type WorkerIncomingMessage =
+  | WorkerEvalRequest
+  | WorkerClearRequest
+  | WorkerAnalyzeRefRequest
+  | WorkerOptimizeRefRequest
 
 export interface SerializedThumb {
   nodeId: string
@@ -38,6 +60,30 @@ export interface WorkerEvalResponse {
   pinnedBuffer?: ImageBuffer
   thumbs: SerializedThumb[]
 }
+
+export interface WorkerAnalyzeRefResponse {
+  type: 'analyze_result'
+  reqId: number
+  result: RefAnalysisResult
+}
+
+export interface WorkerOptimizeRefResponse {
+  type: 'optimize_result'
+  reqId: number
+  result: OptimizeResult
+}
+
+export interface WorkerErrorResponse {
+  type: 'error'
+  reqId: number
+  error: string
+}
+
+export type WorkerOutgoingMessage =
+  | WorkerEvalResponse
+  | WorkerAnalyzeRefResponse
+  | WorkerOptimizeRefResponse
+  | WorkerErrorResponse
 
 const evaluator = new TextureGraphEvaluator()
 const THUMB_SIZE = 72
@@ -77,68 +123,87 @@ function cloneBufferForTransfer(buf: ImageBuffer): { copy: ImageBuffer; ab: Arra
 
 const ctx = self as unknown as {
   onmessage: ((ev: MessageEvent<WorkerIncomingMessage>) => void) | null
-  postMessage(msg: WorkerEvalResponse, transfer?: Transferable[]): void
+  postMessage(msg: WorkerOutgoingMessage, transfer?: Transferable[]): void
 }
 
 ctx.onmessage = (ev: MessageEvent<WorkerIncomingMessage>) => {
   const msg = ev.data
-  if (msg.type === 'clear') {
-    evaluator.clear()
-    return
-  }
-  const res = evaluator.evaluate(msg.graph, msg.resolution, { skipPbrMaps: msg.skipPbrMaps })
-  const transfers: Transferable[] = []
-
-  // Clone output typed arrays so evaluator's internal LRU cache stays intact across zero-copy transfer!
-  const baseCopy = cloneBufferForTransfer(res.output.baseColor)
-  const heightCopy = cloneBufferForTransfer(res.output.heightMap)
-  const roughCopy = cloneBufferForTransfer(res.output.roughness)
-  const normCopy = cloneBufferForTransfer(res.output.normal)
-  transfers.push(baseCopy.ab, heightCopy.ab, roughCopy.ab, normCopy.ab)
-
-  let pinnedBuffer: ImageBuffer | undefined
-  if (msg.pinnedNodeId) {
-    const outs = res.nodeOutputs.get(msg.pinnedNodeId)
-    const primary = outs ? Object.values(outs)[0] : undefined
-    if (primary) {
-      const pCopy = cloneBufferForTransfer(primary)
-      pinnedBuffer = pCopy.copy
-      transfers.push(pCopy.ab)
+  try {
+    if (msg.type === 'clear') {
+      evaluator.clear()
+      return
     }
-  }
-
-  const thumbs: SerializedThumb[] = []
-  for (const n of msg.graph.nodes) {
-    const outs = res.nodeOutputs.get(n.id)
-    const primary = n.type === 'output_material'
-      ? res.output.baseColor
-      : (outs ? Object.values(outs)[0] : undefined)
-    if (primary) {
-      const bytes = downsampleThumb(primary)
-      thumbs.push({ nodeId: n.id, width: THUMB_SIZE, height: THUMB_SIZE, bytes })
-      transfers.push(bytes.buffer)
+    if (msg.type === 'analyze_ref') {
+      const result = analyzeReferenceImage(msg.ref, msg.opts)
+      ctx.postMessage({ type: 'analyze_result', reqId: msg.reqId, result })
+      return
     }
-  }
+    if (msg.type === 'optimize_ref') {
+      const result = optimizeGraphAgainstReference(msg.graph, msg.ref, msg.opts)
+      ctx.postMessage({ type: 'optimize_result', reqId: msg.reqId, result })
+      return
+    }
+    const res = evaluator.evaluate(msg.graph, msg.resolution, { skipPbrMaps: msg.skipPbrMaps })
+    const transfers: Transferable[] = []
 
-  ctx.postMessage({
-    type: 'result',
-    reqId: msg.reqId,
-    width: res.width,
-    height: res.height,
-    evalMs: res.evalMs,
-    cacheHits: res.cacheHits ?? 0,
-    cacheMisses: res.cacheMisses ?? 0,
-    nodeTimings: res.nodeTimings ?? {},
-    output: {
-      width: res.output.width,
-      height: res.output.height,
-      baseColor: baseCopy.copy as MaterialOutputResult['baseColor'],
-      heightMap: heightCopy.copy as MaterialOutputResult['heightMap'],
-      roughness: roughCopy.copy as MaterialOutputResult['roughness'],
-      normal: normCopy.copy as MaterialOutputResult['normal'],
-      alphaDilated: res.output.alphaDilated,
-    },
-    pinnedBuffer,
-    thumbs,
-  }, transfers)
+    // Clone output typed arrays so evaluator's internal LRU cache stays intact across zero-copy transfer!
+    const baseCopy = cloneBufferForTransfer(res.output.baseColor)
+    const heightCopy = cloneBufferForTransfer(res.output.heightMap)
+    const roughCopy = cloneBufferForTransfer(res.output.roughness)
+    const normCopy = cloneBufferForTransfer(res.output.normal)
+    transfers.push(baseCopy.ab, heightCopy.ab, roughCopy.ab, normCopy.ab)
+
+    let pinnedBuffer: ImageBuffer | undefined
+    if (msg.pinnedNodeId) {
+      const outs = res.nodeOutputs.get(msg.pinnedNodeId)
+      const primary = outs ? Object.values(outs)[0] : undefined
+      if (primary) {
+        const pCopy = cloneBufferForTransfer(primary)
+        pinnedBuffer = pCopy.copy
+        transfers.push(pCopy.ab)
+      }
+    }
+
+    const thumbs: SerializedThumb[] = []
+    for (const n of msg.graph.nodes) {
+      const outs = res.nodeOutputs.get(n.id)
+      const primary = n.type === 'output_material'
+        ? res.output.baseColor
+        : (outs ? Object.values(outs)[0] : undefined)
+      if (primary) {
+        const bytes = downsampleThumb(primary)
+        thumbs.push({ nodeId: n.id, width: THUMB_SIZE, height: THUMB_SIZE, bytes })
+        transfers.push(bytes.buffer)
+      }
+    }
+
+    ctx.postMessage({
+      type: 'result',
+      reqId: msg.reqId,
+      width: res.width,
+      height: res.height,
+      evalMs: res.evalMs,
+      cacheHits: res.cacheHits ?? 0,
+      cacheMisses: res.cacheMisses ?? 0,
+      nodeTimings: res.nodeTimings ?? {},
+      output: {
+        width: res.output.width,
+        height: res.output.height,
+        baseColor: baseCopy.copy as MaterialOutputResult['baseColor'],
+        heightMap: heightCopy.copy as MaterialOutputResult['heightMap'],
+        roughness: roughCopy.copy as MaterialOutputResult['roughness'],
+        normal: normCopy.copy as MaterialOutputResult['normal'],
+        alphaDilated: res.output.alphaDilated,
+      },
+      pinnedBuffer,
+      thumbs,
+    }, transfers)
+  } catch (err) {
+    const reqId = 'reqId' in msg ? msg.reqId : 0
+    ctx.postMessage({
+      type: 'error',
+      reqId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
 }
