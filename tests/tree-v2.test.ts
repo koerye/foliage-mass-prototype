@@ -114,7 +114,7 @@ describe('foliage builders', () => {
 
   it.each(presetIds)('%s assembles with sane budgets', id => {
     const asset = buildTree(presetSpec(id), textures)
-    expect(asset.stats.triangles).toBeGreaterThan(id.startsWith('flowerbed') ? 50 : id.startsWith('grass') || id === 'fern' ? 200 : id.startsWith('palm') || id.startsWith('bamboo') || id.startsWith('lotus') ? 900 : 5000)
+    expect(asset.stats.triangles).toBeGreaterThan(id.startsWith('flowerbed') ? 50 : id.startsWith('grass') || id === 'fern' || id.startsWith('botanical-') ? 200 : id.startsWith('palm') || id.startsWith('bamboo') || id.startsWith('lotus') ? 900 : 5000)
     expect(asset.stats.triangles).toBeLessThan(150000)
     asset.dispose()
   })

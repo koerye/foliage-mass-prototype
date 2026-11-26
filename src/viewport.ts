@@ -96,6 +96,7 @@ export class Viewer {
     this.renderer.shadowMap.enabled = true
     this.renderer.shadowMap.type = PCFShadowMap
     this.renderer.shadowMap.autoUpdate = false
+    this.renderer.shadowMap.needsUpdate = true
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.55))
     this.renderer.domElement.setAttribute('aria-label', '三维树冠预览')
     this.onContextLostHandler = (ev: Event) => {

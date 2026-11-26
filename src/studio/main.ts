@@ -66,6 +66,7 @@ const byId = <T extends HTMLElement = HTMLElement>(id: string) => document.getEl
 const fmt = new Intl.NumberFormat('zh-CN')
 const lowIds: PresetId[] = ['shrub-round', 'shrub-spread', 'shrub-flower', 'conifer-shrub', 'grass-clump', 'grass-narrow', 'grass-dense', 'grass-tall', 'fern']
 const presetGroups: [string, PresetId[]][] = [
+  ['风格化植物 · 16 套高精库', presetIds.filter(id => presets[id].kind === 'botanical')],
   ['阔叶树', presetIds.filter(id => presets[id].kind === 'broadleaf' && !lowIds.includes(id))],
   ['针叶树', presetIds.filter(id => presets[id].kind === 'conifer' && !lowIds.includes(id))],
   ['棕榈树', presetIds.filter(id => presets[id].kind === 'palm')],
@@ -253,11 +254,12 @@ if (bootOverride) {
   lastAppliedOverrideSnap = JSON.stringify(bootOverride)
 }
 const kindLabels: Record<TreeKind, string> = {
-  broadleaf: '阔叶树', conifer: '针叶树', palm: '棕榈树', bamboo: '竹子', lotus: '荷花', grass: '草丛', fern: '蕨类', flowerbed: '花丛模板',
+  broadleaf: '阔叶树', conifer: '针叶树', palm: '棕榈树', bamboo: '竹子', lotus: '荷花', grass: '草丛', fern: '蕨类', flowerbed: '花丛模板', botanical: '风格化植物',
 }
 let asset: TreeAsset | undefined
 let view: View = 'final'
 function defaultCameraForPlant(plant: TreeSpec): Camera {
+  if (plant.kind === 'botanical') return 'angle'
   if (plant.kind !== 'lotus') return 'front'
   return plant.lotus.withStems ? 'angle' : 'top'
 }
@@ -549,9 +551,9 @@ function rebuild(reframe: boolean, final = true) {
       const el = document.getElementById('stat-' + key)
       if (el) el.textContent = fmt.format(value)
     }
-    byId('label-branches').textContent = spec.kind === 'flowerbed' ? '植物杆' : spec.kind === 'lotus' ? '荷茎' : spec.kind === 'bamboo' ? '竹竿/枝' : '枝条'
+    byId('label-branches').textContent = spec.kind === 'flowerbed' || spec.kind === 'botanical' ? '茎/叶柄' : spec.kind === 'lotus' ? '荷茎' : spec.kind === 'bamboo' ? '竹竿/枝' : '枝条'
     byId('label-twigs').textContent = spec.kind === 'broadleaf' ? '细枝' : '—'
-    byId('label-leaves').textContent = ({ broadleaf: '叶片卡', conifer: '针叶片', palm: '棕榈叶', bamboo: '竹叶卡', lotus: '荷叶', grass: '草叶', fern: '蕨叶', flowerbed: '花朵' } as const)[spec.kind]
+    byId('label-leaves').textContent = ({ broadleaf: '叶片卡', conifer: '针叶片', palm: '棕榈叶', bamboo: '竹叶卡', lotus: '荷叶', grass: '草叶', fern: '蕨叶', flowerbed: '花朵', botanical: '独立叶片' } as const)[spec.kind]
     if (spec.kind !== 'broadleaf') byId('stat-twigs').textContent = '—'
     updateOptStatus(asset.stats.triangles, !final)
     viewer.refreshShadows()

@@ -2,12 +2,51 @@
 // Supports unlimited independent trees, shrubs, flowers, grass, rocks, and multi-part AI scenes
 // positioned freely on a configurable painterly diorama ground tile.
 import { leafTextureSources, parseAiScene, type AiSceneSpec, type LeafTextureSource } from '../ai/scene'
+import type { PolyCsgPresetId } from '../rock-v2/poly-csg'
+import type { PolyPbrMode } from '../rock-v2/poly-pbr'
 import { parseRockSpec, type RockSpec } from '../rock/spec'
 import { parseSavedTextureMap, type SavedTextureMap } from '../studio/texture-serialize'
 import { parseTreeSpec, type TreeSpec } from '../tree/spec'
 import { lightingPresets, type LightingPreset } from '../viewport'
 
-export type AssemblyAssetKind = 'tree' | 'rock' | 'ai'
+export type AssemblyAssetKind = 'tree' | 'rock' | 'rock-c2' | 'ai'
+
+export interface PolyCRockSpec {
+  version: 1
+  preset: PolyCsgPresetId
+  name: string
+  mode: PolyPbrMode
+  seed: number
+  shoulderDepth: number
+  bevelScale: number
+  notchDepth: number
+  strataStrength: number
+  baseColor: string
+}
+
+export const polyCRockPresetIds: readonly PolyCsgPresetId[] = [
+  'sandstone-ledge-c2',
+  'block-bluff-c2',
+  'terraced-moss-bluff-c2',
+] as const
+
+export const polyCRockPresets: Record<PolyCsgPresetId, { name: string; subtitle: string; canonicalSeed: number }> = {
+  'sandstone-ledge-c2': {
+    name: '低矮横展砂岩 · C2',
+    subtitle: '路线 C2 显式布尔 · 230 面 · 512 PBR',
+    canonicalSeed: 5104,
+  },
+  'block-bluff-c2': {
+    name: '阶梯方巨岩 · C2',
+    subtitle: '路线 C2 显式布尔 · 220 面 · 512 PBR',
+    canonicalSeed: 7342,
+  },
+  'terraced-moss-bluff-c2': {
+    name: '17 苔藓层叠方巨岩 · C2',
+    subtitle: '13 块非正交 Manifold 水密并集 · 阶面内缩苔藓 512 PBR',
+    canonicalSeed: 7301,
+  },
+}
 export type AssemblyCategory = 'tree' | 'deadwood' | 'shrub' | 'grass' | 'flower' | 'rock' | 'scene'
 export type GroundStyle = 'diorama-path' | 'diorama-meadow' | 'studio' | 'none'
 export type PathLayout = 'birch-curve' | 'boulder-trail' | 'straight' | 'none'
@@ -95,7 +134,7 @@ export interface AssemblyItem {
   treeForm?: 'meadow-birch'
   leafTexture?: LeafTextureSource
   customTextures?: SavedTextureMap
-  payload: TreeSpec | RockSpec | AiSceneSpec
+  payload: TreeSpec | RockSpec | PolyCRockSpec | AiSceneSpec
 }
 
 export interface AssemblySceneSpec {
@@ -221,6 +260,12 @@ export function blankAssemblyScene(name = '空白场景组装'): AssemblySceneSp
 }
 
 export function inferCategoryFromTree(spec: TreeSpec): AssemblyCategory {
+  if (spec.kind === 'botanical') {
+    const mode = spec.botanical?.mode
+    if (mode === 'hydrangea-shrub' || mode === 'cosmos-shrub' || mode === 'flower-groundcover') return 'flower'
+    if (mode === 'rosette-shrub') return 'shrub'
+    return 'grass'
+  }
   if (spec.kind === 'grass' || spec.kind === 'fern') return 'grass'
   if (spec.kind === 'flowerbed' || spec.kind === 'lotus') return 'flower'
   if (spec.kind === 'bamboo') return 'tree'
@@ -276,6 +321,66 @@ export function createRockItem(
   }
 }
 
+export function defaultPolyCRockSpec(
+  preset: PolyCsgPresetId = 'sandstone-ledge-c2',
+  overrides: Partial<PolyCRockSpec> = {},
+): PolyCRockSpec {
+  const meta = polyCRockPresets[preset] ?? polyCRockPresets['sandstone-ledge-c2']
+  return {
+    version: 1,
+    preset,
+    name: meta.name,
+    mode: 'shallow-detail',
+    seed: meta.canonicalSeed,
+    shoulderDepth: 1.0,
+    bevelScale: 1.0,
+    notchDepth: 1.0,
+    strataStrength: 1.0,
+    baseColor: preset === 'terraced-moss-bluff-c2' ? '#c69f7b' : '#caa57c',
+    ...overrides,
+  }
+}
+
+export function parsePolyCRockSpec(raw: unknown): PolyCRockSpec {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const preset: PolyCsgPresetId = typeof o.preset === 'string' && (polyCRockPresetIds as readonly string[]).includes(o.preset)
+    ? (o.preset as PolyCsgPresetId)
+    : 'sandstone-ledge-c2'
+  const d = defaultPolyCRockSpec(preset)
+  const mode: PolyPbrMode = o.mode === 'baseline' ? 'baseline' : 'shallow-detail'
+  return {
+    version: 1,
+    preset,
+    name: typeof o.name === 'string' && o.name.trim() ? o.name.trim().slice(0, 64) : d.name,
+    mode,
+    seed: Math.max(0, Math.round(clamp(o.seed as number, 0, 9999999, d.seed))),
+    shoulderDepth: Number(clamp(o.shoulderDepth as number, 0.65, 1.35, d.shoulderDepth).toFixed(3)),
+    bevelScale: Number(clamp(o.bevelScale as number, 0, 1.4, d.bevelScale).toFixed(3)),
+    notchDepth: Number(clamp(o.notchDepth as number, 0.5, 1.4, d.notchDepth).toFixed(3)),
+    strataStrength: Number(clamp(o.strataStrength as number, 0, 1.5, d.strataStrength).toFixed(3)),
+    baseColor: parseHex(o.baseColor, d.baseColor),
+  }
+}
+
+export function createRockC2Item(
+  spec: PolyCRockSpec,
+  opts: Partial<Omit<AssemblyItem, 'kind' | 'payload'>> = {},
+): AssemblyItem {
+  const parsed = parsePolyCRockSpec(spec)
+  return {
+    id: opts.id ?? makeItemId('rock-c2'),
+    name: opts.name ?? parsed.name,
+    kind: 'rock-c2',
+    category: opts.category ?? 'rock',
+    visible: opts.visible ?? true,
+    locked: opts.locked ?? false,
+    position: opts.position ? [...opts.position] : [0, 0, 0],
+    rotation: opts.rotation ? [...opts.rotation] : [0, 0, 0],
+    scale: opts.scale ? [...opts.scale] : [1, 1, 1],
+    payload: parsed,
+  }
+}
+
 export function createAiItem(
   scene: AiSceneSpec,
   opts: Partial<Omit<AssemblyItem, 'kind' | 'payload'>> = {},
@@ -318,16 +423,18 @@ export function parseAssemblyItem(raw: unknown): AssemblyItem | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const o = raw as Record<string, unknown>
   const kind: AssemblyAssetKind | undefined =
-    o.kind === 'tree' || o.kind === 'rock' || o.kind === 'ai' ? o.kind : undefined
+    o.kind === 'tree' || o.kind === 'rock' || o.kind === 'rock-c2' || o.kind === 'ai' ? o.kind : undefined
   if (!kind || !o.payload || typeof o.payload !== 'object') return undefined
   try {
     const payload = kind === 'tree'
       ? parseTreeSpec(o.payload)
       : kind === 'rock'
         ? parseRockSpec(o.payload)
-        : parseAiScene(o.payload)
+        : kind === 'rock-c2'
+          ? parsePolyCRockSpec(o.payload)
+          : parseAiScene(o.payload)
     const fallbackCat: AssemblyCategory =
-      kind === 'rock' ? 'rock' : kind === 'ai' ? 'scene' : inferCategoryFromTree(payload as TreeSpec)
+      kind === 'rock' || kind === 'rock-c2' ? 'rock' : kind === 'ai' ? 'scene' : inferCategoryFromTree(payload as TreeSpec)
     const category: AssemblyCategory = VALID_CATEGORIES.has(o.category as AssemblyCategory)
       ? (o.category as AssemblyCategory)
       : fallbackCat
@@ -479,6 +586,10 @@ export function detectImportedAssetJson(raw: unknown):
   if ('shape' in o && 'detail' in o && 'shading' in o && 'top' in o) {
     const rock = parseRockSpec(raw)
     return { type: 'item', item: createRockItem(rock, { name: rock.name }) }
+  }
+  if (typeof o.preset === 'string' && (polyCRockPresetIds as readonly string[]).includes(o.preset)) {
+    const c2 = parsePolyCRockSpec(raw)
+    return { type: 'item', item: createRockC2Item(c2, { name: c2.name }) }
   }
   if (Array.isArray(o.parts)) {
     const ai = parseAiScene(raw)

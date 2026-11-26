@@ -2,8 +2,33 @@ import '../style.css'
 import '../studio/studio.css'
 import '../studio/presets.css'
 import './rock.css'
-import { Vector3 } from 'three'
+import {
+  Box3,
+  BufferAttribute,
+  BufferGeometry,
+  CanvasTexture,
+  DynamicDrawUsage,
+  Group,
+  LinearMipmapLinearFilter,
+  Mesh,
+  MeshStandardMaterial,
+  NoColorSpace,
+  Sphere,
+  SRGBColorSpace,
+  Vector2,
+  Vector3,
+} from 'three'
 import { exportGlb } from '../export-glb'
+import type { RockV2BakeDiagnostics, RockV2BrushMode } from '../rock-v2/bake'
+import { PolyCWorkerClient, type PolyCJobMeta } from '../rock-v2/poly-c-client'
+import type { PolyCWorkerBakeResponse, PolyCWorkerPreviewResponse } from '../rock-v2/poly-c.worker'
+import PolyCWorker from '../rock-v2/poly-c.worker?worker&inline'
+import type { PolyCsgPresetId } from '../rock-v2/poly-csg'
+import type { PolyBakeStats, PolyPbrMode, PolyUvAudit } from '../rock-v2/poly-pbr'
+import type { RockV2WorkerBakeResponse, RockV2WorkerPreviewResponse } from '../rock-v2/rock-v2.worker'
+import RockV2Worker from '../rock-v2/rock-v2.worker?worker&inline'
+import type { RockV2ArchetypeId, RockV2SculptParams } from '../rock-v2/sdf'
+import { RockV2WorkerClient, type RockV2JobMeta } from '../rock-v2/worker-client'
 import { activityLog, initStudioLogging } from '../studio/activity-log'
 import { mountActivityLogDrawer } from '../studio/activity-log-ui'
 import { mountDesktopToolbarBadge, tryDesktopSaveBlob } from '../studio/desktop-bridge'
@@ -28,11 +53,17 @@ const topModeDefaultColors: Record<RockTopMode, string> = {
 }
 const presetBadges: Record<RockPresetId, string> = {
   'boulder-sand-cap': '厚涂',
-  'cel-anime-rock': '赛璐璐',
+  'cel-anime-rock': '卡通',
   'boulder-chiseled': '精雕',
   'boulder-slab': '厚涂',
   'mossy-forest-rock': '青苔',
   'rock-cluster': '石堆',
+  'handpainted-wedge': '手绘',
+  'handpainted-twin-slab': '手绘',
+  'handpainted-block-bluff': '手绘',
+  'handpainted-layered-ridge': '手绘',
+  'handpainted-crag-spire': '手绘',
+  'handpainted-monolith': '手绘',
 }
 
 const byId = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
@@ -56,8 +87,9 @@ const sections: { title: string; open: boolean; fields: FieldDef[] }[] = [
       { kind: 'range', path: 'shape.flatness', label: '平面宽阔度', min: 0, max: 1, step: 0.01 },
       { kind: 'range', path: 'shape.bevel', label: '棱边倒角', min: 0, max: 0.32, step: 0.005 },
       { kind: 'range', path: 'shape.asymmetry', label: '非对称造型', min: 0, max: 1, step: 0.01 },
-      { kind: 'range', path: 'shape.taperTop', label: '顶部收窄', min: -0.35, max: 0.55, step: 0.01 },
+      { kind: 'range', path: 'shape.taperTop', label: '顶部收窄', min: -0.35, max: 0.85, step: 0.01 },
       { kind: 'range', path: 'shape.bottomFlat', label: '底面压平', min: 0, max: 1, step: 0.01 },
+      { kind: 'range', path: 'shape.slabs', label: '叠层块数', min: 1, max: 3, step: 1 },
     ],
   },
   {
@@ -103,6 +135,7 @@ const sections: { title: string; open: boolean; fields: FieldDef[] }[] = [
       { kind: 'range', path: 'cluster.count', label: '石块数量', min: 1, max: 5, step: 1 },
       { kind: 'range', path: 'cluster.spread', label: '石堆间距', min: 0.45, max: 1.8, step: 0.01 },
       { kind: 'range', path: 'cluster.scaleDecay', label: '副石比例', min: 0.3, max: 0.85, step: 0.01 },
+      { kind: 'range', path: 'cluster.pebbles', label: '底座碎石', min: 0, max: 6, step: 1 },
     ],
   },
 ]
@@ -138,7 +171,7 @@ function setPath(obj: unknown, path: string, value: unknown) {
 byId('app').classList.add('s-studio')
 byId('app').innerHTML = `
 <header class="bar">
-  <div class="brand"><span class="mark rk-mark" aria-hidden="true">◈</span><div><h1>Rock Studio</h1><span>风格化石头工作台 · 切面雕刻 &amp; 赛璐璐</span></div></div>
+  <div class="brand"><span class="mark rk-mark" aria-hidden="true">◈</span><div><h1>Rock Studio</h1><span>切面 · 手绘裂纹 · 赛璐璐</span></div></div>
   <nav aria-label="项目操作">
     <a class="b-link" href="./broadleaf.html" title="返回程序化树木工作台">← 树木工作台</a>
     <a class="b-link" href="./ai.html" title="前往 AI 模式空白工程">✦ AI 模式</a>
@@ -188,6 +221,47 @@ byId('app').innerHTML = `
       <div class="rk-preset-grid" role="group" aria-label="石头预设">
         ${rockPresetIds.map(id => `<button type="button" class="rk-preset-btn" data-preset="${id}" aria-pressed="false"><span>${rockPresets[id].name}</span><span class="rk-preset-tag">${presetBadges[id]}</span></button>`).join('')}
       </div>
+      <button type="button" id="rk-sdf-proto-btn" class="rk-sdf-btn" aria-pressed="false" title="路线 B 单偏心母体减切 SDF + Surface Nets + 512 标准 PBR Worker 实验入口">
+        <span>🧪 路线 B · SDF 雕刻实验</span><span class="rk-preset-tag">方案 B · 512 PBR</span>
+      </button>
+      <button type="button" id="rk-polyc-proto-btn" class="rk-polyc-btn" aria-pressed="false" title="路线 C2 显式多面体布尔（Manifold WASM）+ 表面直烘 512 PBR 三预设实验入口">
+        <span>💎 路线 C2 · 显式布尔实验</span><span class="rk-preset-tag">三预设 · 512 PBR</span>
+      </button>
+      <div id="rk-polyc-proto-box" class="rk-polyc-box" hidden>
+        <div class="rk-polyc-banner" id="rk-polyc-banner">路线 C2 显式布尔实验（离线 Manifold + 折痕 UV 拆分 + 表面直烘 512 PBR · 拖拽灰模预览 / 松手 512 材质）</div>
+        <div class="rk-polyc-mode-tabs" role="group" aria-label="C2 石型预设">
+          <button type="button" data-polyc-preset="sandstone-ledge-c2" aria-pressed="true">低矮横展砂岩</button>
+          <button type="button" data-polyc-preset="block-bluff-c2" aria-pressed="false">阶梯方巨岩</button>
+          <button type="button" data-polyc-preset="terraced-moss-bluff-c2" aria-pressed="false">苔藓层叠巨岩</button>
+        </div>
+        <div class="rk-polyc-mode-tabs" role="group" aria-label="C2 材质模式">
+          <button type="button" data-polyc-mode="shallow-detail" aria-pressed="true">浅细节版（面内层理）</button>
+          <button type="button" data-polyc-mode="baseline" aria-pressed="false">材质基线（诊断）</button>
+        </div>
+        <label class="s-field s-top"><span>随机种子</span><input id="polyc-seed" type="number" min="0" step="1" value="5104"><button type="button" id="polyc-reseed" title="随机路线 C2 种子">🎲</button></label>
+        <label class="s-field"><span>肩台切深</span><input type="range" data-polyc-r="shoulderDepth" min="0.65" max="1.35" step="0.02" value="1.0"><input type="number" data-polyc-n="shoulderDepth" min="0.65" max="1.35" step="0.02" value="1.0"></label>
+        <label class="s-field"><span>局部倒角</span><input type="range" data-polyc-r="bevelScale" min="0" max="1.4" step="0.05" value="1.0"><input type="number" data-polyc-n="bevelScale" min="0" max="1.4" step="0.05" value="1.0"></label>
+        <label class="s-field"><span>V 槽深度</span><input type="range" data-polyc-r="notchDepth" min="0.5" max="1.4" step="0.02" value="1.0"><input type="number" data-polyc-n="notchDepth" min="0.5" max="1.4" step="0.02" value="1.0"></label>
+        <label class="s-field" id="polyc-strata-field"><span>浅层理强度</span><input type="range" data-polyc-r="strataStrength" min="0" max="1.5" step="0.05" value="1.0"><input type="number" data-polyc-n="strataStrength" min="0" max="1.5" step="0.05" value="1.0"></label>
+        <label class="s-field"><span>石体基色</span><input type="color" id="polyc-color" value="#caa57c"></label>
+        <div class="rk-sdf-metrics" id="rk-polyc-metrics">等待进入路线 C2 显式布尔实验模式…</div>
+      </div>
+      <div id="rk-sdf-proto-box" class="rk-sdf-box" hidden>
+        <div class="rk-sdf-banner" id="rk-sdf-banner">单偏心母体减切 + 后台 Worker 异步雕刻（拖拽 N=30 预览 / 松手 512 标准 PBR · 零自定义 Shader，支持直出 GLB/glTF/FBX）</div>
+        <div class="rk-sdf-arch-tabs" role="group" aria-label="SDF 石型">
+          <button type="button" data-sdf-arch="sandstone-ledge-b" aria-pressed="true">低矮横展砂岩</button>
+          <button type="button" data-sdf-arch="block-bluff" aria-pressed="false">阶梯方巨岩</button>
+          <button type="button" data-sdf-arch="twin-slab" aria-pressed="false">双叠断层岩</button>
+        </div>
+        <label class="s-field s-top"><span>随机种子</span><input id="sdf-seed" type="number" min="0" step="1" value="5104"><button type="button" id="sdf-reseed" title="随机 SDF 种子">🎲</button></label>
+        <label class="s-field"><span>雕刻深度</span><input type="range" data-sdf-r="carveDepth" min="0.55" max="1.45" step="0.02" value="1.0"><input type="number" data-sdf-n="carveDepth" min="0.55" max="1.45" step="0.02" value="1.0"></label>
+        <label class="s-field"><span>棱线锐度</span><input type="range" data-sdf-r="ridgeCrispness" min="0" max="1" step="0.02" value="0.90"><input type="number" data-sdf-n="ridgeCrispness" min="0" max="1" step="0.02" value="0.90"></label>
+        <label class="s-field"><span>裂纹强度</span><input type="range" data-sdf-r="crackStrength" min="0" max="1.5" step="0.05" value="1.0"><input type="number" data-sdf-n="crackStrength" min="0" max="1.5" step="0.05" value="1.0"></label>
+        <label class="s-field"><span>石体基色</span><input type="color" id="sdf-color" value="#caa57c"></label>
+        <label class="s-field"><span>定向宽笔触</span><select id="sdf-brush"><option value="off">关闭（干净块面）</option><option value="subtle" selected>低强度层理宽笔触</option></select></label>
+        <div class="rk-sdf-metrics" id="rk-sdf-metrics">等待进入 SDF 实验模式…</div>
+      </div>
+      <div id="rk-legacy-controls">
       <div class="dp-bar" id="default-preset-bar">
         <button type="button" id="save-default" class="dp-save-btn" title="将当前参数保存并替换当前默认预设（写入本地文件，刷新后永久生效）">★ 保存替换默认预设</button>
         <button type="button" id="reset-factory" class="dp-factory-btn" title="清除自定义覆盖，恢复出厂内置默认参数" hidden>恢复出厂</button>
@@ -196,8 +270,10 @@ byId('app').innerHTML = `
       <div class="rk-style-tabs" role="group" aria-label="着色风格">
         <button type="button" data-style="painterly" aria-pressed="true">厚涂风格化</button>
         <button type="button" data-style="cel" aria-pressed="false">赛璐璐简面</button>
+        <button type="button" data-style="handpainted" aria-pressed="false">手绘裂纹岩</button>
       </div>
       ${sections.map(s => `<details class="s-section"${s.open ? ' open' : ''}><summary>${s.title}</summary>${s.fields.map(renderField).join('')}</details>`).join('')}
+      </div>
     </div>
   </form>
 </section>
@@ -252,6 +328,829 @@ let rockMaterial = makeRockMaterial(spec, viewMode)
 let vertexColorsDirty = false
 let buildCount = 0
 let toastTimer: ReturnType<typeof setTimeout>
+
+// ---------------------------------------------------------------------------
+// Single-Preset Experimental Route-B SDF Worker Pipeline (block-bluff · N=30 / 512 PBR)
+// Strictly isolated from the 12 legacy presets and Scene Assembly builder.
+// ---------------------------------------------------------------------------
+type SdfProtoArchetype = Extract<RockV2ArchetypeId, 'sandstone-ledge-b' | 'block-bluff' | 'twin-slab'>
+
+interface SdfProtoParams {
+  archetype: SdfProtoArchetype
+  seed: number
+  carveDepth: number
+  ridgeCrispness: number
+  crackStrength: number
+  baseColorHex: string
+  brushMode: RockV2BrushMode
+}
+
+const SDF_ARCH_LABELS: Record<SdfProtoArchetype, string> = {
+  'sandstone-ledge-b': '低矮横展砂岩 · 方案 B',
+  'block-bluff': '阶梯方巨岩 · 方案 B',
+  'twin-slab': '双叠断层岩 · V 槽',
+}
+
+const DEFAULT_SDF_PARAMS: SdfProtoParams = {
+  archetype: 'sandstone-ledge-b',
+  seed: 5104,
+  carveDepth: 1.0,
+  ridgeCrispness: 0.90,
+  crackStrength: 1.0,
+  baseColorHex: '#caa57c',
+  brushMode: 'subtle',
+}
+
+let sdfProtoActive = false
+let sdfParams: SdfProtoParams = { ...DEFAULT_SDF_PARAMS }
+let sdfAppliedParams: SdfProtoParams | null = null
+let sdfPendingReframe = false
+let sdfAutoBakeAfterPreview = false
+let sdfLastBakeStats: RockV2BakeDiagnostics | null = null
+let sdfActiveTextures: CanvasTexture[] = []
+let sdfActiveMat: MeshStandardMaterial | null = null
+const sdfJobParamsMap = new Map<number, SdfProtoParams>()
+const sdfMetrics = {
+  previewToFirstFrameMs: [] as number[],
+  releaseToMaterialVisibleMs: [] as number[],
+  appliedHistory: [] as {
+    jobId: number
+    stage: 'preview' | 'bake'
+    params: SdfProtoParams
+    workerMs: number
+    roundTripMs: number
+    paintVisibleMs: number
+  }[],
+}
+
+function makeSdfCanvasTexture(rgba: Uint8ClampedArray, size: number, srgb: boolean, name: string): CanvasTexture {
+  const c = document.createElement('canvas')
+  c.width = size
+  c.height = size
+  const ctx = c.getContext('2d')!
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba), size, size), 0, 0)
+  const tex = new CanvasTexture(c)
+  tex.name = name
+  tex.flipY = false
+  tex.colorSpace = srgb ? SRGBColorSpace : NoColorSpace
+  tex.generateMipmaps = true
+  tex.minFilter = LinearMipmapLinearFilter
+  tex.anisotropy = 4
+  tex.needsUpdate = true
+  return tex
+}
+
+function disposeSdfGpuResources() {
+  for (const t of sdfActiveTextures) t.dispose()
+  sdfActiveTextures = []
+  sdfActiveMat?.dispose()
+  sdfActiveMat = null
+}
+
+function applySdfViewMode() {
+  if (!sdfActiveMat) return
+  sdfActiveMat.wireframe = viewMode === 'wireframe'
+  if (viewMode === 'clay') {
+    sdfActiveMat.color.set('#d2cbc1')
+    sdfActiveMat.map = null
+    sdfActiveMat.aoMap = null
+    sdfActiveMat.needsUpdate = true
+  } else {
+    const hasMaps = sdfActiveTextures.length >= 3
+    sdfActiveMat.color.set(hasMaps ? '#ffffff' : sdfParams.baseColorHex)
+    sdfActiveMat.map = hasMaps ? sdfActiveTextures[0] : null
+    sdfActiveMat.aoMap = hasMaps ? sdfActiveTextures[2] : null
+    sdfActiveMat.needsUpdate = true
+  }
+}
+
+function updateSdfMetricsBanner(stageLabel: string, workerMs: number, paintMs?: number) {
+  const el = document.getElementById('rk-sdf-metrics')
+  if (!el) return
+  const cs = sdfWorkerClient.getStats()
+  const bakeStr = sdfLastBakeStats
+    ? `解析命中 ${(sdfLastBakeStats.analyticalHitRate * 100).toFixed(2)}% · 缓存回退 ${(sdfLastBakeStats.cacheFallbackRate * 100).toFixed(2)}% · P95残差 ${sdfLastBakeStats.p95AnalyticalResidual}m`
+    : '等待 512 PBR 烘焙…'
+  el.textContent = `${stageLabel} (${workerMs.toFixed(1)}ms${paintMs !== undefined ? ` · 上屏 ${paintMs.toFixed(1)}ms` : ''}) | Worker=${cs.usingWorker ? '后台线程' : '同步回退'} | 过期丢弃=${cs.staleDropped} · 合并跳过=${cs.coalescedSkipped} | ${bakeStr}`
+}
+
+function applySdfWorkerResult(res: RockV2WorkerPreviewResponse | RockV2WorkerBakeResponse, meta: RockV2JobMeta) {
+  if (!sdfProtoActive) return
+  const jobParams = sdfJobParamsMap.get(res.jobId) ?? { ...sdfParams }
+  sdfJobParamsMap.delete(res.jobId)
+  sdfAppliedParams = { ...jobParams }
+
+  const prev = built
+  const prevTextures = sdfActiveTextures
+  const prevMat = sdfActiveMat
+
+  const geo = new BufferGeometry()
+  geo.setAttribute('position', new BufferAttribute(res.positions, 3))
+  geo.setAttribute('normal', new BufferAttribute(res.normals, 3))
+  if (res.stage === 'bake') {
+    geo.setAttribute('uv', new BufferAttribute(res.uvs, 2))
+    geo.setAttribute('tangent', new BufferAttribute(res.tangents, 4))
+  }
+  geo.setIndex(new BufferAttribute(res.indices, 1))
+  geo.computeBoundingBox()
+  geo.computeBoundingSphere()
+
+  let mat: MeshStandardMaterial
+  let nextTextures: CanvasTexture[] = []
+  let workerMs = 0
+
+  if (res.stage === 'bake') {
+    const mapTex = makeSdfCanvasTexture(res.albedo, res.size, true, 'RockV2_BaseColor')
+    const normTex = makeSdfCanvasTexture(res.normal, res.size, false, 'RockV2_Normal')
+    const aoTex = makeSdfCanvasTexture(res.ao, res.size, false, 'RockV2_AO')
+    aoTex.channel = 0
+    nextTextures = [mapTex, normTex, aoTex]
+    mat = new MeshStandardMaterial({
+      name: 'Mat_RockV2_BlockBluff',
+      color: 0xffffff,
+      map: mapTex,
+      normalMap: normTex,
+      normalScale: new Vector2(1, 1),
+      aoMap: aoTex,
+      aoMapIntensity: 0.85,
+      roughness: 0.90,
+      metalness: 0.0,
+    })
+    sdfLastBakeStats = res.bakeStats
+    workerMs = res.meshTimings.totalMs + res.uvMs + res.bakeStats.timings.totalBakeMs
+  } else {
+    mat = new MeshStandardMaterial({
+      name: 'Mat_RockV2_PreviewClay',
+      color: jobParams.baseColorHex,
+      roughness: 0.90,
+      metalness: 0.0,
+    })
+    workerMs = res.timings.totalMs
+  }
+
+  sdfActiveTextures = nextTextures
+  sdfActiveMat = mat
+  applySdfViewMode()
+
+  const mesh = new Mesh(geo, mat)
+  mesh.name = 'RockV2_BlockBluff_LOD0'
+  mesh.castShadow = true
+  mesh.receiveShadow = true
+  const group = new Group()
+  group.name = 'RockV2Asset'
+  group.add(mesh)
+
+  const bounds = new Box3().setFromObject(group)
+  const vCount = res.positions.length / 3
+  const tCount = res.indices.length / 3
+  const stats: RockBuildStats = {
+    stones: 1,
+    vertices: vCount,
+    triangles: tCount,
+    ms: Math.round(workerMs * 10) / 10,
+  }
+  built = {
+    group,
+    meshes: [mesh],
+    bounds,
+    stats,
+    dispose: () => { geo.dispose() },
+  }
+  buildCount++
+
+  const size = bounds.getSize(new Vector3())
+  const span = Math.max(1.05, size.length() * 0.76)
+  viewer?.showModel(group, span, false)
+  if (sdfPendingReframe) {
+    viewer?.frame(camera, bounds.getCenter(new Vector3()))
+    sdfPendingReframe = false
+  }
+  viewer?.refreshShadows()
+
+  prev?.dispose()
+  for (const t of prevTextures) t.dispose()
+  prevMat?.dispose()
+  updateStats(stats)
+
+  // Measure true frame-visible paint latency via requestAnimationFrame right after scene update
+  requestAnimationFrame(() => {
+    const paintVisibleMs = Math.round((performance.now() - meta.submittedAt) * 10) / 10
+    if (res.stage === 'preview') sdfMetrics.previewToFirstFrameMs.push(paintVisibleMs)
+    else sdfMetrics.releaseToMaterialVisibleMs.push(paintVisibleMs)
+    sdfMetrics.appliedHistory.push({
+      jobId: res.jobId,
+      stage: res.stage,
+      params: { ...jobParams },
+      workerMs: Math.round(workerMs * 10) / 10,
+      roundTripMs: meta.roundTripMs,
+      paintVisibleMs,
+    })
+    if (sdfMetrics.appliedHistory.length > 60) sdfMetrics.appliedHistory.shift()
+    updateSdfMetricsBanner(res.stage === 'bake' ? '512 PBR 就绪' : 'N=30 拖拽预览', workerMs, paintVisibleMs)
+    if (res.stage === 'preview' && sdfAutoBakeAfterPreview && sdfProtoActive) {
+      sdfAutoBakeAfterPreview = false
+      submitSdfJob('bake', false)
+    }
+  })
+}
+
+const sdfWorkerClient = new RockV2WorkerClient(
+  applySdfWorkerResult,
+  err => message(`SDF Worker 错误：${err.message}`, true),
+  {
+    workerFactory: () => {
+      try {
+        return new RockV2Worker()
+      } catch {
+        return null
+      }
+    },
+  },
+)
+
+function syncSdfPanel() {
+  byId('rk-sdf-proto-btn').setAttribute('aria-pressed', String(sdfProtoActive))
+  byId('rk-sdf-proto-box').hidden = !sdfProtoActive
+  byId('rk-legacy-controls').hidden = sdfProtoActive || polyCProtoActive
+  if (!sdfProtoActive) return
+  byId('rock-title').textContent = `${SDF_ARCH_LABELS[sdfParams.archetype]} · SDF 实验 (N=30 / 512 PBR)`
+  document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach(btn => {
+    btn.setAttribute('aria-pressed', 'false')
+  })
+  document.querySelectorAll<HTMLButtonElement>('[data-sdf-arch]').forEach(btn => {
+    btn.setAttribute('aria-pressed', String(btn.dataset.sdfArch === sdfParams.archetype))
+  })
+  ;(byId('sdf-seed') as HTMLInputElement).value = String(sdfParams.seed)
+  ;(byId('sdf-color') as HTMLInputElement).value = sdfParams.baseColorHex
+  ;(byId('sdf-brush') as HTMLSelectElement).value = sdfParams.brushMode
+  for (const k of ['carveDepth', 'ridgeCrispness', 'crackStrength'] as const) {
+    const r = document.querySelector<HTMLInputElement>(`[data-sdf-r="${k}"]`)
+    const n = document.querySelector<HTMLInputElement>(`[data-sdf-n="${k}"]`)
+    if (r) r.value = String(sdfParams[k])
+    if (n) n.value = String(Number(sdfParams[k].toFixed(2)))
+  }
+}
+
+function submitSdfJob(stage: 'preview' | 'bake', reframe = false) {
+  if (!sdfProtoActive) return
+  if (reframe) sdfPendingReframe = true
+  const snapshot: SdfProtoParams = { ...sdfParams }
+  const jobId = sdfWorkerClient.submit({
+    stage,
+    archetype: snapshot.archetype,
+    resolution: 30,
+    sculpt: {
+      seed: snapshot.seed,
+      carveDepth: snapshot.carveDepth,
+      ridgeCrispness: snapshot.ridgeCrispness,
+      crackStrength: snapshot.crackStrength,
+    },
+    bake: stage === 'bake' ? {
+      size: 512,
+      dilationPasses: 10,
+      brushMode: snapshot.brushMode,
+      baseColorHex: snapshot.baseColorHex,
+    } : undefined,
+  })
+  sdfJobParamsMap.set(jobId, snapshot)
+  if (sdfJobParamsMap.size > 40) {
+    const firstKey = sdfJobParamsMap.keys().next().value
+    if (firstKey !== undefined) sdfJobParamsMap.delete(firstKey)
+  }
+  const el = document.getElementById('rk-sdf-metrics')
+  if (el) el.textContent = stage === 'bake' ? '后台 Worker 正在烘焙 512 PBR 贴图…' : '后台 Worker 正在生成 N=30 预览网格…'
+}
+
+function enterSdfProto(resetParams = false) {
+  exitPolyCProto()
+  if (resetParams) sdfParams = { ...DEFAULT_SDF_PARAMS }
+  sdfProtoActive = true
+  sdfLastBakeStats = null
+  sdfAutoBakeAfterPreview = true
+  syncSdfPanel()
+  submitSdfJob('preview', true)
+}
+
+function exitSdfProto() {
+  if (!sdfProtoActive) return
+  sdfProtoActive = false
+  sdfAutoBakeAfterPreview = false
+  sdfWorkerClient.cancelAll()
+  sdfJobParamsMap.clear()
+  disposeSdfGpuResources()
+  syncSdfPanel()
+}
+
+// ---------------------------------------------------------------------------
+// Experimental Route-C2 Explicit Manifold Boolean Worker Pipeline
+//   Supports validated archetypes: `sandstone-ledge-c2` & `block-bluff-c2`.
+//   Isolated from the 12 legacy presets, Route B SDF mode, and Scene Assembly builder.
+// ---------------------------------------------------------------------------
+interface PolyCProtoParams {
+  preset: PolyCsgPresetId
+  mode: PolyPbrMode
+  seed: number
+  shoulderDepth: number
+  bevelScale: number
+  notchDepth: number
+  strataStrength: number
+  baseColorHex: string
+}
+
+const POLYC_PRESET_META: Record<PolyCsgPresetId, { label: string; canonicalSeed: number; meshName: string }> = {
+  'sandstone-ledge-c2': { label: '低矮横展砂岩', canonicalSeed: 5104, meshName: 'RockC2_SandstoneLedge_LOD0' },
+  'block-bluff-c2': { label: '阶梯方巨岩', canonicalSeed: 7342, meshName: 'RockC2_BlockBluff_LOD0' },
+  'terraced-moss-bluff-c2': { label: '苔藓层叠方巨岩', canonicalSeed: 7301, meshName: 'RockC2_TerracedMossBluff_LOD0' },
+}
+
+const DEFAULT_POLYC_PARAMS: PolyCProtoParams = {
+  preset: 'sandstone-ledge-c2',
+  mode: 'shallow-detail',
+  seed: 5104,
+  shoulderDepth: 1.0,
+  bevelScale: 1.0,
+  notchDepth: 1.0,
+  strataStrength: 1.0,
+  baseColorHex: '#caa57c',
+}
+
+let polyCProtoActive = false
+let polyCParams: PolyCProtoParams = { ...DEFAULT_POLYC_PARAMS }
+let polyCAppliedParams: PolyCProtoParams | null = null
+let polyCPendingReframe = false
+let polyCAutoBakeAfterPreview = false
+let polyCLastBakeStats: PolyBakeStats | null = null
+let polyCLastUvAudit: PolyUvAudit | null = null
+let polyCActiveTextures: CanvasTexture[] = []
+let polyCActiveMat: MeshStandardMaterial | null = null
+let polyCActiveBakeMat: MeshStandardMaterial | null = null
+let polyCActiveBakeGeo: BufferGeometry | null = null
+let polyCPreviewMat: MeshStandardMaterial | null = null
+let polyCPreviewGeo: BufferGeometry | null = null
+let polyCPreviewPosCap = 0
+let polyCPreviewIdxCap = 0
+let polyCPreviewGroup: Group | null = null
+let polyCPreviewMesh: Mesh | null = null
+let polyCLastShadowRefreshAt = 0
+let polyCShadowTimer: number | null = null
+const polyCJobParamsMap = new Map<number, PolyCProtoParams>()
+const polyCMetrics = {
+  previewToFirstFrameMs: [] as number[],
+  releaseToMaterialVisibleMs: [] as number[],
+  appliedHistory: [] as {
+    jobId: number
+    stage: 'preview' | 'bake'
+    params: PolyCProtoParams
+    workerMs: number
+    queueWaitMs: number
+    ipcOverheadMs: number
+    roundTripMs: number
+    mainUploadMs: number
+    rafWaitMs: number
+    paintVisibleMs: number
+    phases?: {
+      booleanMs: number
+      fallbackMs: number
+      fallbackCount: number
+      auditMs: number
+      previewBufMs: number
+      workerTotalMs: number
+    }
+  }[],
+}
+
+function disposePolyCBakeResources() {
+  for (const t of polyCActiveTextures) t.dispose()
+  polyCActiveTextures = []
+  polyCActiveBakeMat?.dispose()
+  polyCActiveBakeMat = null
+  polyCActiveBakeGeo?.dispose()
+  polyCActiveBakeGeo = null
+}
+
+function disposePolyCGpuResources() {
+  if (polyCShadowTimer !== null) {
+    clearTimeout(polyCShadowTimer)
+    polyCShadowTimer = null
+  }
+  disposePolyCBakeResources()
+  polyCPreviewMat?.dispose()
+  polyCPreviewMat = null
+  polyCPreviewGeo?.dispose()
+  polyCPreviewGeo = null
+  polyCPreviewPosCap = 0
+  polyCPreviewIdxCap = 0
+  polyCPreviewMesh = null
+  polyCPreviewGroup = null
+  polyCActiveMat = null
+}
+
+function computePolyCPreviewBounds(positions: Float32Array): { box: Box3; sphere: Sphere } {
+  const box = new Box3()
+  let minX = Infinity, minY = Infinity, minZ = Infinity
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
+  for (let i = 0; i < positions.length; i += 3) {
+    const x = positions[i], y = positions[i + 1], z = positions[i + 2]
+    if (x < minX) minX = x
+    if (y < minY) minY = y
+    if (z < minZ) minZ = z
+    if (x > maxX) maxX = x
+    if (y > maxY) maxY = y
+    if (z > maxZ) maxZ = z
+  }
+  if (!Number.isFinite(minX)) {
+    box.min.set(0, 0, 0)
+    box.max.set(0, 0, 0)
+  } else {
+    box.min.set(minX, minY, minZ)
+    box.max.set(maxX, maxY, maxZ)
+  }
+  const sphere = new Sphere()
+  box.getBoundingSphere(sphere)
+  return { box, sphere }
+}
+
+function updatePolyCPreviewGeoInPlace(
+  positions: Float32Array,
+  normals: Float32Array,
+  indices: Uint32Array,
+): { geo: BufferGeometry; bounds: Box3 } {
+  if (!polyCPreviewGeo || positions.length > polyCPreviewPosCap || indices.length > polyCPreviewIdxCap) {
+    polyCPreviewGeo?.dispose()
+    polyCPreviewPosCap = Math.max(2048 * 3, positions.length * 2)
+    polyCPreviewIdxCap = Math.max(4096, indices.length * 2)
+    const geo = new BufferGeometry()
+    const posAttr = new BufferAttribute(new Float32Array(polyCPreviewPosCap), 3)
+    posAttr.setUsage(DynamicDrawUsage)
+    const normAttr = new BufferAttribute(new Float32Array(polyCPreviewPosCap), 3)
+    normAttr.setUsage(DynamicDrawUsage)
+    const idxAttr = new BufferAttribute(new Uint32Array(polyCPreviewIdxCap), 1)
+    idxAttr.setUsage(DynamicDrawUsage)
+    geo.setAttribute('position', posAttr)
+    geo.setAttribute('normal', normAttr)
+    geo.setIndex(idxAttr)
+    polyCPreviewGeo = geo
+  }
+  const posAttr = polyCPreviewGeo.getAttribute('position') as BufferAttribute
+  const normAttr = polyCPreviewGeo.getAttribute('normal') as BufferAttribute
+  const idxAttr = polyCPreviewGeo.getIndex()!
+  ;(posAttr.array as Float32Array).set(positions)
+  ;(normAttr.array as Float32Array).set(normals)
+  ;(idxAttr.array as Uint32Array).set(indices)
+  posAttr.needsUpdate = true
+  normAttr.needsUpdate = true
+  idxAttr.needsUpdate = true
+  polyCPreviewGeo.setDrawRange(0, indices.length)
+  const { box, sphere } = computePolyCPreviewBounds(positions)
+  polyCPreviewGeo.boundingBox = box
+  polyCPreviewGeo.boundingSphere = sphere
+  return { geo: polyCPreviewGeo, bounds: box }
+}
+
+function applyPolyCViewMode() {
+  if (!polyCActiveMat) return
+  polyCActiveMat.wireframe = viewMode === 'wireframe'
+  const prevMap = polyCActiveMat.map
+  const prevAoMap = polyCActiveMat.aoMap
+  if (viewMode === 'clay') {
+    polyCActiveMat.color.set('#d2cbc1')
+    polyCActiveMat.map = null
+    polyCActiveMat.aoMap = null
+  } else {
+    const hasMaps = polyCActiveTextures.length >= 3 && polyCActiveMat === polyCActiveBakeMat
+    polyCActiveMat.color.set(hasMaps ? '#ffffff' : polyCParams.baseColorHex)
+    polyCActiveMat.map = hasMaps ? polyCActiveTextures[0] : null
+    polyCActiveMat.aoMap = hasMaps ? polyCActiveTextures[2] : null
+  }
+  if (polyCActiveMat.map !== prevMap || polyCActiveMat.aoMap !== prevAoMap) {
+    polyCActiveMat.needsUpdate = true
+  }
+}
+
+function updatePolyCMetricsBanner(stageLabel: string, workerMs: number, paintMs?: number) {
+  const el = document.getElementById('rk-polyc-metrics')
+  if (!el) return
+  const cs = polyCWorkerClient.getStats()
+  const uvStr = polyCLastUvAudit
+    ? `${polyCLastUvAudit.rawFaceGroups}面组→${polyCLastUvAudit.chartCount}图表 · ${polyCLastUvAudit.pxPerMeter}px/m`
+    : '等待 UV 展开…'
+  const bakeStr = polyCLastBakeStats
+    ? `槽AO=${polyCLastBakeStats.shoulderNotchMeanAo} · 法线≤${polyCLastBakeStats.maxNormalDeviationDeg}°`
+    : '等待 512 PBR 烘焙…'
+  el.textContent = `${stageLabel} (${workerMs.toFixed(1)}ms${paintMs !== undefined ? ` · 上屏 ${paintMs.toFixed(1)}ms` : ''}) | Worker=${cs.usingWorker ? '后台线程' : '同步回退'} | 过期丢弃=${cs.staleDropped} · 合并跳过=${cs.coalescedSkipped} | ${uvStr} · ${bakeStr}`
+}
+
+function applyPolyCWorkerResult(res: PolyCWorkerPreviewResponse | PolyCWorkerBakeResponse, meta: PolyCJobMeta) {
+  if (!polyCProtoActive) return
+  const uploadStart = performance.now()
+  const jobParams = polyCJobParamsMap.get(res.jobId) ?? { ...polyCParams }
+  polyCJobParamsMap.delete(res.jobId)
+  polyCAppliedParams = { ...jobParams }
+
+  const prevNonPolyC = built && built.group !== polyCPreviewGroup ? built : null
+  const alreadyMounted = Boolean(
+    polyCPreviewGroup && polyCPreviewMesh && built?.group === polyCPreviewGroup,
+  )
+
+  let geo: BufferGeometry
+  let mat: MeshStandardMaterial
+  let bounds: Box3
+  let workerMs = 0
+
+  if (res.stage === 'bake') {
+    if (polyCShadowTimer !== null) {
+      clearTimeout(polyCShadowTimer)
+      polyCShadowTimer = null
+    }
+    const prevBakeTextures = polyCActiveTextures
+    const prevBakeMat = polyCActiveBakeMat
+    const prevBakeGeo = polyCActiveBakeGeo
+
+    geo = new BufferGeometry()
+    geo.setAttribute('position', new BufferAttribute(res.positions, 3))
+    geo.setAttribute('normal', new BufferAttribute(res.normals, 3))
+    geo.setAttribute('uv', new BufferAttribute(res.uvs, 2))
+    geo.setAttribute('tangent', new BufferAttribute(res.tangents, 4))
+    geo.setIndex(new BufferAttribute(res.indices, 1))
+    geo.computeBoundingBox()
+    geo.computeBoundingSphere()
+    bounds = geo.boundingBox ? geo.boundingBox.clone() : new Box3()
+
+    const mapTex = makeSdfCanvasTexture(res.albedo, res.size, true, 'RockC2_BaseColor')
+    const normTex = makeSdfCanvasTexture(res.normal, res.size, false, 'RockC2_Normal')
+    const aoTex = makeSdfCanvasTexture(res.ao, res.size, false, 'RockC2_AO')
+    aoTex.channel = 0
+    polyCActiveTextures = [mapTex, normTex, aoTex]
+    mat = new MeshStandardMaterial({
+      name: jobParams.mode === 'baseline' ? 'Mat_RockC2_Baseline' : 'Mat_RockC2_ShallowDetail',
+      color: 0xffffff,
+      map: mapTex,
+      normalMap: normTex,
+      normalScale: new Vector2(1, 1),
+      aoMap: aoTex,
+      aoMapIntensity: 0.85,
+      roughness: 0.90,
+      metalness: 0.0,
+    })
+    polyCActiveBakeMat = mat
+    polyCActiveBakeGeo = geo
+    polyCLastBakeStats = res.bakeStats
+    polyCLastUvAudit = res.uvAudit
+    workerMs = res.audit.buildMs + res.uvMs + res.bakeStats.timings.totalBakeMs
+
+    // Dispose old bake GPU resources AFTER new ones are bound below
+    if (!polyCPreviewMesh || !polyCPreviewGroup) {
+      polyCPreviewMesh = new Mesh(geo, mat)
+      polyCPreviewMesh.name = 'RockC2_SandstoneLedge_LOD0'
+      polyCPreviewMesh.castShadow = true
+      polyCPreviewMesh.receiveShadow = true
+      polyCPreviewGroup = new Group()
+      polyCPreviewGroup.name = 'RockC2Asset'
+      polyCPreviewGroup.add(polyCPreviewMesh)
+    } else {
+      polyCPreviewMesh.geometry = geo
+      polyCPreviewMesh.material = mat
+    }
+    polyCActiveMat = mat
+    applyPolyCViewMode()
+
+    for (const t of prevBakeTextures) t.dispose()
+    prevBakeMat?.dispose()
+    prevBakeGeo?.dispose()
+  } else {
+    // Interactive continuous drag clay preview:
+    // Reuse persistent dynamic VBO/IBO + persistent compiled MeshStandardMaterial + persistent scene Mesh
+    // so dragging triggers ZERO shader recompiles, ZERO VBO/material churn, and ZERO per-tick shadow storms.
+    const updated = updatePolyCPreviewGeoInPlace(res.positions, res.normals, res.indices)
+    geo = updated.geo
+    bounds = updated.bounds
+    if (!polyCPreviewMat) {
+      polyCPreviewMat = new MeshStandardMaterial({
+        name: 'Mat_RockC2_PreviewClay',
+        color: jobParams.baseColorHex,
+        roughness: 0.90,
+        metalness: 0.0,
+      })
+    }
+    mat = polyCPreviewMat
+    mat.color.set(viewMode === 'clay' ? '#d2cbc1' : jobParams.baseColorHex)
+    mat.wireframe = viewMode === 'wireframe'
+    workerMs = res.previewMs
+
+    if (!polyCPreviewMesh || !polyCPreviewGroup) {
+      polyCPreviewMesh = new Mesh(geo, mat)
+      polyCPreviewMesh.name = 'RockC2_SandstoneLedge_LOD0'
+      polyCPreviewMesh.castShadow = true
+      polyCPreviewMesh.receiveShadow = true
+      polyCPreviewGroup = new Group()
+      polyCPreviewGroup.name = 'RockC2Asset'
+      polyCPreviewGroup.add(polyCPreviewMesh)
+    } else {
+      if (polyCPreviewMesh.geometry !== geo) polyCPreviewMesh.geometry = geo
+      if (polyCPreviewMesh.material !== mat) polyCPreviewMesh.material = mat
+    }
+    polyCActiveMat = mat
+
+    // Release any previous 512 PBR bake resources only once when transitioning bake -> preview
+    if (polyCActiveBakeMat || polyCActiveBakeGeo || polyCActiveTextures.length > 0) {
+      disposePolyCBakeResources()
+    }
+  }
+
+  const group = polyCPreviewGroup!
+  const mesh = polyCPreviewMesh!
+  mesh.name = POLYC_PRESET_META[jobParams.preset].meshName
+  const vCount = res.positions.length / 3
+  const tCount = res.indices.length / 3
+  const stats: RockBuildStats = {
+    stones: 1,
+    vertices: vCount,
+    triangles: tCount,
+    ms: Math.round(workerMs * 10) / 10,
+  }
+  built = {
+    group,
+    meshes: [mesh],
+    bounds,
+    stats,
+    dispose: () => {
+      if (!polyCProtoActive) disposePolyCGpuResources()
+    },
+  }
+  buildCount++
+
+  const size = bounds.getSize(new Vector3())
+  const span = Math.max(1.05, size.length() * 0.76)
+
+  if (!alreadyMounted || polyCPendingReframe || res.stage === 'bake') {
+    if (!alreadyMounted) {
+      viewer?.showModel(group, span, false)
+    }
+    if (polyCPendingReframe) {
+      viewer?.frame(camera, bounds.getCenter(new Vector3()))
+      polyCPendingReframe = false
+    }
+    viewer?.refreshShadows()
+    polyCLastShadowRefreshAt = uploadStart
+  } else {
+    // During rapid continuous drag preview, throttle expensive 1024x1024 shadow-map re-rasterization
+    // and schedule a trailing crisp shadow refresh once dragging pauses.
+    if (uploadStart - polyCLastShadowRefreshAt >= 320) {
+      viewer?.refreshShadows()
+      polyCLastShadowRefreshAt = uploadStart
+    }
+    if (polyCShadowTimer !== null) clearTimeout(polyCShadowTimer)
+    polyCShadowTimer = window.setTimeout(() => {
+      polyCShadowTimer = null
+      if (polyCProtoActive) {
+        viewer?.refreshShadows()
+        polyCLastShadowRefreshAt = performance.now()
+      }
+    }, 160)
+  }
+
+  prevNonPolyC?.dispose()
+  updateStats(stats)
+  const uploadEnd = performance.now()
+  const mainUploadMs = Math.round((uploadEnd - uploadStart) * 10) / 10
+  const ipcOverheadMs = Math.max(0, Math.round((meta.roundTripMs - meta.queueWaitMs - workerMs) * 10) / 10)
+  const previewPhases = res.stage === 'preview' ? res.phaseTimings : undefined
+
+  requestAnimationFrame(() => {
+    const rafAt = performance.now()
+    const rafWaitMs = Math.round((rafAt - uploadEnd) * 10) / 10
+    const paintVisibleMs = Math.round((rafAt - meta.submittedAt) * 10) / 10
+    if (res.stage === 'preview') polyCMetrics.previewToFirstFrameMs.push(paintVisibleMs)
+    else polyCMetrics.releaseToMaterialVisibleMs.push(paintVisibleMs)
+    polyCMetrics.appliedHistory.push({
+      jobId: res.jobId,
+      stage: res.stage,
+      params: { ...jobParams },
+      workerMs: Math.round(workerMs * 10) / 10,
+      queueWaitMs: meta.queueWaitMs,
+      ipcOverheadMs,
+      roundTripMs: meta.roundTripMs,
+      mainUploadMs,
+      rafWaitMs,
+      paintVisibleMs,
+      phases: previewPhases,
+    })
+    if (polyCMetrics.appliedHistory.length > 140) polyCMetrics.appliedHistory.shift()
+    const stageLbl = res.stage === 'bake'
+      ? (jobParams.mode === 'baseline' ? '512 基线 PBR 就绪' : '512 浅细节 PBR 就绪')
+      : 'C2 灰模拖拽预览'
+    updatePolyCMetricsBanner(stageLbl, workerMs, paintVisibleMs)
+    if (res.stage === 'preview' && polyCAutoBakeAfterPreview && polyCProtoActive) {
+      polyCAutoBakeAfterPreview = false
+      submitPolyCJob('bake', false)
+    }
+  })
+}
+
+const polyCWorkerClient = new PolyCWorkerClient(
+  applyPolyCWorkerResult,
+  err => message(`路线 C2 Worker 错误：${err.message}`, true),
+  {
+    workerFactory: () => {
+      try {
+        return new PolyCWorker()
+      } catch {
+        return null
+      }
+    },
+  },
+)
+
+function syncPolyCPanel() {
+  byId('rk-polyc-proto-btn').setAttribute('aria-pressed', String(polyCProtoActive))
+  byId('rk-polyc-proto-box').hidden = !polyCProtoActive
+  byId('rk-legacy-controls').hidden = sdfProtoActive || polyCProtoActive
+  if (!polyCProtoActive) return
+  const presetMeta = POLYC_PRESET_META[polyCParams.preset]
+  const modeTag = polyCParams.mode === 'baseline' ? '材质基线诊断' : '浅细节版'
+  byId('rock-title').textContent = `${presetMeta.label} · 路线 C2 实验 (${modeTag} · 512 PBR)`
+  document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach(btn => {
+    btn.setAttribute('aria-pressed', 'false')
+  })
+  document.querySelectorAll<HTMLButtonElement>('[data-polyc-preset]').forEach(btn => {
+    btn.setAttribute('aria-pressed', String(btn.dataset.polycPreset === polyCParams.preset))
+  })
+  document.querySelectorAll<HTMLButtonElement>('[data-polyc-mode]').forEach(btn => {
+    btn.setAttribute('aria-pressed', String(btn.dataset.polycMode === polyCParams.mode))
+  })
+  ;(byId('polyc-seed') as HTMLInputElement).value = String(polyCParams.seed)
+  ;(byId('polyc-color') as HTMLInputElement).value = polyCParams.baseColorHex
+  const strataRow = document.getElementById('polyc-strata-field')
+  if (strataRow) strataRow.style.opacity = polyCParams.mode === 'baseline' ? '0.45' : '1'
+  for (const k of ['shoulderDepth', 'bevelScale', 'notchDepth', 'strataStrength'] as const) {
+    const r = document.querySelector<HTMLInputElement>(`[data-polyc-r="${k}"]`)
+    const n = document.querySelector<HTMLInputElement>(`[data-polyc-n="${k}"]`)
+    if (r) { r.value = String(polyCParams[k]); r.disabled = k === 'strataStrength' && polyCParams.mode === 'baseline' }
+    if (n) { n.value = String(Number(polyCParams[k].toFixed(2))); n.disabled = k === 'strataStrength' && polyCParams.mode === 'baseline' }
+  }
+}
+
+function submitPolyCJob(stage: 'preview' | 'bake', reframe = false) {
+  if (!polyCProtoActive) return
+  if (reframe) polyCPendingReframe = true
+  const snapshot: PolyCProtoParams = { ...polyCParams }
+  const jobId = polyCWorkerClient.submit({
+    stage,
+    preset: snapshot.preset,
+    sculpt: {
+      seed: snapshot.seed,
+      shoulderDepth: snapshot.shoulderDepth,
+      bevelScale: snapshot.bevelScale,
+      notchDepth: snapshot.notchDepth,
+    },
+    bake: stage === 'bake' ? {
+      size: 512,
+      mode: snapshot.mode,
+      baseColorHex: snapshot.baseColorHex,
+      dilationPasses: 14,
+      aoRays: 16,
+      strataStrength: snapshot.strataStrength,
+    } : undefined,
+  })
+  polyCJobParamsMap.set(jobId, snapshot)
+  if (polyCJobParamsMap.size > 40) {
+    const firstKey = polyCJobParamsMap.keys().next().value
+    if (firstKey !== undefined) polyCJobParamsMap.delete(firstKey)
+  }
+  const el = document.getElementById('rk-polyc-metrics')
+  if (el) el.textContent = stage === 'bake' ? '后台 Worker 正在直烘 C2 512 PBR 贴图…' : '后台 Worker 正在构建 C2 显式灰模…'
+}
+
+function enterPolyCProto(resetParams = false, nextPreset?: PolyCsgPresetId) {
+  exitSdfProto()
+  const activePreset = nextPreset ?? polyCParams.preset
+  if (resetParams) {
+    polyCParams = {
+      ...DEFAULT_POLYC_PARAMS,
+      preset: activePreset,
+      seed: POLYC_PRESET_META[activePreset].canonicalSeed,
+    }
+  } else if (nextPreset) {
+    polyCParams.preset = nextPreset
+    polyCParams.seed = POLYC_PRESET_META[nextPreset].canonicalSeed
+  }
+  polyCProtoActive = true
+  polyCLastBakeStats = null
+  polyCLastUvAudit = null
+  polyCAutoBakeAfterPreview = true
+  syncPolyCPanel()
+  submitPolyCJob('preview', true)
+}
+
+function exitPolyCProto() {
+  if (!polyCProtoActive) return
+  polyCProtoActive = false
+  polyCAutoBakeAfterPreview = false
+  polyCWorkerClient.cancelAll()
+  polyCJobParamsMap.clear()
+  disposePolyCGpuResources()
+  syncPolyCPanel()
+}
 
 function message(value: unknown, error = false, logIt = true) {
   const toast = byId('toast')
@@ -320,12 +1219,14 @@ function syncPanel() {
     btn.setAttribute('aria-pressed', String(Number(btn.dataset.sub) === spec.detail.subdivisions))
   })
   document.querySelectorAll<HTMLInputElement>('[data-r]').forEach(el => {
+    const fallback = el.dataset.r === 'shape.slabs' ? 1 : 0
     const v = getPath(spec, el.dataset.r!)
-    el.value = String(v ?? 0)
+    el.value = String(v ?? fallback)
   })
   document.querySelectorAll<HTMLInputElement>('[data-n]').forEach(el => {
+    const fallback = el.dataset.n === 'shape.slabs' ? 1 : 0
     const v = getPath(spec, el.dataset.n!)
-    el.value = String(typeof v === 'number' ? Number(v.toFixed(3)) : v ?? 0)
+    el.value = String(typeof v === 'number' ? Number(v.toFixed(3)) : v ?? fallback)
   })
   document.querySelectorAll<HTMLInputElement>('[data-c]').forEach(el => {
     const v = getPath(spec, el.dataset.c!)
@@ -418,6 +1319,8 @@ function setLightingMood(mood: LightingPreset) {
 }
 
 function loadPreset(id: RockPresetId) {
+  exitSdfProto()
+  exitPolyCProto()
   presetId = id
   const state = effectivePresetState(id)
   rockHistory.clear()
@@ -454,6 +1357,20 @@ async function resetCurrentToFactory() {
 }
 
 function randomizeSeed() {
+  if (polyCProtoActive) {
+    polyCParams.seed = Math.floor(100 + Math.random() * 99899)
+    syncPolyCPanel()
+    polyCAutoBakeAfterPreview = true
+    submitPolyCJob('preview', false)
+    return
+  }
+  if (sdfProtoActive) {
+    sdfParams.seed = Math.floor(100 + Math.random() * 99899)
+    syncSdfPanel()
+    sdfAutoBakeAfterPreview = true
+    submitSdfJob('preview', false)
+    return
+  }
   rockHistory.push(spec)
   userDirty = true
   spec.seed = Math.floor(100 + Math.random() * 99899)
@@ -491,6 +1408,151 @@ function downloadBlob(blob: Blob, filename: string) {
 // Bind preset chips
 document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach(btn => {
   btn.addEventListener('click', () => loadPreset(btn.dataset.preset as RockPresetId))
+})
+
+// Bind experimental Route-B SDF Worker preset button & panel controls
+byId('rk-sdf-proto-btn').addEventListener('click', () => {
+  enterSdfProto(false)
+})
+
+// Bind experimental Route-C2 Explicit Boolean Worker single-preset button & panel controls
+byId('rk-polyc-proto-btn').addEventListener('click', () => {
+  enterPolyCProto(false)
+})
+
+document.querySelectorAll<HTMLButtonElement>('[data-polyc-preset]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const next = btn.dataset.polycPreset as PolyCsgPresetId
+    if (!next || polyCParams.preset === next) return
+    polyCParams.preset = next
+    polyCParams.seed = POLYC_PRESET_META[next].canonicalSeed
+    polyCLastBakeStats = null
+    polyCLastUvAudit = null
+    polyCAutoBakeAfterPreview = true
+    syncPolyCPanel()
+    submitPolyCJob('preview', true)
+  })
+})
+
+document.querySelectorAll<HTMLButtonElement>('[data-polyc-mode]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const next = btn.dataset.polycMode as PolyPbrMode
+    if (!next || polyCParams.mode === next) return
+    polyCParams.mode = next
+    polyCAutoBakeAfterPreview = false
+    syncPolyCPanel()
+    submitPolyCJob('bake', false)
+  })
+})
+
+const polyCBoxEl = byId('rk-polyc-proto-box')
+byId('polyc-reseed').addEventListener('click', randomizeSeed)
+polyCBoxEl.addEventListener('input', ev => {
+  if (!polyCProtoActive) return
+  const t = ev.target as HTMLInputElement
+  if (t.id === 'polyc-seed') {
+    polyCParams.seed = Math.max(0, Math.round(Number(t.value) || 0))
+    polyCAutoBakeAfterPreview = false
+    submitPolyCJob('preview', false)
+    return
+  }
+  if (t.id === 'polyc-color') {
+    polyCParams.baseColorHex = t.value
+    if (polyCActiveMat && polyCActiveTextures.length === 0 && viewMode !== 'clay') {
+      polyCActiveMat.color.set(t.value)
+    }
+    return
+  }
+  const key = (t.dataset.polycR || t.dataset.polycN) as 'shoulderDepth' | 'bevelScale' | 'notchDepth' | 'strataStrength' | undefined
+  if (!key) return
+  const raw = Number(t.value)
+  if (!Number.isFinite(raw)) return
+  const bounds: Record<typeof key, [number, number]> = {
+    shoulderDepth: [0.65, 1.35],
+    bevelScale: [0, 1.4],
+    notchDepth: [0.5, 1.4],
+    strataStrength: [0, 1.5],
+  }
+  const [lo, hi] = bounds[key]
+  const v = Math.min(hi, Math.max(lo, raw))
+  polyCParams[key] = v
+  const rEl = polyCBoxEl.querySelector<HTMLInputElement>(`[data-polyc-r="${key}"]`)
+  const nEl = polyCBoxEl.querySelector<HTMLInputElement>(`[data-polyc-n="${key}"]`)
+  if (rEl && rEl !== t) rEl.value = String(v)
+  if (nEl && nEl !== t) nEl.value = String(Number(v.toFixed(2)))
+  polyCAutoBakeAfterPreview = false
+  // Geometry sliders show live clay preview during drag; strataStrength only affects 512 PBR bake (wait for release)
+  if (key !== 'strataStrength') submitPolyCJob('preview', false)
+})
+
+polyCBoxEl.addEventListener('change', () => {
+  if (!polyCProtoActive) return
+  polyCAutoBakeAfterPreview = false
+  submitPolyCJob('bake', false)
+})
+
+document.querySelectorAll<HTMLButtonElement>('[data-sdf-arch]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const next = btn.dataset.sdfArch as SdfProtoArchetype
+    if (!next || sdfParams.archetype === next) return
+    sdfParams.archetype = next
+    sdfLastBakeStats = null
+    sdfAutoBakeAfterPreview = true
+    syncSdfPanel()
+    submitSdfJob('preview', true)
+  })
+})
+
+const sdfBoxEl = byId('rk-sdf-proto-box')
+byId('sdf-reseed').addEventListener('click', randomizeSeed)
+sdfBoxEl.addEventListener('input', ev => {
+  if (!sdfProtoActive) return
+  const t = ev.target as HTMLInputElement | HTMLSelectElement
+  if (t.id === 'sdf-seed') {
+    sdfParams.seed = Math.max(0, Math.round(Number(t.value) || 0))
+    sdfAutoBakeAfterPreview = false
+    submitSdfJob('preview', false)
+    return
+  }
+  if (t.id === 'sdf-color') {
+    sdfParams.baseColorHex = t.value
+    if (sdfActiveMat && sdfActiveTextures.length === 0 && viewMode !== 'clay') {
+      sdfActiveMat.color.set(t.value)
+    }
+    return
+  }
+  if (t.id === 'sdf-brush') {
+    sdfParams.brushMode = t.value === 'subtle' ? 'subtle' : 'off'
+    sdfAutoBakeAfterPreview = false
+    submitSdfJob('bake', false)
+    return
+  }
+  const key = (t.dataset.sdfR || t.dataset.sdfN) as 'carveDepth' | 'ridgeCrispness' | 'crackStrength' | undefined
+  if (!key) return
+  const raw = Number(t.value)
+  if (!Number.isFinite(raw)) return
+  const bounds: Record<typeof key, [number, number]> = {
+    carveDepth: [0.55, 1.45],
+    ridgeCrispness: [0, 1],
+    crackStrength: [0, 1.5],
+  }
+  const [lo, hi] = bounds[key]
+  const v = Math.min(hi, Math.max(lo, raw))
+  sdfParams[key] = v
+  const rEl = sdfBoxEl.querySelector<HTMLInputElement>(`[data-sdf-r="${key}"]`)
+  const nEl = sdfBoxEl.querySelector<HTMLInputElement>(`[data-sdf-n="${key}"]`)
+  if (rEl && rEl !== t) rEl.value = String(v)
+  if (nEl && nEl !== t) nEl.value = String(Number(v.toFixed(2)))
+  sdfAutoBakeAfterPreview = false
+  submitSdfJob('preview', false)
+})
+
+sdfBoxEl.addEventListener('change', ev => {
+  if (!sdfProtoActive) return
+  const t = ev.target as HTMLInputElement | HTMLSelectElement
+  if (t.id === 'sdf-brush') return
+  sdfAutoBakeAfterPreview = false
+  submitSdfJob('bake', false)
 })
 
 // Bind shading style toggle
@@ -592,6 +1654,16 @@ byId('reset-factory').addEventListener('click', () => {
   void resetCurrentToFactory().catch(err => message(err, true))
 })
 byId('reset').addEventListener('click', () => {
+  if (polyCProtoActive) {
+    enterPolyCProto(true, polyCParams.preset)
+    message(`已恢复路线 C2 ${POLYC_PRESET_META[polyCParams.preset].label}默认参数`)
+    return
+  }
+  if (sdfProtoActive) {
+    enterSdfProto(true)
+    message('已恢复 SDF 实验阶梯方巨岩默认参数')
+    return
+  }
   loadPreset(presetId)
   message(rockDefaults.has(presetId) ? '已恢复至你保存的默认预设参数' : '已恢复当前预设默认参数')
 })
@@ -608,7 +1680,9 @@ document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach(btn => {
     document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach(b => {
       b.setAttribute('aria-pressed', String(b.dataset.view === viewMode))
     })
-    updateRockMaterialLive(rockMaterial, spec, viewMode)
+    if (polyCProtoActive) applyPolyCViewMode()
+    else if (sdfProtoActive) applySdfViewMode()
+    else updateRockMaterialLive(rockMaterial, spec, viewMode)
   })
 })
 
@@ -652,7 +1726,11 @@ byId<HTMLInputElement>('file').addEventListener('change', async ev => {
 byId('png').addEventListener('click', () => {
   if (!viewer) return
   const dataUrl = viewer.snapshot()
-  const fname = `${spec.preset}-${spec.seed}.png`
+  const fname = polyCProtoActive
+    ? `polyc-${polyCParams.preset}-${polyCParams.mode}-${polyCParams.seed}.png`
+    : sdfProtoActive
+      ? `sdf-${sdfParams.archetype}-${sdfParams.seed}.png`
+      : `${spec.preset}-${spec.seed}.png`
   fetch(dataUrl).then(r => r.blob()).then(b => downloadBlob(b, fname)).catch(() => {
     const a = document.createElement('a')
     a.href = dataUrl
@@ -665,7 +1743,11 @@ byId('png').addEventListener('click', () => {
 byId('png-alpha').addEventListener('click', () => {
   if (!viewer) return
   const dataUrl = viewer.snapshot({ transparent: true })
-  const fname = `${spec.preset}-${spec.seed}_transparent.png`
+  const fname = polyCProtoActive
+    ? `polyc-${polyCParams.preset}-${polyCParams.mode}-${polyCParams.seed}_transparent.png`
+    : sdfProtoActive
+      ? `sdf-${sdfParams.archetype}-${sdfParams.seed}_transparent.png`
+      : `${spec.preset}-${spec.seed}_transparent.png`
   activityLog.exportStep(`导出透明背景 PNG：${fname}`, { filename: fname, viewMode, camera })
   fetch(dataUrl).then(r => r.blob()).then(b => downloadBlob(b, fname)).catch(() => {
     const a = document.createElement('a')
@@ -679,9 +1761,16 @@ byId('png-alpha').addEventListener('click', () => {
 bindGlbExportPopover({
   triggerButton: byId<HTMLButtonElement>('glb'),
   getRoot: () => built?.group,
-  onBeforeExport: () => { if (vertexColorsDirty) rebuild(false) },
+  onBeforeExport: () => { if (!sdfProtoActive && !polyCProtoActive && vertexColorsDirty) rebuild(false) },
   exportBlob: opts => exportGlb(built!.group, opts),
-  getFilename: opts => `${spec.preset}-${spec.seed}${opts.mode === 'merged' ? '-merged' : ''}.glb`,
+  getFilename: opts => {
+    const stem = polyCProtoActive
+      ? `polyc-${polyCParams.preset}-${polyCParams.mode}-${polyCParams.seed}`
+      : sdfProtoActive
+        ? `sdf-${sdfParams.archetype}-${sdfParams.seed}`
+        : `${spec.preset}-${spec.seed}`
+    return `${stem}${opts.mode === 'merged' ? '-merged' : ''}.glb`
+  },
   saveBlob: downloadBlob,
   message,
 })
@@ -705,13 +1794,22 @@ const activityLogDrawer = mountActivityLogDrawer({
 }
 ;(window as unknown as Record<string, unknown>).__rockStudio = {
   getSpec: () => parseRockSpec(spec),
-  setPreset: (id: RockPresetId) => { loadPreset(id); return built?.stats },
+  setPreset: (id: RockPresetId | PolyCsgPresetId) => {
+    if (id in POLYC_PRESET_META) {
+      enterPolyCProto(true, id as PolyCsgPresetId)
+      return built?.stats
+    }
+    loadPreset(id as RockPresetId)
+    return built?.stats
+  },
   setParam: (path: string, value: unknown, final = true) => { applyParam(path, value, final); syncPanel(); return built?.stats },
   setStyle: (style: RockStyle) => { spec.style = style; syncPanel(); rebuild(false); return built?.stats },
   setView: (v: RockViewMode) => {
     viewMode = v
     document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === v)))
-    updateRockMaterialLive(rockMaterial, spec, viewMode)
+    if (polyCProtoActive) applyPolyCViewMode()
+    else if (sdfProtoActive) applySdfViewMode()
+    else updateRockMaterialLive(rockMaterial, spec, viewMode)
   },
   setCamera: (c: Camera) => {
     camera = c
@@ -721,6 +1819,69 @@ const activityLogDrawer = mountActivityLogDrawer({
   setLighting: (l: LightingPreset) => {
     setLightingMood(l)
   },
+  enableSdfProto: (reset = false) => {
+    enterSdfProto(reset)
+  },
+  exitSdfProto: () => {
+    exitSdfProto()
+    syncPanel()
+    rebuild(true)
+  },
+  isSdfProtoActive: () => sdfProtoActive,
+  setSdfProtoParam: (
+    key: keyof SdfProtoParams,
+    value: number | string,
+    stage: 'preview' | 'bake' = 'preview',
+  ) => {
+    if (!sdfProtoActive) enterSdfProto(false)
+    ;(sdfParams as unknown as Record<string, unknown>)[key] = value
+    syncSdfPanel()
+    sdfAutoBakeAfterPreview = false
+    submitSdfJob(stage, false)
+    return sdfWorkerClient.getStats().latestJobId
+  },
+  getSdfProtoMetrics: () => ({
+    active: sdfProtoActive,
+    currentParams: { ...sdfParams },
+    appliedParams: sdfAppliedParams ? { ...sdfAppliedParams } : null,
+    clientStats: sdfWorkerClient.getStats(),
+    previewToFirstFrameMs: [...sdfMetrics.previewToFirstFrameMs],
+    releaseToMaterialVisibleMs: [...sdfMetrics.releaseToMaterialVisibleMs],
+    appliedHistory: [...sdfMetrics.appliedHistory],
+    lastBakeStats: sdfLastBakeStats,
+  }),
+  enablePolyCProto: (reset = false, nextPreset?: PolyCsgPresetId) => {
+    enterPolyCProto(reset, nextPreset)
+  },
+  exitPolyCProto: () => {
+    exitPolyCProto()
+    syncPanel()
+    rebuild(true)
+  },
+  isPolyCProtoActive: () => polyCProtoActive,
+  setPolyCProtoParam: (
+    key: keyof PolyCProtoParams,
+    value: number | string,
+    stage: 'preview' | 'bake' = 'preview',
+  ) => {
+    if (!polyCProtoActive) enterPolyCProto(false)
+    ;(polyCParams as unknown as Record<string, unknown>)[key] = value
+    syncPolyCPanel()
+    polyCAutoBakeAfterPreview = false
+    submitPolyCJob(stage, false)
+    return polyCWorkerClient.getStats().latestJobId
+  },
+  getPolyCProtoMetrics: () => ({
+    active: polyCProtoActive,
+    currentParams: { ...polyCParams },
+    appliedParams: polyCAppliedParams ? { ...polyCAppliedParams } : null,
+    clientStats: polyCWorkerClient.getStats(),
+    previewToFirstFrameMs: [...polyCMetrics.previewToFirstFrameMs],
+    releaseToMaterialVisibleMs: [...polyCMetrics.releaseToMaterialVisibleMs],
+    appliedHistory: [...polyCMetrics.appliedHistory],
+    lastBakeStats: polyCLastBakeStats,
+    lastUvAudit: polyCLastUvAudit,
+  }),
   snapshotCanvas: (opts?: { transparent?: boolean }) => viewer?.snapshot({ transparent: Boolean(opts?.transparent) }) ?? '',
   snapshotTransparentCanvas: () => viewer?.snapshot({ transparent: true }) ?? '',
   stats: () => ({ ...built?.stats, buildCount }),
@@ -730,7 +1891,7 @@ const activityLogDrawer = mountActivityLogDrawer({
   hasDefaultOverride: (id?: RockPresetId) => rockDefaults.has(id ?? presetId),
   exportGlbSize: async () => {
     if (!built) return 0
-    if (vertexColorsDirty) rebuild(false)
+    if (!sdfProtoActive && !polyCProtoActive && vertexColorsDirty) rebuild(false)
     const blob = await exportGlb(built.group, { mode: 'merged', excludeDecorations: false })
     return blob.size
   },
@@ -741,7 +1902,7 @@ setLightingMood(lighting)
 syncPanel()
 rebuild(true)
 void rockDefaults.ready().then(() => {
-  if (!userDirty) {
+  if (!userDirty && !sdfProtoActive && !polyCProtoActive) {
     const diskState = effectivePresetState(presetId)
     if (JSON.stringify(diskState.spec) !== JSON.stringify(spec) || diskState.lighting !== lighting) {
       spec = diskState.spec

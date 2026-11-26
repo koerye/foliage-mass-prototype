@@ -757,9 +757,9 @@ describe('GLB export cleanup & quantization (P1-2)', () => {
   })
 
   it('REQ-C5 ①②③: rock cel shader reads directionalLights[0], drape mode shows fronds.start and hides fronds.twist, and parsers/envelope guard edge inputs', () => {
-    // Rock Cel shader compiles against directionalLights[0]
+    // Rock shader (v5: painterly / cel / handpainted) compiles against directionalLights[0] & uCracks
     const rockMat = makeRockMaterial(rockPresetSpec('boulder-chiseled'), 'final')
-    expect(rockMat.customProgramCacheKey?.()).toBe('stylized-rock-v4')
+    expect(rockMat.customProgramCacheKey?.()).toBe('stylized-rock-v5')
     const mockShader = {
       uniforms: {} as Record<string, unknown>,
       vertexShader: '#include <common>\n#include <begin_vertex>\n#include <worldpos_vertex>',
@@ -768,6 +768,7 @@ describe('GLB export cleanup & quantization (P1-2)', () => {
     rockMat.onBeforeCompile(mockShader as never, {} as never)
     expect(mockShader.fragmentShader).toContain('directionalLights[0].direction')
     expect(mockShader.fragmentShader).toContain('directionalLights[0].color')
+    expect(mockShader.fragmentShader).toContain('uCracks')
     rockMat.dispose()
 
     // Strict rock spec whitelist rejects empty {} & TexGraph JSON

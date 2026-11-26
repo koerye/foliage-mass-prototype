@@ -290,7 +290,7 @@ export function bindEditToolsUi(opts: EditToolsOptions) {
     const ed = opts.editor
     const sub: EditSubMode = ed?.subMode ?? 'nodes'
     const spec = opts.getSpec()
-    const ground = spec ? (spec.kind === 'grass' || spec.kind === 'fern' || spec.kind === 'flowerbed' || spec.kind === 'bamboo' || spec.kind === 'lotus') : false
+    const ground = spec ? (spec.kind === 'grass' || spec.kind === 'fern' || spec.kind === 'flowerbed' || spec.kind === 'bamboo' || spec.kind === 'lotus' || spec.kind === 'botanical') : false
     for (const btn of tabBtns) {
       const isNodes = btn.dataset.editSub === 'nodes'
       btn.disabled = isNodes && ground

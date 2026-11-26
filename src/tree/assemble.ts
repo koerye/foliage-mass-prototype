@@ -1,4 +1,4 @@
-﻿import { BufferAttribute, BufferGeometry, Color, Group, MathUtils, Mesh, MeshStandardMaterial, type Material, type Object3D, type Texture } from 'three'
+﻿import { BufferAttribute, BufferGeometry, Color, DoubleSide, Group, MathUtils, Mesh, MeshStandardMaterial, type Material, type Object3D, type Texture } from 'three'
 import { applyBirchWoodSurface, makeBirchBarkMaterial } from '../assembly/birch-bark'
 import { buildMeadowBirchStructure } from '../assembly/birch-structure'
 import { exportGlb, type ExportGlbOptions } from '../export-glb'
@@ -8,6 +8,8 @@ import { computeLeafPlacement, remeshLeafPlacement, type LeafPlacementCache, typ
 import { makePainterlyDriftwoodBarkTexture, makePainterlyMossBarkTexture } from '../texgraph/templates'
 import { makeBarkMaterial, makePetalMaterial, makeStemMaterial } from './bark-material'
 import { buildBamboo } from './bamboo'
+import { buildBotanicalPlant } from './botanical-plants'
+import { getBotanicalTexture } from './botanical-textures'
 import { buildFlowerBed } from './flowerbed'
 import { buildAmbientPetals, buildFlowers, sitesFromGeometry, sitesFromLeafCards, type FoliageSite } from './flowers'
 import { buildFronds } from './fronds'
@@ -231,6 +233,7 @@ export function buildTree(
   const palm = spec.kind === 'palm'
   const bamboo = spec.kind === 'bamboo'
   const lotus = spec.kind === 'lotus'
+  const botanical = spec.kind === 'botanical'
   const makeSkipWood = (s: TreeSpec) => s.optimize.cullHiddenWood
     ? (b: typeof skeleton.branches[number]) => {
       if (b.role === 'trunk' || b.role === 'dead') return false
@@ -276,7 +279,7 @@ export function buildTree(
     : undefined
 
   const buildWoodGeometryFor = (s: TreeSpec): BufferGeometry | undefined => {
-    if (ground || flowerbed || bamboo || lotus) return undefined
+    if (ground || flowerbed || bamboo || lotus || botanical) return undefined
     const geo = palm
       ? buildPalmWood(skeleton.trunk, s)
       : buildWood(skeleton.branches, s.trunk, s.seed, {
@@ -351,6 +354,14 @@ export function buildTree(
   let fbBlossomsMat: MeshStandardMaterial | undefined
   let groundMesh: Mesh | undefined
   let groundMat: MeshStandardMaterial | undefined
+  let botStemMesh: Mesh | undefined
+  let botStemMat: MeshStandardMaterial | undefined
+  let botLeafMesh: Mesh | undefined
+  let botLeafMat: MeshStandardMaterial | undefined
+  let botFlowerMesh: Mesh | undefined
+  let botFlowerMat: MeshStandardMaterial | undefined
+  let botCoreMesh: Mesh | undefined
+  let botCoreMat: MeshStandardMaterial | undefined
   let coniferFrondMesh: Mesh | undefined
   let coniferFrondMat: MeshStandardMaterial | undefined
   let flowerOverlayMesh: Mesh | undefined
@@ -593,6 +604,80 @@ export function buildTree(
     stats.leaves = fb.flowers
     stats.flowers = fb.flowers
     stats.triangles += meshTriCount(fb.blossomsGeometry)
+  } else if (botanical) {
+    const bp = buildBotanicalPlant(spec, env)
+    if (bp.stemGeometry) {
+      botStemMat = trackMat(new MeshStandardMaterial({ vertexColors: true, roughness: 0.84, metalness: 0 }))
+      botStemMat.name = 'BotanicalStems'
+      botStemMesh = new Mesh(bp.stemGeometry, botStemMat)
+      botStemMesh.name = 'Botanical stems'
+      botStemMesh.userData.role = 'wood'
+      meshes.push(botStemMesh)
+      stats.branches = bp.stems
+      stats.triangles += meshTriCount(bp.stemGeometry)
+    } else {
+      stats.branches = 0
+    }
+    const leafMap = getBotanicalTexture(bp.leafTextureKey)
+    if (customNormalOn) applyCustomLeafNormals(bp.leafGeometry, env, spec.normalEdit!, spec.seed)
+    botLeafMat = trackMat(new MeshStandardMaterial({
+      map: leafMap,
+      alphaTest: bp.alphaCutoff,
+      side: DoubleSide,
+      vertexColors: true,
+      roughness: 0.66,
+      metalness: 0,
+      emissive: new Color('#183410'),
+      emissiveIntensity: 0.25,
+    }))
+    botLeafMat.name = 'BotanicalLeaves'
+    botLeafMesh = new Mesh(bp.leafGeometry, botLeafMat)
+    botLeafMesh.name = 'Botanical leaves'
+    botLeafMesh.userData.role = 'foliage'
+    botLeafMesh.userData.noReceiveShadow = true
+    meshes.push(botLeafMesh)
+    stats.leaves = bp.leaves
+    stats.triangles += meshTriCount(bp.leafGeometry)
+
+    if (bp.coreGeometry) {
+      botCoreMat = trackMat(new MeshStandardMaterial({
+        vertexColors: true,
+        roughness: 0.85,
+        metalness: 0,
+        emissive: new Color('#363f78'),
+        emissiveIntensity: 0.40,
+      }))
+      botCoreMat.name = 'BotanicalFlowerCores'
+      botCoreMesh = new Mesh(bp.coreGeometry, botCoreMat)
+      botCoreMesh.name = 'Botanical flower cores'
+      botCoreMesh.userData.role = 'foliage'
+      botCoreMesh.userData.noCastShadow = true
+      botCoreMesh.userData.noReceiveShadow = true
+      meshes.push(botCoreMesh)
+      stats.triangles += meshTriCount(bp.coreGeometry)
+    }
+    if (bp.flowerGeometry && bp.flowerTextureKey) {
+      const flwMap = getBotanicalTexture(bp.flowerTextureKey)
+      const flwEmissive = new Color(spec.botanical?.flowerTintInner ?? '#bac4f8').multiplyScalar(0.32)
+      botFlowerMat = trackMat(new MeshStandardMaterial({
+        map: flwMap,
+        alphaTest: bp.alphaCutoff,
+        side: DoubleSide,
+        vertexColors: true,
+        roughness: 0.60,
+        metalness: 0,
+        emissive: flwEmissive,
+        emissiveIntensity: 0.34,
+      }))
+      botFlowerMat.name = 'BotanicalFlowers'
+      botFlowerMesh = new Mesh(bp.flowerGeometry, botFlowerMat)
+      botFlowerMesh.name = 'Botanical flowers'
+      botFlowerMesh.userData.role = 'foliage'
+      botFlowerMesh.userData.noReceiveShadow = true
+      meshes.push(botFlowerMesh)
+      stats.flowers = bp.flowers
+      stats.triangles += meshTriCount(bp.flowerGeometry)
+    }
   } else if (ground) {
     const { geometry, blades } = buildGround(spec, env)
     const modeledBlade = spec.kind === 'grass' && spec.ground.mode !== 'card'
@@ -673,7 +758,7 @@ export function buildTree(
     stats.triangles += meshTriCount(pt.geometry)
   }
   // Optional stylized ancient wishing-tree decorative accents (mossy boulders, flat-folded silk ribbons, wooden plaques, golden sparkles)
-  if (sh.accent === 'wishing' && !ground && !flowerbed && !lotus) {
+  if (sh.accent === 'wishing' && !ground && !flowerbed && !lotus && !botanical) {
     const acc = buildWishingAccents(skeleton, spec.seed, spec.accents)
     accentGroup = acc.group
     accentTriangles = acc.triangles
@@ -690,8 +775,8 @@ export function buildTree(
     }
   }
   for (const mesh of meshes) {
-    mesh.castShadow = true
-    mesh.receiveShadow = mesh.userData.role === 'wood' || !sh.softSelfShadow
+    mesh.castShadow = !mesh.userData.noCastShadow
+    mesh.receiveShadow = !mesh.userData.noReceiveShadow && (mesh.userData.role === 'wood' || !sh.softSelfShadow)
     group.add(mesh)
   }
   stats.ms = Math.round(performance.now() - started)
@@ -909,6 +994,17 @@ export function buildTree(
         swapMeshGeometry(fbBlossomsMesh, fb.blossomsGeometry)
         stats.leaves = fb.flowers
         stats.flowers = fb.flowers
+      } else if (botanical && botLeafMesh) {
+        const bp = buildBotanicalPlant(nextSpec, env)
+        if (bp.stemGeometry && botStemMesh) { swapMeshGeometry(botStemMesh, bp.stemGeometry); stats.branches = bp.stems }
+        else if (bp.stemGeometry) bp.stemGeometry.dispose()
+        if (nextCustomNormal) applyCustomLeafNormals(bp.leafGeometry, env, nextSpec.normalEdit!, nextSpec.seed)
+        swapMeshGeometry(botLeafMesh, bp.leafGeometry)
+        stats.leaves = bp.leaves
+        if (bp.coreGeometry && botCoreMesh) swapMeshGeometry(botCoreMesh, bp.coreGeometry)
+        else if (bp.coreGeometry) bp.coreGeometry.dispose()
+        if (bp.flowerGeometry && botFlowerMesh) { swapMeshGeometry(botFlowerMesh, bp.flowerGeometry); stats.flowers = bp.flowers }
+        else if (bp.flowerGeometry) bp.flowerGeometry.dispose()
       } else if (ground && groundMesh) {
         const { geometry, blades } = buildGround(nextSpec, env)
         if (nextCustomNormal) applyCustomLeafNormals(geometry, env, nextSpec.normalEdit!, nextSpec.seed)
@@ -943,7 +1039,7 @@ export function buildTree(
           if (flowerOverlayMesh) { removeMeshFromLive(flowerOverlayMesh); flowerOverlayMesh = undefined }
           stats.flowers = 0
         }
-      } else if (!lotus && !flowerbed) {
+      } else if (!lotus && !flowerbed && !botanical) {
         if (flowerOverlayMesh) { removeMeshFromLive(flowerOverlayMesh); flowerOverlayMesh = undefined }
         stats.flowers = 0
       }
@@ -996,7 +1092,7 @@ export function buildTree(
       }
 
       let cloneBarkMat: Material = currentBark
-      if (!shareMaterials && !ground && !flowerbed && !bamboo && !lotus && !palm && nextSpec.trunk.sculpt && nextSpec.trunk.sculpt.intensity > 0) {
+      if (!shareMaterials && !ground && !flowerbed && !bamboo && !lotus && !palm && !botanical && nextSpec.trunk.sculpt && nextSpec.trunk.sculpt.intensity > 0) {
         const freshBark = buildBarkFor(nextSpec, textures)
         cloneDisposables.push(freshBark)
         cloneBarkMat = freshBark
@@ -1096,6 +1192,23 @@ export function buildTree(
         addCloneMesh(fb.blossomsGeometry, fbBlossomsMat, 'Flower blossoms', 'foliage')
         cloneStats.leaves = fb.flowers
         cloneStats.flowers = fb.flowers
+      } else if (botanical && botLeafMat) {
+        const bp = buildBotanicalPlant(nextSpec, env)
+        if (bp.stemGeometry && botStemMat) { addCloneMesh(bp.stemGeometry, botStemMat, 'Botanical stems', 'wood'); cloneStats.branches = bp.stems }
+        else if (bp.stemGeometry) bp.stemGeometry.dispose()
+        if (nextCustomNormal) applyCustomLeafNormals(bp.leafGeometry, env, nextSpec.normalEdit!, nextSpec.seed)
+        const lm = addCloneMesh(bp.leafGeometry, botLeafMat, 'Botanical leaves', 'foliage')
+        lm.receiveShadow = false
+        cloneStats.leaves = bp.leaves
+        if (bp.coreGeometry && botCoreMat) {
+          const cm = addCloneMesh(bp.coreGeometry, botCoreMat, 'Botanical flower cores', 'foliage')
+          cm.castShadow = false; cm.receiveShadow = false
+        } else if (bp.coreGeometry) bp.coreGeometry.dispose()
+        if (bp.flowerGeometry && botFlowerMat) {
+          const fm = addCloneMesh(bp.flowerGeometry, botFlowerMat, 'Botanical flowers', 'foliage')
+          fm.receiveShadow = false
+          cloneStats.flowers = bp.flowers
+        } else if (bp.flowerGeometry) bp.flowerGeometry.dispose()
       } else if (ground && groundMat) {
         const { geometry, blades } = buildGround(nextSpec, env)
         if (nextCustomNormal) applyCustomLeafNormals(geometry, env, nextSpec.normalEdit!, nextSpec.seed)

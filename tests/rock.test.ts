@@ -8,7 +8,8 @@ import { createDefaultOverrideStore } from '../src/studio/default-overrides'
 import { parseSavedTextureMap } from '../src/studio/texture-serialize'
 
 describe('Stylized Rock Studio', () => {
-  it('builds all 6 presets deterministically with grounded y>=0, unit normals, valid colors & rockData', () => {
+  it('builds all 12 presets deterministically with grounded y>=0, unit normals, valid colors & rockData', () => {
+    expect(rockPresetIds.length).toBe(12)
     for (const id of rockPresetIds) {
       const spec = rockPresetSpec(id)
       const mat = makeRockMaterial(spec, 'final')
@@ -243,5 +244,67 @@ describe('Stylized Rock Studio', () => {
     expect(parsedTex?.leaf?.normalDataUrl).toBe(png1x1)
     expect(parsedTex?.leaf?.roughnessDataUrl).toBeUndefined()
     expect(parsedTex?.bark).toBeUndefined()
+  })
+
+  it('supports handpainted style, interlocking slabs, grounded pebbles, tall spire taper & live uCracks', () => {
+    const single = rockPresetSpec('handpainted-monolith')
+    single.shape.slabs = 1
+    single.cluster.pebbles = 0
+
+    const compound = rockPresetSpec('handpainted-block-bluff')
+    expect(compound.style).toBe('handpainted')
+    expect(compound.shape.slabs).toBe(3)
+    expect(compound.cluster.pebbles).toBeGreaterThan(0)
+
+    const mat = makeRockMaterial(compound, 'final')
+    expect(mat.userData.rockUniforms.uStyle.value).toBe(2)
+    expect(mat.userData.rockUniforms.uCracks.value).toBeCloseTo(compound.detail.cracks, 4)
+
+    const updated = { ...compound, detail: { ...compound.detail, cracks: 0.92 } }
+    updateRockMaterialLive(mat, updated, 'final')
+    expect(mat.userData.rockUniforms.uCracks.value).toBeCloseTo(0.92, 4)
+
+    const builtSingle = buildRockGroup(single, mat)
+    const builtCompound = buildRockGroup(compound, mat)
+    // Compound slabs & pebbles merge cleanly into 1 mesh per stone entry
+    expect(builtCompound.stats.stones).toBe(1)
+    expect(builtCompound.stats.triangles).toBeGreaterThan(builtSingle.stats.triangles * 2)
+    expect(builtCompound.bounds.min.y).toBeGreaterThanOrEqual(-1e-4)
+
+    // Interlocking slabs bake crevice AO (rockData.y > 0.5) at joints
+    const rData = builtCompound.meshes[0].geometry.getAttribute('rockData')
+    let creviceVerts = 0
+    for (let i = 0; i < rData.count; i++) {
+      if (rData.getY(i) > 0.65) creviceVerts++
+    }
+    expect(creviceVerts).toBeGreaterThan(40)
+
+    // Tall spire with high taperTop stays valid, finite, grounded, and exports clean GLB
+    const spire = rockPresetSpec('handpainted-crag-spire')
+    spire.shape.taperTop = 0.85
+    const builtSpire = buildRockGroup(spire, mat)
+    expect(builtSpire.bounds.max.y).toBeGreaterThan(1.5)
+    expect(builtSpire.bounds.min.y).toBeGreaterThanOrEqual(-1e-4)
+    const prepared = prepareGlbScene(builtSpire.group, { mode: 'merged', excludeDecorations: false })
+    let meshes = 0
+    prepared.traverse(obj => { if ('isMesh' in obj && obj.isMesh) meshes++ })
+    expect(meshes).toBe(1)
+
+    // parseRockSpec round-trips & clamps slabs, pebbles, taperTop <= 0.85, and handpainted style
+    const parsed = parseRockSpec({
+      preset: 'handpainted-twin-slab',
+      style: 'handpainted',
+      shape: { slabs: 9, taperTop: 1.4 },
+      cluster: { pebbles: 12 },
+    })
+    expect(parsed.style).toBe('handpainted')
+    expect(parsed.shape.slabs).toBe(3)
+    expect(parsed.shape.taperTop).toBe(0.85)
+    expect(parsed.cluster.pebbles).toBe(6)
+
+    builtSingle.dispose()
+    builtCompound.dispose()
+    builtSpire.dispose()
+    mat.dispose()
   })
 })

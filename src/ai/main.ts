@@ -51,7 +51,7 @@ const cameras: Record<Camera, string> = { front: '正面', angle: '45°', side: 
 const viewLabel: Record<View, string> = { final: '成品', skeleton: '枝干骨架', crown: '树冠' }
 const kindNames: Record<TreeKind, string> = {
   broadleaf: '阔叶树 / 观花树', conifer: '针叶树', palm: '棕榈树', bamboo: '竹子', lotus: '荷花',
-  grass: '草丛', fern: '蕨类', flowerbed: '花丛模板',
+  grass: '草丛', fern: '蕨类', flowerbed: '花丛模板', botanical: '风格化植物',
 }
 const byId = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
 const fmt = new Intl.NumberFormat('zh-CN')

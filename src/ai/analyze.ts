@@ -1439,6 +1439,7 @@ export function analyzePlantImage(source: PixelBuffer, imageName = '参考图植
     grass: '草丛',
     fern: '蕨类',
     flowerbed: '花丛',
+    botanical: '风格化手绘植物',
   }
   const styleNames: Record<LeafStyle, string> = {
     painted: '手绘色块叶簇', feathery: '羽叶细枝',

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { Box3, InstancedMesh, Material, Mesh, MeshStandardMaterial, Texture, Vector3 } from 'three'
+import { Box3, Group, InstancedMesh, Material, Mesh, MeshStandardMaterial, Texture, Vector3 } from 'three'
 import { buildMeadowBirchStructure } from '../src/assembly/birch-structure'
 import { buildAssemblyItem, buildAssemblyTreeAsset, type AssemblySharedTextures } from '../src/assembly/builder'
 import { defaultGrassBrushOptions, MAX_GRASS_CLUSTERS, PaintedGrassLayer, syncGrassRvtUniforms } from '../src/assembly/grass-brush'
@@ -9,8 +9,9 @@ import {
   buildBirchMeadowCase, builtInAssemblyCases, curatedAssemblyAssets,
 } from '../src/assembly/showcases'
 import {
-  blankAssemblyScene, defaultGrassRvtSpec, detectImportedAssetJson, parseAssemblyReference,
-  parseAssemblyScene, parseGrassRvt, type GrassPaintCluster,
+  blankAssemblyScene, createRockC2Item, createRockItem, defaultGrassRvtSpec,
+  defaultPolyCRockSpec, detectImportedAssetJson, parseAssemblyReference,
+  parseAssemblyScene, parseGrassRvt, type GrassPaintCluster, type PolyCRockSpec,
 } from '../src/assembly/spec'
 import { createAssemblySceneStore } from '../src/assembly/store'
 import {
@@ -584,5 +585,182 @@ describe('Scene Assembly Studio — schema, showcases, ground, builder & store',
     expect(addedFill).toBeGreaterThan(1500)
     expect(layer.stats().drawCalls).toBeLessThanOrEqual(5)
     layer.dispose()
+  })
+
+  it('supports mixed Route C2 rocks (sandstone-ledge-c2 + block-bluff-c2) alongside legacy rocks with lossless save/reload and merged GLB export', async () => {
+    const shared = dummySharedTextures()
+    const scene = blankAssemblyScene('路线C2混合资产验收')
+
+    const c2Sand = createRockC2Item(
+      {
+        ...defaultPolyCRockSpec('sandstone-ledge-c2'),
+        seed: 6123,
+        mode: 'shallow-detail',
+        shoulderDepth: 1.18,
+        bevelScale: 0.85,
+        notchDepth: 1.12,
+        strataStrength: 1.15,
+        baseColor: '#caa57c',
+      },
+      {
+        id: 'rock-c2-sand',
+        position: [-1.8, 0, 0.4],
+        rotation: [0, 28, 0],
+        scale: [1.25, 0.86, 1.12],
+      },
+    )
+    const c2Bluff = createRockC2Item(
+      {
+        ...defaultPolyCRockSpec('block-bluff-c2'),
+        seed: 8421,
+        mode: 'shallow-detail',
+        shoulderDepth: 0.86,
+        bevelScale: 1.2,
+        notchDepth: 1.08,
+        strataStrength: 0.95,
+        baseColor: '#c29d76',
+      },
+      {
+        id: 'rock-c2-bluff',
+        position: [0.35, 0, -0.55],
+        rotation: [0, -34, 0],
+        scale: [1.35, 0.82, 1.15],
+      },
+    )
+    const legacyRock = createRockItem(
+      { ...rockPresetSpec('handpainted-block-bluff'), seed: 4411 },
+      {
+        id: 'rock-legacy',
+        name: '旧预设手绘方岩',
+        position: [2.25, 0, 0.55],
+        rotation: [0, 42, 0],
+        scale: [0.88, 1.14, 0.92],
+      },
+    )
+    scene.items = [c2Sand, c2Bluff, legacyRock]
+
+    // 1. Standalone C2 rock JSON auto-detection
+    const detectedC2 = detectImportedAssetJson(c2Bluff.payload)
+    expect(detectedC2.type).toBe('item')
+    if (detectedC2.type === 'item') {
+      expect(detectedC2.item.kind).toBe('rock-c2')
+      expect((detectedC2.item.payload as PolyCRockSpec).preset).toBe('block-bluff-c2')
+      expect((detectedC2.item.payload as PolyCRockSpec).seed).toBe(8421)
+    }
+
+    // 2. Lossless JSON & store save/reload round-trip
+    const storage = memoryStorage()
+    const store1 = createAssemblySceneStore({ storage, apiUrl: null })
+    await store1.ready()
+    const saved = await store1.saveNew({
+      name: scene.name,
+      itemCount: scene.items.length,
+      triangles: 3000,
+      thumbnail: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/',
+      scene,
+    })
+
+    const store2 = createAssemblySceneStore({ storage, apiUrl: null })
+    await store2.ready()
+    const reloaded = parseAssemblyScene(JSON.parse(JSON.stringify(store2.get(saved.id)!.scene)))
+    expect(reloaded.items).toHaveLength(3)
+    expect(reloaded.items.map(i => i.kind)).toEqual(['rock-c2', 'rock-c2', 'rock'])
+    expect(reloaded.items[0].payload).toEqual(c2Sand.payload)
+    expect(reloaded.items[1].payload).toEqual(c2Bluff.payload)
+    expect(reloaded.items[2].payload).toEqual(legacyRock.payload)
+    expect(reloaded.items[0].scale).toEqual([1.25, 0.86, 1.12])
+    expect(reloaded.items[1].rotation).toEqual([0, -34, 0])
+    expect(reloaded.items[2].scale).toEqual([0.88, 1.14, 0.92])
+
+    // 3. Build mixed scene (ground + 2x C2 PBR rocks + 1x legacy vertex-colored rock)
+    const root = new Group()
+    root.name = 'MixedExportRoot'
+    const ground = buildAssemblyGround(reloaded.ground)
+    root.add(ground.group)
+
+    const builtItems = []
+    for (const item of reloaded.items) {
+      const inst = await buildAssemblyItem(item, shared)
+      expect(inst.triangles).toBeGreaterThan(0)
+      root.add(inst.wrapper)
+      builtItems.push(inst)
+    }
+    const groundTris = inspectGlbExport(ground.group, { mode: 'merged', excludeDecorations: false }).triangles
+    const expectedRockTris = builtItems.reduce((s, x) => s + x.triangles, 0)
+    expect(builtItems[0].triangles).toBeGreaterThanOrEqual(200)
+    expect(builtItems[1].triangles).toBeGreaterThanOrEqual(200)
+    expect(builtItems[2].triangles).toBeGreaterThan(500)
+
+    // 4. Merged GLB preparation: both excludeDecorations=false and true MUST retain all 3 hero rocks!
+    for (const excludeDecorations of [false, true] as const) {
+      const mergedRoot = prepareGlbScene(root, { mode: 'merged', excludeDecorations })
+      let mergedMesh: Mesh | undefined
+      mergedRoot.traverse(o => {
+        if (o instanceof Mesh) mergedMesh = o
+      })
+      expect(mergedMesh).toBeDefined()
+      const mats = Array.isArray(mergedMesh!.material) ? mergedMesh!.material : [mergedMesh!.material]
+      const matNames = mats.map(m => m.name)
+      expect(matNames).toContain('Mat_RockC2_SandstoneLedge_PBR')
+      expect(matNames).toContain('Mat_RockC2_BlockBluff_PBR')
+      expect(matNames).toContain('Mat_Stylized_Rock')
+
+      // Check triangle total includes all 3 rocks (and ground when excludeDecorations=false)
+      const mergedTris = mergedMesh!.geometry.index ? mergedMesh!.geometry.index.count / 3 : 0
+      if (!excludeDecorations) {
+        expect(mergedTris).toBe(groundTris + expectedRockTris)
+      } else {
+        expect(mergedTris).toBeGreaterThanOrEqual(expectedRockTris)
+      }
+
+      // Check C2 materials preserve BaseColor/Normal/AO texture slots & channel=0
+      for (const name of ['Mat_RockC2_SandstoneLedge_PBR', 'Mat_RockC2_BlockBluff_PBR']) {
+        const m = mats.find(x => x.name === name) as MeshStandardMaterial
+        expect(m.map).toBeTruthy()
+        expect(m.normalMap).toBeTruthy()
+        expect(m.aoMap).toBeTruthy()
+        expect(m.aoMap!.channel).toBe(0)
+        expect(m.aoMapIntensity).toBeCloseTo(0.85, 3)
+      }
+
+      // Check EVERY vertex in merged mesh has finite orthonormal TANGENT (mixed tangent/non-tangent + non-uniform scale!)
+      const nAttr = mergedMesh!.geometry.getAttribute('normal')
+      const tAttr = mergedMesh!.geometry.getAttribute('tangent')
+      const cAttr = mergedMesh!.geometry.getAttribute('color')
+      expect(tAttr).toBeDefined()
+      expect(cAttr).toBeDefined()
+      for (let i = 0; i < nAttr.count; i++) {
+        const nx = nAttr.getX(i), ny = nAttr.getY(i), nz = nAttr.getZ(i)
+        const tx = tAttr.getX(i), ty = tAttr.getY(i), tz = tAttr.getZ(i), tw = tAttr.getW(i)
+        expect(Math.hypot(tx, ty, tz)).toBeCloseTo(1, 3)
+        expect(Math.abs(nx * tx + ny * ty + nz * tz)).toBeLessThan(1e-3)
+        expect(Math.abs(tw)).toBe(1)
+      }
+
+      // Verify C2 groups have neutral white COLOR_0=(1,1,1) while legacy rock group has non-white painted colors
+      const idx = mergedMesh!.geometry.index!
+      for (const grp of mergedMesh!.geometry.groups) {
+        const mName = mats[grp.materialIndex ?? 0]?.name
+        if (mName?.startsWith('Mat_RockC2_')) {
+          for (let k = grp.start; k < grp.start + grp.count; k++) {
+            const vi = idx.getX(k)
+            expect(cAttr.getX(vi)).toBeCloseTo(1, 3)
+            expect(cAttr.getY(vi)).toBeCloseTo(1, 3)
+            expect(cAttr.getZ(vi)).toBeCloseTo(1, 3)
+          }
+        } else if (mName === 'Mat_Stylized_Rock') {
+          let nonWhite = 0
+          for (let k = grp.start; k < grp.start + grp.count; k++) {
+            const vi = idx.getX(k)
+            if (cAttr.getX(vi) < 0.99 || cAttr.getY(vi) < 0.99 || cAttr.getZ(vi) < 0.99) nonWhite++
+          }
+          expect(nonWhite).toBeGreaterThan(100)
+        }
+      }
+    }
+
+    for (const inst of builtItems) inst.dispose()
+    ground.dispose()
+    shared.registry.dispose()
   })
 })

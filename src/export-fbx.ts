@@ -407,10 +407,18 @@ export async function exportSceneToFbxBundle(
     }
 
     if (uvAttr) {
+      // FBX uses OpenGL bottom-left UV origin (v=0 bottom, v=1 top). Three.js textures default to flipY=true
+      // (matching FBX directly), whereas glTF-native textures set flipY=false (v=0 top, v=1 bottom) and must
+      // invert v -> 1 - v for FBX importers (Blender, Maya, Unity, UE) to sample the right texel row.
+      const needsFlipV = mats.some(m => {
+        const s = m.mat instanceof MeshStandardMaterial ? m.mat : undefined
+        const primary = s?.normalMap ?? s?.map ?? s?.aoMap
+        return Boolean(primary && primary.flipY === false)
+      })
       const uvs = new Float64Array(vCount * 2)
       for (let i = 0; i < vCount; i++) {
         uvs[i * 2] = uvAttr.getX(i)
-        uvs[i * 2 + 1] = uvAttr.getY(i)
+        uvs[i * 2 + 1] = needsFlipV ? 1 - uvAttr.getY(i) : uvAttr.getY(i)
       }
       geoChildren.push({
         name: 'LayerElementUV',

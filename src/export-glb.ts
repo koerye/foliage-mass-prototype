@@ -517,6 +517,7 @@ function semanticMaterialName(mesh: Mesh, mat: Material): string {
   if (mName.includes('leaf') || matName.includes('leaf') || mesh.userData?.role === 'foliage') {
     return mapName ? `Mat_Foliage_${mapName}` : 'Mat_Foliage_Leaves'
   }
+  if (mat.name && mat.name.startsWith('Mat_RockC2_')) return mat.name
   if (mName.includes('rock') || matName.includes('rock')) return 'Mat_Stylized_Rock'
   return `Mat_Other_${sanitizeMatToken(mat.name || mesh.name || 'Mesh')}`
 }
@@ -744,6 +745,85 @@ interface MergeEntry {
   flipWinding: boolean
 }
 
+/** Synthesizes valid per-vertex Terathon/MikkTSpace tangents (Tx, Ty, Tz, w) for an entry lacking `tangent`
+ *  when merged alongside tangent-bearing meshes — prevents degenerate hardcoded `(1,0,0,1)` bases. */
+function computeFallbackEntryTangents(
+  posAttr: BufferAttribute,
+  normAttr: BufferAttribute | undefined,
+  uvAttr: BufferAttribute | undefined,
+  indexAttr: BufferAttribute | null,
+  vSign = 1,
+): Float32Array {
+  const vCount = posAttr.count
+  const tan1 = new Float32Array(vCount * 3)
+  const tan2 = new Float32Array(vCount * 3)
+
+  if (uvAttr) {
+    const triCount = indexAttr ? Math.floor(indexAttr.count / 3) : Math.floor(vCount / 3)
+    for (let t = 0; t < triCount; t++) {
+      const i1 = indexAttr ? indexAttr.getX(t * 3) : t * 3
+      const i2 = indexAttr ? indexAttr.getX(t * 3 + 1) : t * 3 + 1
+      const i3 = indexAttr ? indexAttr.getX(t * 3 + 2) : t * 3 + 2
+      const x1 = posAttr.getX(i2) - posAttr.getX(i1)
+      const y1 = posAttr.getY(i2) - posAttr.getY(i1)
+      const z1 = posAttr.getZ(i2) - posAttr.getZ(i1)
+      const x2 = posAttr.getX(i3) - posAttr.getX(i1)
+      const y2 = posAttr.getY(i3) - posAttr.getY(i1)
+      const z2 = posAttr.getZ(i3) - posAttr.getZ(i1)
+      const s1 = uvAttr.getX(i2) - uvAttr.getX(i1)
+      const t1 = (uvAttr.getY(i2) - uvAttr.getY(i1)) * vSign
+      const s2 = uvAttr.getX(i3) - uvAttr.getX(i1)
+      const t2 = (uvAttr.getY(i3) - uvAttr.getY(i1)) * vSign
+      const denom = s1 * t2 - s2 * t1
+      if (Math.abs(denom) < 1e-12) continue
+      const r = 1 / denom
+      const sdx = (t2 * x1 - t1 * x2) * r, sdy = (t2 * y1 - t1 * y2) * r, sdz = (t2 * z1 - t1 * z2) * r
+      const tdx = (s1 * x2 - s2 * x1) * r, tdy = (s1 * y2 - s2 * y1) * r, tdz = (s1 * z2 - s2 * z1) * r
+      for (const vi of [i1, i2, i3]) {
+        tan1[vi * 3] += sdx; tan1[vi * 3 + 1] += sdy; tan1[vi * 3 + 2] += sdz
+        tan2[vi * 3] += tdx; tan2[vi * 3 + 1] += tdy; tan2[vi * 3 + 2] += tdz
+      }
+    }
+  }
+
+  const out = new Float32Array(vCount * 4)
+  for (let i = 0; i < vCount; i++) {
+    let nx = 0, ny = 1, nz = 0
+    if (normAttr) {
+      nx = normAttr.getX(i); ny = normAttr.getY(i); nz = normAttr.getZ(i)
+      const nl = Math.hypot(nx, ny, nz)
+      if (nl > 1e-8) { nx /= nl; ny /= nl; nz /= nl }
+      else { nx = 0; ny = 1; nz = 0 }
+    }
+    let tx = tan1[i * 3], ty = tan1[i * 3 + 1], tz = tan1[i * 3 + 2]
+    const ndt = nx * tx + ny * ty + nz * tz
+    tx -= nx * ndt; ty -= ny * ndt; tz -= nz * ndt
+    const tl = Math.hypot(tx, ty, tz)
+    if (tl > 1e-8) {
+      tx /= tl; ty /= tl; tz /= tl
+    } else {
+      // Strictly orthogonal unit tangent fallback (never collinear with N!)
+      const rx = Math.abs(ny) < 0.9 ? 0 : 1
+      const ry = Math.abs(ny) < 0.9 ? 1 : 0
+      const rz = 0
+      tx = ry * nz - rz * ny
+      ty = rz * nx - rx * nz
+      tz = rx * ny - ry * nx
+      const fl = Math.hypot(tx, ty, tz) || 1
+      tx /= fl; ty /= fl; tz /= fl
+    }
+    const cx = ny * tz - nz * ty
+    const cy = nz * tx - nx * tz
+    const cz = nx * ty - ny * tx
+    const dotB = cx * tan2[i * 3] + cy * tan2[i * 3 + 1] + cz * tan2[i * 3 + 2]
+    out[i * 4] = tx
+    out[i * 4 + 1] = ty
+    out[i * 4 + 2] = tz
+    out[i * 4 + 3] = dotB < 0 ? -1 : 1
+  }
+  return out
+}
+
 function mergeEntriesIntoSingleMesh(entries: MergeEntry[], name: string): Mesh {
   const matList: Material[] = []
   const matIndexMap = new Map<Material, number>()
@@ -765,6 +845,7 @@ function mergeEntriesIntoSingleMesh(entries: MergeEntry[], name: string): Mesh {
   let anyUv = false
   let anyUv1 = false
   let anyColor = false
+  let anyTangent = false
   for (const e of entries) {
     const pos = e.geometry.getAttribute('position')
     if (!pos) continue
@@ -773,6 +854,7 @@ function mergeEntriesIntoSingleMesh(entries: MergeEntry[], name: string): Mesh {
     if (e.geometry.getAttribute('uv') || (e.material instanceof MeshStandardMaterial && (e.material.map || e.material.normalMap || e.material.roughnessMap || e.material.aoMap))) anyUv = true
     if (e.geometry.getAttribute('uv1')) anyUv1 = true
     if (e.geometry.getAttribute('color')) anyColor = true
+    if (e.geometry.getAttribute('tangent')) anyTangent = true
   }
 
   const positions = new Float32Array(totalVerts * 3)
@@ -780,25 +862,38 @@ function mergeEntriesIntoSingleMesh(entries: MergeEntry[], name: string): Mesh {
   const colors = anyColor ? new Uint16Array(totalVerts * 3) : undefined
   const uvs = anyUv ? new Float32Array(totalVerts * 2) : undefined
   const uv1s = anyUv1 ? new Float32Array(totalVerts * 2) : undefined
+  const tangents = anyTangent ? new Float32Array(totalVerts * 4) : undefined
   const indices = totalVerts > 65535 ? new Uint32Array(totalIndices) : new Uint16Array(totalIndices)
 
   const geo = new BufferGeometry()
   geo.name = name
   const v = new Vector3()
   const n = new Vector3()
+  const nLocal = new Vector3()
+  const tanLocal = new Vector3()
+  const tan = new Vector3()
+  const bitan = new Vector3()
+  const linearMat = new Matrix3()
   let vCursor = 0
   let iCursor = 0
 
   for (let mIdx = 0; mIdx < buckets.length; mIdx++) {
     const groupStart = iCursor
     for (const e of buckets[mIdx]) {
-      const posAttr = e.geometry.getAttribute('position')
+      const posAttr = e.geometry.getAttribute('position') as BufferAttribute | undefined
       if (!posAttr) continue
-      const normAttr = e.geometry.getAttribute('normal')
+      const normAttr = e.geometry.getAttribute('normal') as BufferAttribute | undefined
       const colAttr = e.geometry.getAttribute('color') as BufferAttribute | undefined
       let uvAttr = e.geometry.getAttribute('uv') as BufferAttribute | undefined
       const uv1Attr = e.geometry.getAttribute('uv1') as BufferAttribute | undefined
+      const tanAttr = e.geometry.getAttribute('tangent') as BufferAttribute | undefined
       if (anyUv && !uvAttr) uvAttr = synthesizeTriplanarUv(e.geometry)
+      // Upper-left 3x3 linear part of model matrix: contravariant tangents MUST use this (NOT inverse-transpose normalMatrix!)
+      linearMat.setFromMatrix4(e.matrix)
+      const fallbackVSign = e.material instanceof MeshStandardMaterial && (e.material.normalMap?.flipY === false || e.material.map?.flipY === false) ? -1 : 1
+      const fallbackTan = tangents && !(tanAttr && tanAttr.itemSize >= 4)
+        ? computeFallbackEntryTangents(posAttr, normAttr, uvAttr, e.geometry.index, fallbackVSign)
+        : undefined
       const baseVertex = vCursor
       const count = posAttr.count
 
@@ -809,15 +904,54 @@ function mergeEntriesIntoSingleMesh(entries: MergeEntry[], name: string): Mesh {
         positions[(vCursor + i) * 3 + 2] = v.z
 
         if (normAttr) {
-          n.fromBufferAttribute(normAttr, i).applyMatrix3(e.normalMatrix)
+          nLocal.fromBufferAttribute(normAttr, i)
+          if (nLocal.lengthSq() > 1e-10) nLocal.normalize()
+          else nLocal.set(0, 1, 0)
+          n.copy(nLocal).applyMatrix3(e.normalMatrix)
           if (n.lengthSq() > 1e-10) n.normalize()
           else n.set(0, 1, 0)
         } else {
+          nLocal.set(0, 1, 0)
           n.set(0, 1, 0)
         }
         normals[(vCursor + i) * 3] = n.x
         normals[(vCursor + i) * 3 + 1] = n.y
         normals[(vCursor + i) * 3 + 2] = n.z
+
+        if (tangents) {
+          let wLocal = 1
+          if (tanAttr && tanAttr.itemSize >= 4) {
+            tanLocal.set(tanAttr.getX(i), tanAttr.getY(i), tanAttr.getZ(i))
+            wLocal = tanAttr.getW(i) < 0 ? -1 : 1
+          } else if (fallbackTan) {
+            tanLocal.set(fallbackTan[i * 4], fallbackTan[i * 4 + 1], fallbackTan[i * 4 + 2])
+            wLocal = fallbackTan[i * 4 + 3]
+          } else {
+            tanLocal.set(1, 0, 0)
+          }
+          // Transform contravariant tangent & bitangent by model linear 3x3, then Gram-Schmidt orthogonalize against n!
+          bitan.crossVectors(nLocal, tanLocal).multiplyScalar(wLocal).applyMatrix3(linearMat)
+          tan.copy(tanLocal).applyMatrix3(linearMat)
+          tan.addScaledVector(n, -n.dot(tan))
+          if (tan.lengthSq() > 1e-10) {
+            tan.normalize()
+          } else {
+            const rx = Math.abs(n.y) < 0.9 ? 0 : 1
+            const ry = Math.abs(n.y) < 0.9 ? 1 : 0
+            tan.set(ry * n.z, -rx * n.z, rx * n.y - ry * n.x).normalize()
+          }
+          const crossNTx = n.y * tan.z - n.z * tan.y
+          const crossNTy = n.z * tan.x - n.x * tan.z
+          const crossNTz = n.x * tan.y - n.y * tan.x
+          const handedDot = crossNTx * bitan.x + crossNTy * bitan.y + crossNTz * bitan.z
+          const wOut = Math.abs(handedDot) > 1e-10
+            ? (handedDot < 0 ? -1 : 1)
+            : (wLocal * (e.flipWinding ? -1 : 1))
+          tangents[(vCursor + i) * 4] = tan.x
+          tangents[(vCursor + i) * 4 + 1] = tan.y
+          tangents[(vCursor + i) * 4 + 2] = tan.z
+          tangents[(vCursor + i) * 4 + 3] = wOut
+        }
 
         if (colors) {
           if (colAttr) {
@@ -890,6 +1024,7 @@ function mergeEntriesIntoSingleMesh(entries: MergeEntry[], name: string): Mesh {
   if (colors) geo.setAttribute('color', new BufferAttribute(colors, 3, true))
   if (uvs) geo.setAttribute('uv', new BufferAttribute(uvs, 2))
   if (uv1s) geo.setAttribute('uv1', new BufferAttribute(uv1s, 2))
+  if (tangents) geo.setAttribute('tangent', new BufferAttribute(tangents, 4))
   geo.setIndex(new BufferAttribute(indices, 1))
   geo.computeBoundingBox()
   geo.computeBoundingSphere()

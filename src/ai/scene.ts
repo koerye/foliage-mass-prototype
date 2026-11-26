@@ -70,6 +70,7 @@ const defaultPresetForKind: Record<TreeKind, PresetId> = {
   grass: 'grass-clump',
   fern: 'fern',
   flowerbed: 'flowerbed-stemmed',
+  botanical: 'botanical-shrub-a',
 }
 
 export function createAiPart(kind: TreeKind, label?: string, seed?: number): AiPart {

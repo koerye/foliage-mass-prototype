@@ -2,9 +2,12 @@
 // Delegates ALL tree generation through the single unified 6-stage `buildTree()` pipeline in `src/tree/assemble.ts`
 // (zero external foliage/bark post-mutations!), keeping Tree Studio <-> Scene Studio 100% identical and fully parametric.
 import {
-  Box3, Group, LOD, MathUtils, Mesh, type Object3D, type Texture,
+  Box3, CanvasTexture, DataTexture, Group, LinearMipmapLinearFilter, LOD, MathUtils, Mesh,
+  MeshStandardMaterial, NoColorSpace, RGBAFormat, SRGBColorSpace, Vector2, type Object3D, type Texture,
 } from 'three'
 import { buildAiScene, type AiSceneSpec, type LeafTextureSource } from '../ai/scene'
+import { buildRouteCRock } from '../rock-v2/poly-csg'
+import { bakePolyCsgPbr, unwrapPolyCsgUvCharts } from '../rock-v2/poly-pbr'
 import { buildRockGroup } from '../rock/geometry'
 import { makeRockMaterial } from '../rock/material'
 import type { RockSpec } from '../rock/spec'
@@ -13,7 +16,7 @@ import type { EditableTextureSlot, TextureRegistry } from '../studio/texture-slo
 import { buildTree, type TreeAsset, type TreeTextures } from '../tree/assemble'
 import { optimizeAt } from '../tree/optimize'
 import type { BarkStyle, TreeForm, TreeSpec } from '../tree/spec'
-import type { AssemblyBarkStyle, AssemblyCategory, AssemblyItem } from './spec'
+import { parsePolyCRockSpec, type AssemblyBarkStyle, type AssemblyCategory, type AssemblyItem, type PolyCRockSpec } from './spec'
 
 export interface BuiltAssemblyInstance {
   id: string
@@ -164,6 +167,36 @@ export function buildAssemblyTreeAsset(
   })
 }
 
+function makePolyCPbrTexture(rgba: Uint8ClampedArray, size: number, srgb: boolean, name: string): Texture {
+  if (typeof document !== 'undefined') {
+    const canvas = document.createElement('canvas')
+    canvas.width = size
+    canvas.height = size
+    const ctx = canvas.getContext('2d')
+    if (ctx) {
+      const img = ctx.createImageData(size, size)
+      img.data.set(rgba)
+      ctx.putImageData(img, 0, 0)
+      const tex = new CanvasTexture(canvas)
+      tex.name = name
+      tex.flipY = false
+      tex.colorSpace = srgb ? SRGBColorSpace : NoColorSpace
+      tex.generateMipmaps = true
+      tex.minFilter = LinearMipmapLinearFilter
+      tex.anisotropy = 4
+      tex.needsUpdate = true
+      return tex
+    }
+  }
+  const bytes = new Uint8Array(rgba.buffer.slice(rgba.byteOffset, rgba.byteOffset + rgba.byteLength))
+  const tex = new DataTexture(bytes, size, size, RGBAFormat)
+  tex.name = name
+  tex.flipY = false
+  tex.colorSpace = srgb ? SRGBColorSpace : NoColorSpace
+  tex.needsUpdate = true
+  return tex
+}
+
 /** Builds a single AssemblyItem into an isolated Three.js wrapper Group ready to mount in the scene. */
 export async function buildAssemblyItem(
   item: AssemblyItem,
@@ -191,6 +224,63 @@ export async function buildAssemblyItem(
     disposeInner = () => {
       built.dispose()
       mat.dispose()
+    }
+  } else if (item.kind === 'rock-c2') {
+    const c2Spec = parsePolyCRockSpec(item.payload as PolyCRockSpec)
+    const c2 = await buildRouteCRock(c2Spec.preset, {
+      seed: c2Spec.seed,
+      shoulderDepth: c2Spec.shoulderDepth,
+      bevelScale: c2Spec.bevelScale,
+      notchDepth: c2Spec.notchDepth,
+    })
+    const isMossyTerrace = c2Spec.preset === 'terraced-moss-bluff-c2'
+    const uv = unwrapPolyCsgUvCharts(c2, { atlasSize: 512, gutterPx: isMossyTerrace ? 6 : 10 })
+    const baked = bakePolyCsgPbr(c2, uv, {
+      size: 512,
+      mode: c2Spec.mode,
+      baseColorHex: c2Spec.baseColor,
+      dilationPasses: isMossyTerrace ? 8 : 14,
+      aoRays: isMossyTerrace ? 12 : 16,
+      seed: c2Spec.seed,
+      strataStrength: c2Spec.strataStrength,
+      ...(isMossyTerrace ? { mossTop: true, mossColorHex: '#68a624' } : {}),
+    })
+    const geo = uv.toBufferGeometry()
+    const tag = c2Spec.preset === 'terraced-moss-bluff-c2'
+      ? 'TerracedMossBluff'
+      : c2Spec.preset === 'block-bluff-c2'
+        ? 'BlockBluff'
+        : 'SandstoneLedge'
+    const mapTex = makePolyCPbrTexture(baked.albedo, baked.size, true, `RockC2_${tag}_BaseColor`)
+    const normTex = makePolyCPbrTexture(baked.normal, baked.size, false, `RockC2_${tag}_Normal`)
+    const aoTex = makePolyCPbrTexture(baked.ao, baked.size, false, `RockC2_${tag}_AO`)
+    aoTex.channel = 0
+    const mat = new MeshStandardMaterial({
+      name: `Mat_RockC2_${tag}_${c2Spec.mode === 'baseline' ? 'Baseline' : 'PBR'}`,
+      color: 0xffffff,
+      map: mapTex,
+      normalMap: normTex,
+      normalScale: new Vector2(1, 1),
+      aoMap: aoTex,
+      aoMapIntensity: 0.85,
+      roughness: 0.90,
+      metalness: 0.0,
+    })
+    const mesh = new Mesh(geo, mat)
+    mesh.name = `RockC2_${tag}_LOD0`
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    const grp = new Group()
+    grp.name = `RockC2_${tag}`
+    grp.add(mesh)
+    content = grp
+    lod0Group = grp
+    disposeInner = () => {
+      geo.dispose()
+      mat.dispose()
+      mapTex.dispose()
+      normTex.dispose()
+      aoTex.dispose()
     }
   } else if (item.kind === 'ai') {
     const aiSpec = item.payload as AiSceneSpec

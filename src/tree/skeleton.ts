@@ -404,7 +404,7 @@ export function buildSkeleton(spec: TreeSpec): Skeleton {
   const trunkCurve = makeCurve(trunkPoints)
   const trunkAtY = (y: number) => trunkCurve.getPoint(Math.min(1, Math.max(0, y / topY)))
   const axisPoint = conifer ? trunkAtY(H * (C.base + (1 - C.base) * .4)) : trunkPoints[trunkPoints.length - 1]
-  const ground = spec.kind === 'grass' || spec.kind === 'fern' || spec.kind === 'flowerbed' || spec.kind === 'lotus'
+  const ground = spec.kind === 'grass' || spec.kind === 'fern' || spec.kind === 'flowerbed' || spec.kind === 'lotus' || spec.kind === 'botanical'
   const bamboo = spec.kind === 'bamboo'
   const env = new CrownEnvelope(spec, ground ? new Vector3() : axisPoint)
   if (ground || bamboo) return { branches: [trunk], trunk, envelope: env, clusters: [] }

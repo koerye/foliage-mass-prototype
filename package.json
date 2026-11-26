@@ -37,12 +37,18 @@
       {
         "from": "user-presets",
         "to": "seed-data/user-presets",
-        "filter": ["**/*", "!**/*.bak"]
+        "filter": [
+          "**/*",
+          "!**/*.bak"
+        ]
       },
       {
         "from": "user-textures",
         "to": "seed-data/user-textures",
-        "filter": ["**/*", "!**/*.bak"]
+        "filter": [
+          "**/*",
+          "!**/*.bak"
+        ]
       }
     ],
     "win": {
@@ -50,11 +56,15 @@
       "target": [
         {
           "target": "dir",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "signAndEditExecutable": false
@@ -64,6 +74,7 @@
     }
   },
   "dependencies": {
+    "manifold-3d": "^3.5.5",
     "three": "^0.184.0"
   },
   "devDependencies": {

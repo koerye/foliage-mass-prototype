@@ -7,6 +7,8 @@ import { Box3 } from 'three'
 import type { AiSceneSpec } from '../ai/scene'
 import { exportGlb } from '../export-glb'
 import { parseRockSpec, rockPresetIds, rockPresets, rockPresetSpec, type RockPresetId, type RockSpec } from '../rock/spec'
+import type { PolyCsgPresetId } from '../rock-v2/poly-csg'
+import type { PolyPbrMode } from '../rock-v2/poly-pbr'
 import { activityLog, initStudioLogging } from '../studio/activity-log'
 import { mountActivityLogDrawer } from '../studio/activity-log-ui'
 import { blobToBase64, mountDesktopToolbarBadge, tryDesktopSaveBlob } from '../studio/desktop-bridge'
@@ -31,12 +33,14 @@ import {
 } from './showcases'
 import {
   backdropMeta, blankAssemblyScene, categoryIcons, categoryLabels, cloneJson,
-  createAiItem, createRockItem, createTreeItem, defaultGrassRvtSpec, detectImportedAssetJson,
-  inferCategoryFromTree, makeItemId, parseAssemblyScene,
+  createAiItem, createRockC2Item, createRockItem, createTreeItem,
+  defaultGrassRvtSpec, defaultPolyCRockSpec, detectImportedAssetJson,
+  inferCategoryFromTree, makeItemId, parseAssemblyScene, parsePolyCRockSpec,
+  polyCRockPresetIds, polyCRockPresets,
   type AssemblyBarkStyle, type AssemblyCameraPreset, type AssemblyItem,
   type AssemblyReferenceSpec, type AssemblySceneSpec, type BackdropTheme,
   type GrassRvtMode, type GrassRvtSpec, type GrassSpeciesId, type GroundStyle,
-  type PathLayout, type RefCompareMode,
+  type PathLayout, type PolyCRockSpec, type RefCompareMode,
 } from './spec'
 import { createAssemblySceneStore } from './store'
 import {
@@ -257,6 +261,54 @@ byId('app').innerHTML = `
               <option value="driftwood">厚涂宽纹古木</option>
               <option value="moss">苍古苔藓木皮</option>
             </select>
+          </div>
+          <div class="as-vec-group as-rockc2-box" id="as-rockc2-box" hidden>
+            <div class="as-vec-label">
+              <span>💎 路线 C2 岩石参数 (512 PBR)</span>
+            </div>
+            <div class="as-select-row">
+              <span>石型预设</span>
+              <select id="as-rc2-preset">
+                <option value="sandstone-ledge-c2">低矮横展砂岩 (C2)</option>
+                <option value="block-bluff-c2">阶梯方巨岩 (C2)</option>
+                <option value="terraced-moss-bluff-c2">17 苔藓层叠方巨岩 (C2)</option>
+              </select>
+            </div>
+            <div class="as-select-row">
+              <span>材质版本</span>
+              <select id="as-rc2-mode">
+                <option value="shallow-detail">浅细节版 (去波纹层理)</option>
+                <option value="baseline">材质基线 (纯平面)</option>
+              </select>
+            </div>
+            <div class="as-select-row">
+              <span>随机种子</span>
+              <input type="number" id="as-rc2-seed" min="1" max="999999" step="1" style="width:92px;padding:3px 6px;border:1px solid #cfd6c6;border-radius:6px;font-size:11.5px">
+            </div>
+            <div class="as-select-row">
+              <span>基础色</span>
+              <input type="color" id="as-rc2-color" value="#c8a882">
+            </div>
+            <div class="as-range-row">
+              <span>肩部切深</span>
+              <input type="range" id="as-rc2-shoulder" min="0.65" max="1.35" step="0.01" value="1">
+              <output id="as-rc2-shoulder-out">1.00</output>
+            </div>
+            <div class="as-range-row">
+              <span>倒角尺度</span>
+              <input type="range" id="as-rc2-bevel" min="0" max="1.4" step="0.02" value="1">
+              <output id="as-rc2-bevel-out">1.00</output>
+            </div>
+            <div class="as-range-row">
+              <span>V槽深度</span>
+              <input type="range" id="as-rc2-notch" min="0.5" max="1.4" step="0.02" value="1">
+              <output id="as-rc2-notch-out">1.00</output>
+            </div>
+            <div class="as-range-row">
+              <span>浅层理</span>
+              <input type="range" id="as-rc2-strata" min="0" max="1.5" step="0.05" value="1">
+              <output id="as-rc2-strata-out">1.00</output>
+            </div>
           </div>
         </div>
       </section>
@@ -1005,7 +1057,7 @@ function updateStatsUi() {
   let rockCount = 0
   let totalTris = 0
   for (const item of sceneSpec.items) {
-    if (item.kind === 'rock') rockCount++
+    if (item.kind === 'rock' || item.kind === 'rock-c2') rockCount++
     else plantCount++
     const inst = instances.get(item.id)
     if (inst && item.visible) totalTris += inst.activeTriangles()
@@ -1097,6 +1149,25 @@ function syncSelectedTransformInputs() {
   barkRow.hidden = !showBark
   if (showBark) {
     ;(byId('as-bark-style') as HTMLSelectElement).value = item.barkStyle ?? 'default'
+  }
+  const rockC2Box = byId('as-rockc2-box')
+  const showRockC2 = item.kind === 'rock-c2'
+  rockC2Box.hidden = !showRockC2
+  if (showRockC2) {
+    const rc = item.payload as PolyCRockSpec
+    ;(byId('as-rc2-preset') as HTMLSelectElement).value = rc.preset
+    ;(byId('as-rc2-mode') as HTMLSelectElement).value = rc.mode
+    const seedInp = byId<HTMLInputElement>('as-rc2-seed')
+    if (document.activeElement !== seedInp) seedInp.value = String(rc.seed)
+    ;(byId('as-rc2-color') as HTMLInputElement).value = rc.baseColor
+    ;(byId('as-rc2-shoulder') as HTMLInputElement).value = String(rc.shoulderDepth)
+    byId('as-rc2-shoulder-out').textContent = rc.shoulderDepth.toFixed(2)
+    ;(byId('as-rc2-bevel') as HTMLInputElement).value = String(rc.bevelScale)
+    byId('as-rc2-bevel-out').textContent = rc.bevelScale.toFixed(2)
+    ;(byId('as-rc2-notch') as HTMLInputElement).value = String(rc.notchDepth)
+    byId('as-rc2-notch-out').textContent = rc.notchDepth.toFixed(2)
+    ;(byId('as-rc2-strata') as HTMLInputElement).value = String(rc.strataStrength)
+    byId('as-rc2-strata-out').textContent = rc.strataStrength.toFixed(2)
   }
 }
 
@@ -1300,7 +1371,7 @@ function pickPlacementPosition(item: AssemblyItem): [number, number, number] {
     const ang = ring * 2.399963 // golden angle scatter
     candidates.push([Math.cos(ang) * r, Math.sin(ang) * r])
   }
-  const minGap = item.kind === 'rock' || item.category === 'grass' || item.category === 'flower' ? 0.65 : 1.05
+  const minGap = item.kind === 'rock' || item.kind === 'rock-c2' || item.category === 'grass' || item.category === 'flower' ? 0.65 : 1.05
   for (const [cx, cz] of candidates) {
     const crowded = sceneSpec.items.some(other => Math.hypot(other.position[0] - cx, other.position[2] - cz) < minGap)
     if (!crowded) return [Number(cx.toFixed(2)), 0, Number(cz.toFixed(2))]
@@ -1381,6 +1452,8 @@ async function reseedSelectedItem() {
     t.leaves = { ...t.leaves, leafSeed: nextSeed + 17 }
   } else if (item.kind === 'rock') {
     ;(item.payload as RockSpec).seed = nextSeed
+  } else if (item.kind === 'rock-c2') {
+    ;(item.payload as PolyCRockSpec).seed = nextSeed
   } else {
     const ai = item.payload as AiSceneSpec
     for (let i = 0; i < ai.parts.length; i++) {
@@ -1493,7 +1566,7 @@ function savedPresetToEntry(p: SavedPreset, group: string): PaletteEntry {
 }
 
 function isLowPlantKind(kind: SavedPreset['kind'], payload?: TreeSpec): boolean {
-  if (kind === 'grass' || kind === 'fern' || kind === 'flowerbed' || kind === 'lotus') return true
+  if (kind === 'grass' || kind === 'fern' || kind === 'flowerbed' || kind === 'lotus' || kind === 'botanical') return true
   if (kind === 'broadleaf' && payload && payload.trunk.height < 2.1 && payload.trunk.radius < 0.09) return true
   return false
 }
@@ -1612,6 +1685,24 @@ function buildPaletteEntries(tab: PaletteTab): PaletteEntry[] {
         create: c.create,
       })
     }
+    const botanicalIds = presetIds.filter(id => presets[id].kind === 'botanical')
+    for (const id of botanicalIds) {
+      const over = treeDefaults.get(id)
+      const base = over?.spec ?? presetSpec(id)
+      const cat = inferCategoryFromTree(base)
+      entries.push({
+        key: `plant:${id}`,
+        group: '🌱 风格化高精植物库（16 套手绘单叶 / 花球 / 地被）',
+        name: over ? `${presets[id].name} · 已改` : presets[id].name,
+        subtitle: `风格化手绘植物 · ${categoryLabels[cat]}`,
+        icon: cat === 'flower' ? '💐' : cat === 'shrub' ? '🌿' : '🌱',
+        create: () => createTreeItem(over?.spec ?? presetSpec(id), {
+          name: presets[id].name,
+          category: cat,
+          customTextures: over?.textures,
+        }),
+      })
+    }
     const lowIds = presetIds.filter(id =>
       id.startsWith('shrub-') || id === 'conifer-shrub' || presets[id].kind === 'grass' || presets[id].kind === 'fern' || presets[id].kind === 'flowerbed' || presets[id].kind === 'lotus',
     )
@@ -1636,6 +1727,17 @@ function buildPaletteEntries(tab: PaletteTab): PaletteEntry[] {
   }
 
   // rocks tab
+  for (const id of polyCRockPresetIds) {
+    const meta = polyCRockPresets[id]
+    entries.push({
+      key: `rock-c2:${id}`,
+      group: '💎 路线 C2 · 显式布尔 512 PBR（试接）',
+      name: meta.name,
+      subtitle: meta.subtitle,
+      icon: '💎',
+      create: () => createRockC2Item(defaultPolyCRockSpec(id), { name: meta.name }),
+    })
+  }
   for (const c of curatedAssemblyAssets.filter(x => x.category === 'rock')) {
     entries.push({
       key: c.id,
@@ -1652,7 +1754,7 @@ function buildPaletteEntries(tab: PaletteTab): PaletteEntry[] {
       key: `rock:${id}`,
       group: '石头工作台预设（自动同步已改默认）',
       name: over ? `${rockPresets[id].name} · 已改` : rockPresets[id].name,
-      subtitle: rockPresets[id].style === 'cel' ? '赛璐璐风格' : '厚涂切面风格',
+      subtitle: rockPresets[id].style === 'cel' ? '赛璐璐风格' : rockPresets[id].style === 'handpainted' ? '手绘裂纹风格' : '厚涂切面风格',
       icon: '🪨',
       create: () => createRockItem(over?.spec ?? rockPresetSpec(id), { name: rockPresets[id].name }),
     })
@@ -2120,6 +2222,55 @@ byId<HTMLSelectElement>('as-bark-style').onchange = async ev => {
   selectItem(item.id)
 }
 
+async function applyRockC2Patch(id: string | undefined, patch: Partial<PolyCRockSpec>, recordUndo = true): Promise<boolean> {
+  if (!id) return false
+  const item = sceneSpec.items.find(x => x.id === id)
+  if (!item || item.kind !== 'rock-c2' || item.locked) return false
+  if (recordUndo) pushUndo()
+  const prev = item.payload as PolyCRockSpec
+  const next = parsePolyCRockSpec({ ...prev, ...patch })
+  if (patch.preset && patch.preset !== prev.preset && !patch.name) {
+    next.name = polyCRockPresets[next.preset].name
+    if (item.name === polyCRockPresets[prev.preset].name) {
+      item.name = next.name
+    }
+  }
+  item.payload = next
+  await mountSingleItem(item)
+  viewport?.refreshShadows()
+  if (selectedId === id) selectItem(item.id)
+  else renderHierarchy()
+  return true
+}
+
+byId<HTMLSelectElement>('as-rc2-preset').onchange = ev => {
+  void applyRockC2Patch(selectedId, { preset: (ev.target as HTMLSelectElement).value as PolyCsgPresetId })
+}
+byId<HTMLSelectElement>('as-rc2-mode').onchange = ev => {
+  void applyRockC2Patch(selectedId, { mode: (ev.target as HTMLSelectElement).value as PolyPbrMode })
+}
+byId<HTMLInputElement>('as-rc2-seed').onchange = ev => {
+  const v = Math.max(1, Math.round(Number((ev.target as HTMLInputElement).value) || 1))
+  void applyRockC2Patch(selectedId, { seed: v })
+}
+byId<HTMLInputElement>('as-rc2-color').onchange = ev => {
+  void applyRockC2Patch(selectedId, { baseColor: (ev.target as HTMLInputElement).value })
+}
+for (const [inputId, outId, field] of [
+  ['as-rc2-shoulder', 'as-rc2-shoulder-out', 'shoulderDepth'],
+  ['as-rc2-bevel', 'as-rc2-bevel-out', 'bevelScale'],
+  ['as-rc2-notch', 'as-rc2-notch-out', 'notchDepth'],
+  ['as-rc2-strata', 'as-rc2-strata-out', 'strataStrength'],
+] as const) {
+  const inp = byId<HTMLInputElement>(inputId)
+  inp.oninput = () => {
+    byId(outId).textContent = Number(inp.value).toFixed(2)
+  }
+  inp.onchange = () => {
+    void applyRockC2Patch(selectedId, { [field]: Number(inp.value) })
+  }
+}
+
 // Hierarchy click handling
 byId('as-hier-list').addEventListener('click', ev => {
   const target = ev.target as HTMLElement
@@ -2241,19 +2392,8 @@ byId('as-cases-grid').addEventListener('click', async ev => {
         await saveCurrentSceneAsNew(sceneSpec.name)
         openCasesDrawer('mine')
       } else if (act === 'load-saved') {
-        const saved = sceneStore.get(cid)
-        if (saved) {
-          clearHistory()
-          userDirty = false
-          ownedBridgeSessionIds.clear()
-          lastBridgeUndoSessionId = undefined
-          sceneSpec = parseAssemblyScene(cloneJson(saved.scene))
-          selectedId = undefined
-          activeBuiltInCaseId = undefined
-          activeSavedSceneId = saved.id
-          await rebuildAllItems(true)
+        if (await loadSavedSceneById(cid)) {
           closeCasesDrawer()
-          message(`已载入场景案例「${saved.name}」`)
         }
       } else if (act === 'overwrite-saved') {
         await overwriteSavedScene(cid)
@@ -2283,19 +2423,8 @@ byId('as-cases-grid').addEventListener('click', async ev => {
     }
     const sCard = target.closest<HTMLElement>('[data-saved-scene]')
     if (sCard?.dataset.savedScene) {
-      const saved = sceneStore.get(sCard.dataset.savedScene)
-      if (saved) {
-        clearHistory()
-        userDirty = false
-        ownedBridgeSessionIds.clear()
-        lastBridgeUndoSessionId = undefined
-        sceneSpec = parseAssemblyScene(cloneJson(saved.scene))
-        selectedId = undefined
-        activeBuiltInCaseId = undefined
-        activeSavedSceneId = saved.id
-        await rebuildAllItems(true)
+      if (await loadSavedSceneById(sCard.dataset.savedScene)) {
         closeCasesDrawer()
-        message(`已载入场景案例「${saved.name}」`)
       }
     }
   } catch (err) {
@@ -2303,6 +2432,22 @@ byId('as-cases-grid').addEventListener('click', async ev => {
     message(err instanceof Error ? err.message : String(err), true)
   }
 })
+
+async function loadSavedSceneById(id: string): Promise<boolean> {
+  const saved = sceneStore.get(id)
+  if (!saved) return false
+  clearHistory()
+  userDirty = false
+  ownedBridgeSessionIds.clear()
+  lastBridgeUndoSessionId = undefined
+  sceneSpec = parseAssemblyScene(cloneJson(saved.scene))
+  selectedId = undefined
+  activeBuiltInCaseId = undefined
+  activeSavedSceneId = saved.id
+  await rebuildAllItems(true)
+  message(`已载入场景案例「${saved.name}」`)
+  return true
+}
 
 // Clear, JSON import/export, Asset JSON import, PNG snapshot, GLB export
 byId('as-clear-btn').onclick = async () => {
@@ -2502,7 +2647,7 @@ byId('as-act-save-preset').onclick = async () => {
   const inst = instances.get(item.id)
   const kindLabelMap: Record<TreeSpec['kind'], string> = {
     broadleaf: '阔叶树', conifer: '针叶树', palm: '棕榈树', bamboo: '竹子',
-    lotus: '荷花', grass: '草丛', fern: '蕨类', flowerbed: '花丛',
+    lotus: '荷花', grass: '草丛', fern: '蕨类', flowerbed: '花丛', botanical: '风格化植物',
   }
   try {
     const thumb = viewport ? viewport.snapshotDataUrl('image/jpeg', 320, 220) : ''
@@ -3099,6 +3244,11 @@ Object.assign(window, {
         })
         return await addAssetItem(item, pos)
       }
+      if (id in polyCRockPresets) {
+        const cid = id as PolyCsgPresetId
+        const item = createRockC2Item(defaultPolyCRockSpec(cid), { name: polyCRockPresets[cid].name })
+        return await addAssetItem(item, pos)
+      }
       if (id in rockPresets) {
         const rid = id as RockPresetId
         const over = rockDefaults.get(rid)
@@ -3249,6 +3399,8 @@ Object.assign(window, {
     snapshotCanvas: (opts?: { transparent?: boolean }) => viewport?.snapshot(opts) ?? '',
     snapshotTransparentCanvas: () => viewport?.snapshot({ transparent: true }) ?? '',
     snapshotThumb: () => viewport?.snapshotDataUrl('image/jpeg', 320, 220) ?? '',
+    setItemRockC2Params: (id: string, patch: Partial<PolyCRockSpec>) => applyRockC2Patch(id, patch, true),
+    loadSavedScene: (id: string) => loadSavedSceneById(id),
     saveScene: (name?: string) => saveCurrentSceneAsNew(name),
     savedScenes: () => sceneStore.list(),
     removeSavedScene: (id: string) => sceneStore.remove(id),

@@ -221,6 +221,7 @@ function buildRockPolyhedron(spec: RockSpec, seed: number): PolyFace[] {
   let faces = makeBoxPolyhedron(2)
   const { facetCount, flatness, asymmetry, bottomFlat } = spec.shape
   const cel = spec.style === 'cel'
+  const hp = spec.style === 'handpainted'
 
   // 1. Grounded bottom settling plane
   const botTiltX = (rng() - 0.5) * 0.14 * (1 - bottomFlat * 0.7)
@@ -229,29 +230,39 @@ function buildRockPolyhedron(spec: RockSpec, seed: number): PolyFace[] {
   const botD = lerp(0.84, 0.56, bottomFlat)
   faces = clipPolyhedronByPlane(faces, botN, botD)
 
-  // 2. A small, tilted crown plane. The shoulders below take most of the silhouette.
-  const topTilt = cel ? lerp(.99, .46, flatness) : lerp(.36, .15, flatness)
+  // 2. Crown / tilted ridge plane. Handpainted & cel lean boldly into angled hero planes.
+  const topTilt = cel
+    ? lerp(.99, .46, flatness)
+    : hp
+      ? lerp(.92, .34, flatness)
+      : lerp(.36, .15, flatness)
   const topAng = rng() * Math.PI * 2
   const topN = vNorm({
     x: Math.cos(topAng) * topTilt * (0.35 + rng() * 0.65),
     y: 1,
     z: Math.sin(topAng) * topTilt * (0.35 + rng() * 0.65),
   })
-  const topD = cel ? lerp(.81, .57, flatness) : lerp(.92, .71, flatness)
+  const topD = cel
+    ? lerp(.81, .57, flatness)
+    : hp
+      ? lerp(.84, .58, flatness)
+      : lerp(.92, .71, flatness)
   faces = clipPolyhedronByPlane(faces, topN, topD)
 
   // 3. Broad load-bearing faces, offset shoulder cuts and short heel facets.
-  const chipCount = Math.max(0, Math.round((facetCount - 8) * .25))
+  const chipCount = hp
+    ? Math.max(0, Math.round((facetCount - 8) * .18))
+    : Math.max(0, Math.round((facetCount - 8) * .25))
   const cuts = facetCount - 2 - chipCount
-  const bodyCount = Math.max(4, Math.round(cuts * .46))
-  const shoulderCount = Math.ceil((cuts - bodyCount) * .56)
+  const bodyCount = Math.max(4, Math.round(cuts * (hp ? .50 : .46)))
+  const shoulderCount = Math.ceil((cuts - bodyCount) * (hp ? .62 : .56))
   const heelCount = cuts - bodyCount - shoulderCount
   const yaw = rng() * Math.PI * 2
   const swing = .80 + .68 * asymmetry
   const tiers = [
-    { count: bodyCount, offset: 0, y: cel ? .24 : .06, variation: .66, distance: lerp(.82, .76, flatness) },
-    { count: shoulderCount, offset: .42, y: .67, variation: .42, distance: lerp(.77, .88, flatness) },
-    { count: heelCount, offset: .64, y: -.60, variation: .37, distance: lerp(.76, .72, bottomFlat) },
+    { count: bodyCount, offset: 0, y: cel ? .24 : hp ? .04 : .06, variation: hp ? .42 : .66, distance: lerp(.84, .78, flatness) },
+    { count: shoulderCount, offset: .42, y: hp ? .66 : .67, variation: hp ? .34 : .42, distance: lerp(.77, .88, flatness) },
+    { count: heelCount, offset: .64, y: hp ? -.52 : -.60, variation: hp ? .28 : .37, distance: hp ? lerp(.86, .82, bottomFlat) : lerp(.76, .72, bottomFlat) },
   ]
   for (const tier of tiers) {
     for (let i = 0; i < tier.count; i++) {
@@ -260,8 +271,8 @@ function buildRockPolyhedron(spec: RockSpec, seed: number): PolyFace[] {
       const y = tier.y + (rng() - .5) * tier.variation * swing
       const r = Math.sqrt(Math.max(0, 1 - y * y))
       const normal = { x: Math.cos(theta) * r, y, z: Math.sin(theta) * r }
-      const drift = .08 * asymmetry * Math.sin(theta * 2 + yaw)
-      const distance = tier.distance + drift + (rng() - .5) * .28 * swing
+      const drift = (hp ? .13 : .08) * asymmetry * Math.sin(theta * 2 + yaw)
+      const distance = tier.distance + drift + (rng() - .5) * (hp ? .32 : .28) * swing
       faces = clipPolyhedronByPlane(faces, normal, distance)
     }
   }
@@ -619,24 +630,94 @@ function triangulateAndSubdivide(
 // ---------------------------------------------------------------------------
 // 4. Organic Warp, Secondary Chisel Scoops, Cracks & Vertex Metric Bake
 // ---------------------------------------------------------------------------
-function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): BufferGeometry {
+interface BlockTransform {
+  offset: Vec3
+  rotX: number
+  rotY: number
+  rotZ: number
+  scaleX: number
+  scaleY: number
+  scaleZ: number
+  isPebble?: boolean
+}
+
+interface HullPlane {
+  normal: Vec3
+  dist: number
+}
+
+interface BuiltStoneBlock {
+  verts: Vec3[]
+  tris: Tri[]
+  smoothN: Vec3[]
+  faceNormals: Vec3[]
+  bevelVertices: Uint8Array
+  vertEdge: Float32Array
+  tone: number[]
+  faceTone: (face: number) => number
+  cavityAttr: Float32Array
+  extraEdgeAttr: Float32Array
+  geomConvex: Float32Array
+  geomConcave: Float32Array
+  paintField: Float32Array
+  depositField: Float32Array
+  wearField: Float32Array
+  hullPlanes: HullPlane[]
+  finalH: number
+  isPebble: boolean
+}
+
+function rotVecEuler(v: Vec3, rx: number, ry: number, rz: number): Vec3 {
+  let { x, y, z } = v
+  if (rz) {
+    const c = Math.cos(rz), s = Math.sin(rz)
+    const nx = x * c - y * s, ny = x * s + y * c
+    x = nx; y = ny
+  }
+  if (rx) {
+    const c = Math.cos(rx), s = Math.sin(rx)
+    const ny = y * c - z * s, nz = y * s + z * c
+    y = ny; z = nz
+  }
+  if (ry) {
+    const c = Math.cos(ry), s = Math.sin(ry)
+    const nx = x * c + z * s, nz = -x * s + z * c
+    x = nx; z = nz
+  }
+  return { x, y, z }
+}
+
+function buildStoneBlock(
+  spec: RockSpec,
+  seed: number,
+  scaleMul = 1,
+  xform?: BlockTransform,
+): BuiltStoneBlock {
   const rng = mulberry32(seed)
   const cel = spec.style === 'cel'
+  const hp = spec.style === 'handpainted'
+  const keepCrest = cel || hp
   const rawFaces = buildRockPolyhedron(spec, seed)
-  const { verts: bVerts, polys, vertEdgeInit } = buildBeveledPolyMesh(rawFaces, spec.shape.bevel, cel)
+  const { verts: bVerts, polys, vertEdgeInit } = buildBeveledPolyMesh(rawFaces, spec.shape.bevel, keepCrest)
   const { verts, tris, vertEdge, tone, faceTone } = triangulateAndSubdivide(bVerts, polys, vertEdgeInit, spec.detail.subdivisions, seed)
 
   const nVerts = verts.length
   const { width, height, depth, asymmetry, taperTop, bottomFlat } = spec.shape
   const { chisel, undulation, cracks, sharpness } = spec.detail
+  const sxMul = (xform?.scaleX ?? 1) * scaleMul
+  const syMul = (xform?.scaleY ?? 1) * scaleMul
+  const szMul = (xform?.scaleZ ?? 1) * scaleMul
+  const effW = width * sxMul
+  const effH = height * syMul
+  const effD = depth * szMul
 
   // Deterministic macro organic skew / lean
-  const leanX = (rng() - 0.5) * 0.34 * asymmetry
-  const leanZ = (rng() - 0.5) * 0.34 * asymmetry
-  const twistY = (rng() - 0.5) * 0.42 * asymmetry
+  const leanX = (rng() - 0.5) * (hp ? 0.42 : 0.34) * asymmetry
+  const leanZ = (rng() - 0.5) * (hp ? 0.38 : 0.34) * asymmetry
+  const twistY = (rng() - 0.5) * (hp ? 0.32 : 0.42) * asymmetry
 
   // Secondary planar-faceted chisel scoops on the upper/side hull
-  const chiselCount = chisel > 0.01 ? 14 : 0
+  const chiselCount = chisel > 0.01 ? (hp ? 8 : 14) : 0
   const chiselSites: { dir: Vec3; radius: number; depth: number }[] = []
   for (let i = 0; i < chiselCount; i++) {
     const phi = rng() * Math.PI * 2
@@ -645,7 +726,7 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
     chiselSites.push({
       dir: vNorm({ x: Math.cos(phi) * r, y, z: Math.sin(phi) * r }),
       radius: 0.28 + rng() * 0.22,
-      depth: (0.022 + rng() * 0.032) * chisel,
+      depth: (0.022 + rng() * 0.032) * chisel * (hp ? 0.65 : 1.0),
     })
   }
 
@@ -653,20 +734,23 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
   const extraEdgeAttr = new Float32Array(nVerts)
   const crackDirA = vNorm({ x: rng() - 0.5, y: 0.7 + rng() * 0.5, z: rng() - 0.5 })
   const crackDirB = vNorm({ x: rng() - 0.5, y: 0.35 + rng() * 0.4, z: rng() - 0.5 })
+  const minDim = Math.min(effW, effH, effD)
 
-  // Apply proportion scale + gentle organic bow + macro warp + secondary chisel + undulation + cracks
+  // Apply proportion scale + macro warp + secondary chisel + undulation + cracks
   for (let i = 0; i < nVerts; i++) {
     const p = verts[i]
     const dir = vNorm(p)
     const yNorm = clamp(p.y + 0.5, 0, 1) // approx 0 (bottom) .. 1 (top)
 
-    // Subtle uniform radial fullness (never sinks ridge crests!) + taper/lean/twist
     const bx = p.x
     const by = p.y
     const bz = p.z
 
-    // Taper & organic lean + slight twist
-    const taper = 1 - taperTop * (yNorm - 0.35)
+    // Taper & organic lean + slight twist. For dramatic crag spires (taperTop > 0.50),
+    // smoothly pinch toward a chunky rocky arrowhead peak while keeping a safe floor (>= 0.18).
+    const taper = taperTop > 0.50
+      ? Math.max(0.18, 1 - taperTop * (yNorm - 0.16) * (0.86 + (taperTop - 0.50) * 0.65 * yNorm))
+      : 1 - taperTop * (yNorm - 0.35)
     const tw = twistY * (yNorm - 0.5)
     const cT = Math.cos(tw), sT = Math.sin(tw)
     let px = (bx * cT - bz * sT) * taper + leanX * (yNorm * yNorm)
@@ -674,9 +758,9 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
     let py = by
 
     // Scale to target rock dimensions
-    px *= width * scaleMul
-    py *= height * scaleMul
-    pz *= depth * scaleMul
+    px *= effW
+    py *= effH
+    pz *= effD
 
     // Secondary shallow concave chisel facets
     let cav = 0
@@ -688,7 +772,7 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
         if (angDist < s.radius) {
           const u = angDist / s.radius
           const bowl = (1 - u * u) * (1 - u * u)
-          radialDisp -= s.depth * bowl * scaleMul * Math.min(width, height, depth)
+          radialDisp -= s.depth * bowl * minDim
           cav = Math.max(cav, bowl * 0.65 * chisel)
           const rimBand = Math.exp(-(((u - 0.88) / 0.11) ** 2))
           rim = Math.max(rim, rimBand * 0.82 * chisel)
@@ -699,18 +783,18 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
       pz += dir.z * radialDisp
     }
 
-    // Broad painterly hand-sculpted undulation
+    // Broad painterly hand-sculpted undulation (calmer in handpainted mode so broad planes stay crisp)
     if (undulation > 0.005) {
       const f = 1.65
       const uVal = fbm3(p.x * f * 2.5 + 3.1, p.y * f * 2.0 + 7.4, p.z * f * 2.5 - 2.3, seed + 101, 3)
-      const amp = undulation * .27 * scaleMul * Math.min(width, height, depth)
+      const amp = undulation * (hp ? 0.14 : 0.27) * minDim
       px += dir.x * uVal * amp
       py += dir.y * uVal * amp * 0.85
       pz += dir.z * uVal * amp
       if (uVal < -0.15) cav = Math.max(cav, (-uVal - 0.15) * 0.65 * undulation)
     }
 
-    // Subtle sedimentary strata / fracture lines
+    // Subtle sedimentary strata / fracture lines (handpainted uses per-pixel Voronoi cracks, so keep vertex grooves ultra-gentle)
     if (cracks > 0.005) {
       const ca = vDot({ x: px, y: py, z: pz }, crackDirA) * 2.1
       const cb = vDot({ x: px, y: py, z: pz }, crackDirB) * 2.5
@@ -718,11 +802,16 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
       const lineA = Math.abs(Math.sin(ca + nA * 2.4))
       const lineB = Math.abs(Math.sin(cb - nA * 1.9))
       const groove = Math.max(smoothstep(0.14, 0.0, lineA), smoothstep(0.12, 0.0, lineB) * 0.75)
-      const depthAmp = cracks * 0.048 * scaleMul * Math.min(width, height, depth)
+      const depthAmp = cracks * (hp ? 0.011 : 0.048) * minDim
       px -= dir.x * groove * depthAmp
       py -= dir.y * groove * depthAmp
       pz -= dir.z * groove * depthAmp
-      cav = Math.max(cav, groove * 0.9 * cracks)
+      cav = Math.max(cav, groove * (hp ? 0.28 : 0.9) * cracks)
+    }
+
+    if (xform && (xform.rotX || xform.rotY || xform.rotZ)) {
+      const r = rotVecEuler({ x: px, y: py, z: pz }, xform.rotX, xform.rotY, xform.rotZ)
+      px = r.x; py = r.y; pz = r.z
     }
 
     p.x = px
@@ -732,7 +821,7 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
     extraEdgeAttr[i] = clamp(rim, 0, 1)
   }
 
-  // Soft bottom settling + exact grounding (minY = 0) & XZ centering
+  // Soft bottom settling + exact grounding (minY = 0) & XZ centering (+ optional block offset)
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity
   for (const p of verts) {
     if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x
@@ -742,31 +831,37 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
   const rockH = Math.max(0.1, maxY - minY)
   const cx = 0.5 * (minX + maxX), cz = 0.5 * (minZ + maxZ)
   const settleBand = bottomFlat * 0.09 * rockH
+  const ox = xform?.offset.x ?? 0
+  const oy = xform?.offset.y ?? 0
+  const oz = xform?.offset.z ?? 0
   for (const p of verts) {
-    p.x -= cx
-    p.z -= cz
+    p.x = p.x - cx + ox
+    p.z = p.z - cz + oz
     let y = p.y - minY
     if (settleBand > 1e-4 && y < settleBand) {
       y *= 1 - bottomFlat * .65 * (1 - smoothstep(0, settleBand, y))
     }
-    p.y = Math.max(0, y)
+    p.y = Math.max(0, y) + oy
   }
-  // Re-normalize exact minY = 0 after settle
+  // Re-normalize exact minY = oy after settle
   let newMinY = Infinity, newMaxY = -Infinity
   for (const p of verts) {
     if (p.y < newMinY) newMinY = p.y
     if (p.y > newMaxY) newMaxY = p.y
   }
-  for (const p of verts) p.y -= newMinY
-  const finalH = Math.max(0.1, newMaxY - newMinY)
+  const yShift = newMinY - Math.max(0, oy)
+  for (const p of verts) p.y -= yShift
+  const finalH = Math.max(0.05, newMaxY - newMinY)
 
   // Weighted Face Normals (AAA stylized rock bevel shading):
   // Main flat faces carry higher normal weight (scaled by `sharpness`) than narrow chamfer bevels,
   // keeping large planar faces crisp even at subdivisions = 0 while staying 100% shared & continuous across bevels!
   const smoothN: Vec3[] = Array.from({ length: nVerts }, () => ({ x: 0, y: 0, z: 0 }))
   const faceNormals: Vec3[] = rawFaces.map(() => ({ x: 0, y: 0, z: 0 }))
+  const faceCenters: Vec3[] = rawFaces.map(() => ({ x: 0, y: 0, z: 0 }))
+  const faceCounts = new Uint32Array(rawFaces.length)
   const bevelVertices = new Uint8Array(nVerts)
-  const mainPlaneWeight = cel ? 1.0 : lerp(1.0, 9.5, sharpness * sharpness)
+  const mainPlaneWeight = cel ? 1.0 : hp ? lerp(1.0, 12.0, sharpness * sharpness) : lerp(1.0, 9.5, sharpness * sharpness)
   for (const t of tris) {
     const pa = verts[t.a], pb = verts[t.b], pc = verts[t.c]
     const cross = vCross(vSub(pb, pa), vSub(pc, pa))
@@ -777,6 +872,10 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
       smoothN[t.c] = vAdd(smoothN[t.c], cross)
     } else {
       faceNormals[t.faceId] = vAdd(faceNormals[t.faceId], cross)
+      faceCenters[t.faceId].x += pa.x + pb.x + pc.x
+      faceCenters[t.faceId].y += pa.y + pb.y + pc.y
+      faceCenters[t.faceId].z += pa.z + pb.z + pc.z
+      faceCounts[t.faceId] += 3
       const wCross = vScale(cross, mainPlaneWeight)
       smoothN[t.a] = vAdd(smoothN[t.a], wCross)
       smoothN[t.b] = vAdd(smoothN[t.b], wCross)
@@ -784,7 +883,14 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
     }
   }
   for (let i = 0; i < nVerts; i++) smoothN[i] = vNorm(smoothN[i])
-  for (let i = 0; i < faceNormals.length; i++) faceNormals[i] = vNorm(faceNormals[i])
+  const hullPlanes: HullPlane[] = []
+  for (let i = 0; i < faceNormals.length; i++) {
+    faceNormals[i] = vNorm(faceNormals[i])
+    if (faceCounts[i] > 0) {
+      const c = vScale(faceCenters[i], 1 / faceCounts[i])
+      hullPlanes.push({ normal: faceNormals[i], dist: vDot(c, faceNormals[i]) })
+    }
+  }
 
   // Compute geometric convexity/concavity from 1-ring neighbors (captures subdivided & chiseled ridges!)
   const neighborPos: Vec3[] = Array.from({ length: nVerts }, () => ({ x: 0, y: 0, z: 0 }))
@@ -803,7 +909,7 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
   const paintField = new Float32Array(nVerts)
   const depositField = new Float32Array(nVerts)
   const wearField = new Float32Array(nVerts)
-  const avgScale = Math.max(0.15, (width + height + depth) / 3 * scaleMul)
+  const avgScale = Math.max(0.12, (effW + effH + effD) / 3)
   for (let i = 0; i < nVerts; i++) {
     if (neighborCnt[i] === 0) continue
     const avg = vScale(neighborPos[i], 1 / neighborCnt[i])
@@ -819,8 +925,47 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
     wearField[i] = noise3(x * 4.6, y * 4.6, z * 4.6, seed + 947)
   }
 
-  // Prepare non-indexed vertex attributes so flat/sharpness normals & per-face tones are exact
-  const vCount = tris.length * 3
+  return {
+    verts,
+    tris,
+    smoothN,
+    faceNormals,
+    bevelVertices,
+    vertEdge,
+    tone,
+    faceTone,
+    cavityAttr,
+    extraEdgeAttr,
+    geomConvex,
+    geomConcave,
+    paintField,
+    depositField,
+    wearField,
+    hullPlanes,
+    finalH,
+    isPebble: Boolean(xform?.isPebble),
+  }
+}
+
+function convexHullSignedDist(p: Vec3, planes: HullPlane[]): number {
+  let maxD = -Infinity
+  for (let i = 0; i < planes.length; i++) {
+    const pl = planes[i]
+    const d = p.x * pl.normal.x + p.y * pl.normal.y + p.z * pl.normal.z - pl.dist
+    if (d > maxD) maxD = d
+  }
+  return maxD
+}
+
+function packStoneBlocksToGeometry(blocks: BuiltStoneBlock[], spec: RockSpec, scaleMul: number): BufferGeometry {
+  const cel = spec.style === 'cel'
+  const hp = spec.style === 'handpainted'
+  const { sharpness } = spec.detail
+
+  let totalTris = 0
+  for (const b of blocks) totalTris += b.tris.length
+
+  const vCount = totalTris * 3
   const positions = new Float32Array(vCount * 3)
   const normals = new Float32Array(vCount * 3)
   const uvs = new Float32Array(vCount * 2)
@@ -837,97 +982,112 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
   const capThreshold = lerp(1.33, .55, spec.top.coverage)
   const capSoftness = lerp(.045, .26, spec.top.softness)
 
-  for (let ti = 0; ti < tris.length; ti++) {
-    const t = tris[ti]
-    const fN = t.isBevel ? undefined : faceNormals[t.faceId]
-    const flatTone = faceTone(t.faceId)
-    const corners = [t.a, t.b, t.c]
+  let outTriOffset = 0
+  for (let bi = 0; bi < blocks.length; bi++) {
+    const b = blocks[bi]
+    const {
+      verts, tris, smoothN, faceNormals, bevelVertices, vertEdge,
+      tone, faceTone, cavityAttr, extraEdgeAttr, geomConvex, geomConcave,
+      paintField, depositField, wearField, finalH,
+    } = b
 
-    for (let ci = 0; ci < 3; ci++) {
-      const vi = corners[ci]
-      const p = verts[vi]
-      const sN = smoothN[vi]
-      const outIdx = ti * 3 + ci
-      const facetTone = cel ? flatTone : tone[vi]
+    for (let ti = 0; ti < tris.length; ti++) {
+      const t = tris[ti]
+      const fN = t.isBevel ? undefined : faceNormals[t.faceId]
+      const flatTone = faceTone(t.faceId)
+      const corners = [t.a, t.b, t.c]
 
-      // Ridge-crest edge weight: cel confines strictly to crowned crest; painterly combines dihedral chamfer ridge + geometric convexity
-      const finalEdge = cel
-        ? vertEdge[vi]
-        : clamp(Math.max(extraEdgeAttr[vi], geomConvex[vi] * 0.94, vertEdge[vi] * (bevelVertices[vi] ? 0.88 : 0.0)), 0, 1)
+      for (let ci = 0; ci < 3; ci++) {
+        const vi = corners[ci]
+        const p = verts[vi]
+        const sN = smoothN[vi]
+        const outIdx = (outTriOffset + ti) * 3 + ci
+        const facetTone = (cel || hp) ? flatTone : tone[vi]
 
-      // Blend normal: interior main-face vertices sharpen toward plane normal while bevel boundaries use Weighted Face Normals (100% continuous!)
-      const normalBlend = (cel || !bevelVertices[vi]) ? sharpness * (cel ? .96 : .72) : 0
-      const n = fN && normalBlend > 0 ? vNorm(vAdd(vScale(sN, 1 - normalBlend), vScale(fN, normalBlend))) : sN
+        // Ridge-crest edge weight: cel & handpainted confine strictly to crowned bevel crests & Y-corners;
+        // painterly combines dihedral chamfer ridge + geometric convexity
+        const finalEdge = cel
+          ? vertEdge[vi]
+          : hp
+            ? clamp(Math.max(vertEdge[vi], extraEdgeAttr[vi] * 0.55), 0, 1)
+            : clamp(Math.max(extraEdgeAttr[vi], geomConvex[vi] * 0.94, vertEdge[vi] * (bevelVertices[vi] ? 0.88 : 0.0)), 0, 1)
 
-      positions[outIdx * 3] = p.x
-      positions[outIdx * 3 + 1] = p.y
-      positions[outIdx * 3 + 2] = p.z
+        // Blend normal: interior main-face vertices sharpen toward plane normal while bevel boundaries stay continuous
+        const normalBlend = (cel || hp || !bevelVertices[vi]) ? sharpness * (cel ? .96 : hp ? .97 : .72) : 0
+        const n = fN && normalBlend > 0 ? vNorm(vAdd(vScale(sN, 1 - normalBlend), vScale(fN, normalBlend))) : sN
 
-      normals[outIdx * 3] = n.x
-      normals[outIdx * 3 + 1] = n.y
-      normals[outIdx * 3 + 2] = n.z
+        positions[outIdx * 3] = p.x
+        positions[outIdx * 3 + 1] = p.y
+        positions[outIdx * 3 + 2] = p.z
 
-      // Box-projected triplanar UV for seamless GLB / texture compatibility
-      const ax = Math.abs(n.x), ay = Math.abs(n.y), az = Math.abs(n.z)
-      if (ay >= ax && ay >= az) {
-        uvs[outIdx * 2] = p.x * uvScale
-        uvs[outIdx * 2 + 1] = p.z * uvScale
-      } else if (ax >= az) {
-        uvs[outIdx * 2] = p.z * uvScale
-        uvs[outIdx * 2 + 1] = p.y * uvScale
-      } else {
-        uvs[outIdx * 2] = p.x * uvScale
-        uvs[outIdx * 2 + 1] = p.y * uvScale
+        normals[outIdx * 3] = n.x
+        normals[outIdx * 3 + 1] = n.y
+        normals[outIdx * 3 + 2] = n.z
+
+        // Box-projected triplanar UV for seamless GLB / texture compatibility
+        const ax = Math.abs(n.x), ay = Math.abs(n.y), az = Math.abs(n.z)
+        if (ay >= ax && ay >= az) {
+          uvs[outIdx * 2] = p.x * uvScale
+          uvs[outIdx * 2 + 1] = p.z * uvScale
+        } else if (ax >= az) {
+          uvs[outIdx * 2] = p.z * uvScale
+          uvs[outIdx * 2 + 1] = p.y * uvScale
+        } else {
+          uvs[outIdx * 2] = p.x * uvScale
+          uvs[outIdx * 2 + 1] = p.y * uvScale
+        }
+
+        // Cavity AO + ground contact grounding shadow + underside shadow (includes inter-slab crevice seam AO!)
+        const groundOcc = smoothstep(finalH * (hp ? 0.24 : 0.30), 0.0, p.y) * (hp ? .46 : .53)
+        const undersideOcc = smoothstep(0.18, -0.68, sN.y) * .60
+        const finalCavity = clamp(
+          Math.max(cavityAttr[vi], geomConcave[vi] * .60, groundOcc) + undersideOcc * .45,
+          0,
+          1,
+        )
+
+        // Store a continuous deposit field for both the live shader and baked GLB colors.
+        const capField = depositField[vi]
+        const topMask = spec.top.mode !== 'none' && spec.top.coverage > .005
+          ? smoothstep(capThreshold - capSoftness, capThreshold + capSoftness, capField)
+          : 0
+
+        // Bake the palette, mask and edge wear into the GLB's linear vertex colors.
+        tmpColor.copy(colBase)
+        const planeShift = 1 + facetTone * spec.shading.facetVariation * (hp ? .26 : .22)
+        const grainN = paintField[vi] * spec.shading.grain * (hp ? .12 : .22)
+        tmpColor.multiplyScalar(clamp(planeShift + grainN, 0.62, 1.32))
+
+        // Shadow undertone in cavities, slab crevices & underside
+        const aoBlend = finalCavity * spec.shading.cavityAO * .82
+        tmpColor.lerp(colShadow, aoBlend)
+
+        // Top cap (sand / moss / snow)
+        if (topMask > 0.001) {
+          tmpColor.lerp(colTop, topMask * (cel ? .83 : .76))
+        }
+
+        // Sunlit/dry-brush convex edge wear highlight
+        const sharpCrest = smoothstep(cel ? .60 : hp ? .44 : .34, cel ? .94 : hp ? .84 : .90, finalEdge)
+        const sunRidgeBias = cel
+          ? 1.0
+          : smoothstep(-0.35, 0.45, sN.y * 0.65 + 0.35) * (1 - finalCavity * 0.5)
+        const capAtten = 1 - topMask * .52
+        const wear = lerp(1, smoothstep(.20, .68, wearField[vi]), spec.shading.edgeBreakup)
+        const edgeFactor = sharpCrest * sunRidgeBias * wear * capAtten * spec.shading.edgeWear * (cel ? .78 : hp ? .74 : .62)
+        tmpColor.lerp(colEdge, clamp(edgeFactor, 0, 0.85))
+
+        colors[outIdx * 3] = clamp(tmpColor.r, 0, 1)
+        colors[outIdx * 3 + 1] = clamp(tmpColor.g, 0, 1)
+        colors[outIdx * 3 + 2] = clamp(tmpColor.b, 0, 1)
+
+        rockData[outIdx * 4] = finalEdge
+        rockData[outIdx * 4 + 1] = finalCavity
+        rockData[outIdx * 4 + 2] = capField
+        rockData[outIdx * 4 + 3] = facetTone * 0.5 + 0.5
       }
-
-      // Cavity AO + ground contact grounding shadow + underside shadow
-      const groundOcc = smoothstep(finalH * 0.30, 0.0, p.y) * .53
-      const undersideOcc = smoothstep(0.18, -0.68, sN.y) * .60
-      const finalCavity = clamp(
-        Math.max(cavityAttr[vi], geomConcave[vi] * .60, groundOcc) + undersideOcc * .45,
-        0,
-        1,
-      )
-
-      // Store a continuous deposit field for both the live shader and baked GLB colors.
-      const capField = depositField[vi]
-      const topMask = spec.top.mode !== 'none' && spec.top.coverage > .005
-        ? smoothstep(capThreshold - capSoftness, capThreshold + capSoftness, capField)
-        : 0
-
-      // Bake the palette, mask and edge wear into the GLB's linear vertex colors.
-      tmpColor.copy(colBase)
-      // Subtle per-facet value lift/drop so planes separate cleanly
-      const planeShift = 1 + facetTone * spec.shading.facetVariation * .22
-      const grainN = paintField[vi] * spec.shading.grain * .22
-      tmpColor.multiplyScalar(clamp(planeShift + grainN, 0.62, 1.32))
-
-      // Cool shadow undertone in cavities & underside
-      const aoBlend = finalCavity * spec.shading.cavityAO * .82
-      tmpColor.lerp(colShadow, aoBlend)
-
-      // Top cap (sand / moss / snow)
-      if (topMask > 0.001) {
-        tmpColor.lerp(colTop, topMask * (cel ? .83 : .76))
-      }
-
-      // Sunlit/dry-brush convex edge wear highlight (damped in underside shadows & thick top cap)
-      const sharpCrest = smoothstep(cel ? .60 : .34, cel ? .94 : .90, finalEdge)
-      const sunRidgeBias = cel ? 1.0 : smoothstep(-0.35, 0.45, sN.y * 0.65 + 0.35) * (1 - finalCavity * 0.5)
-      const capAtten = 1 - topMask * .52
-      const wear = lerp(1, smoothstep(.20, .68, wearField[vi]), spec.shading.edgeBreakup)
-      const edgeFactor = sharpCrest * sunRidgeBias * wear * capAtten * spec.shading.edgeWear * (cel ? .78 : .62)
-      tmpColor.lerp(colEdge, clamp(edgeFactor, 0, 0.85))
-
-      colors[outIdx * 3] = clamp(tmpColor.r, 0, 1)
-      colors[outIdx * 3 + 1] = clamp(tmpColor.g, 0, 1)
-      colors[outIdx * 3 + 2] = clamp(tmpColor.b, 0, 1)
-
-      rockData[outIdx * 4] = finalEdge
-      rockData[outIdx * 4 + 1] = finalCavity
-      rockData[outIdx * 4 + 2] = capField
-      rockData[outIdx * 4 + 3] = facetTone * 0.5 + 0.5
     }
+    outTriOffset += tris.length
   }
 
   const geo = new BufferGeometry()
@@ -939,6 +1099,224 @@ function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1): B
   geo.computeBoundingBox()
   geo.computeBoundingSphere()
   return geo
+}
+
+function buildSingleStoneGeometry(spec: RockSpec, seed: number, scaleMul = 1, includePebbles = true): BufferGeometry {
+  const slabs = clamp(Math.round(spec.shape.slabs ?? 1), 1, 3)
+  const pebbles = includePebbles ? clamp(Math.round(spec.cluster.pebbles ?? 0), 0, 6) : 0
+
+  // Fast legacy path: single block, zero extra allocations or merging overhead
+  if (slabs <= 1 && pebbles <= 0) {
+    const hero = buildStoneBlock(spec, seed, scaleMul)
+    return packStoneBlocksToGeometry([hero], spec, scaleMul)
+  }
+
+  const rng = mulberry32(seed + 4409)
+  const { width, height, depth } = spec.shape
+  const isSpire = height > width * 1.35
+  const isLowRidge = width > height * 1.45
+  const blocks: BuiltStoneBlock[] = []
+
+  // 1. Hero main slab (with slight coherent dip tilt when paired with interlocking slabs)
+  const dipDir = rng() < 0.5 ? 1 : -1
+  const heroTiltZ = slabs > 1 ? (isSpire ? dipDir * 0.045 : dipDir * 0.065) : 0
+  const heroBlock = buildStoneBlock(spec, seed, scaleMul, slabs > 1 ? {
+    offset: { x: slabs === 2 ? -0.10 * width * scaleMul : 0, y: 0, z: slabs === 2 ? 0.04 * depth * scaleMul : 0 },
+    rotX: (rng() - 0.5) * 0.06,
+    rotY: 0,
+    rotZ: heroTiltZ,
+    scaleX: 1,
+    scaleY: 1,
+    scaleZ: 1,
+  } : undefined)
+  blocks.push(heroBlock)
+
+  // 2. Interlocking secondary rock slabs creating authentic concave V-clefts, stepped shoulders & strata
+  if (slabs >= 2) {
+    if (isSpire) {
+      // Flanking sturdy shoulder spire beside the tall crag peak (matches Row 3 Col 1)
+      const sideSpec: RockSpec = {
+        ...spec,
+        shape: { ...spec.shape, facetCount: Math.max(8, spec.shape.facetCount - 1), taperTop: Math.min(0.76, spec.shape.taperTop + 0.04) },
+      }
+      blocks.push(buildStoneBlock(sideSpec, seed + 313, scaleMul, {
+        offset: { x: 0.24 * width * scaleMul, y: 0, z: (rng() - 0.35) * 0.18 * depth * scaleMul },
+        rotX: (rng() - 0.5) * 0.10,
+        rotY: 0.58 + (rng() - 0.5) * 0.35,
+        rotZ: -dipDir * (0.11 + rng() * 0.05),
+        scaleX: 0.68,
+        scaleY: 0.58 + rng() * 0.08,
+        scaleZ: 0.72,
+      }))
+      if (slabs >= 3) {
+        blocks.push(buildStoneBlock(sideSpec, seed + 627, scaleMul, {
+          offset: { x: -0.23 * width * scaleMul, y: 0, z: -0.10 * depth * scaleMul },
+          rotX: (rng() - 0.5) * 0.10,
+          rotY: -0.72 + (rng() - 0.5) * 0.30,
+          rotZ: dipDir * (0.12 + rng() * 0.05),
+          scaleX: 0.60,
+          scaleY: 0.46 + rng() * 0.08,
+          scaleZ: 0.66,
+        }))
+      }
+    } else if (slabs === 2) {
+      // Twin deeply fused slanted slabs with a crisp diagonal V-cleft between them (matches Row 1 Col 2)
+      blocks.push(buildStoneBlock(spec, seed + 313, scaleMul, {
+        offset: { x: 0.24 * width * scaleMul, y: 0, z: -0.09 * depth * scaleMul },
+        rotX: (rng() - 0.5) * 0.08,
+        rotY: 0.44 + (rng() - 0.5) * 0.30,
+        rotZ: -heroTiltZ * 0.90 + (rng() - 0.5) * 0.04,
+        scaleX: 0.84,
+        scaleY: 0.82 + rng() * 0.06,
+        scaleZ: 0.88,
+      }))
+    } else if (isLowRidge) {
+      // Low layered shale strata ridge: fused overlapping front-left plate + stepped rear-right ridge (matches Row 2 Col 3)
+      blocks.push(buildStoneBlock(spec, seed + 313, scaleMul, {
+        offset: { x: -0.20 * width * scaleMul, y: 0, z: 0.11 * depth * scaleMul },
+        rotX: 0.05,
+        rotY: 0.26 + (rng() - 0.5) * 0.18,
+        rotZ: dipDir * 0.09,
+        scaleX: 0.76,
+        scaleY: 0.74 + rng() * 0.06,
+        scaleZ: 0.82,
+      }))
+      blocks.push(buildStoneBlock(spec, seed + 627, scaleMul, {
+        offset: { x: 0.19 * width * scaleMul, y: 0, z: -0.09 * depth * scaleMul },
+        rotX: -0.04,
+        rotY: -0.34 + (rng() - 0.5) * 0.18,
+        rotZ: -dipDir * 0.08,
+        scaleX: 0.74,
+        scaleY: 0.72 + rng() * 0.06,
+        scaleZ: 0.80,
+      }))
+    } else {
+      // Stepped blocky cliff bluff: central block + tight stepped left shoulder + right buttress (matches Row 1 Col 3 / Row 2 Col 2)
+      blocks.push(buildStoneBlock(spec, seed + 313, scaleMul, {
+        offset: { x: -0.23 * width * scaleMul, y: 0, z: 0.11 * depth * scaleMul },
+        rotX: 0.03,
+        rotY: 0.38 + (rng() - 0.5) * 0.25,
+        rotZ: dipDir * 0.05,
+        scaleX: 0.74,
+        scaleY: 0.70 + rng() * 0.06,
+        scaleZ: 0.78,
+      }))
+      blocks.push(buildStoneBlock(spec, seed + 627, scaleMul, {
+        offset: { x: 0.23 * width * scaleMul, y: 0, z: -0.09 * depth * scaleMul },
+        rotX: -0.03,
+        rotY: -0.44 + (rng() - 0.5) * 0.25,
+        rotZ: -dipDir * 0.05,
+        scaleX: 0.70,
+        scaleY: 0.80 + rng() * 0.06,
+        scaleZ: 0.76,
+      }))
+    }
+  }
+
+  // Compute main rock XZ footprint before placing grounded talus pebbles around its foot
+  let mainMinX = Infinity, mainMaxX = -Infinity, mainMinZ = Infinity, mainMaxZ = -Infinity
+  for (const b of blocks) {
+    for (const p of b.verts) {
+      if (p.x < mainMinX) mainMinX = p.x; if (p.x > mainMaxX) mainMaxX = p.x
+      if (p.z < mainMinZ) mainMinZ = p.z; if (p.z > mainMaxZ) mainMaxZ = p.z
+    }
+  }
+  const footCenterX = 0.5 * (mainMinX + mainMaxX)
+  const footCenterZ = 0.5 * (mainMinZ + mainMaxZ)
+  const footRx = Math.max(0.25, 0.5 * (mainMaxX - mainMinX))
+  const footRz = Math.max(0.25, 0.5 * (mainMaxZ - mainMinZ))
+  const baseSpan = Math.max(0.45, Math.min(width, depth) * scaleMul)
+
+  // 3. Grounded angular talus rubble pebbles nestled along the hero rock foot
+  if (pebbles > 0) {
+    const pebbleSpec: RockSpec = {
+      ...spec,
+      shape: {
+        ...spec.shape,
+        width: 1,
+        height: 1,
+        depth: 1,
+        facetCount: 8,
+        flatness: 0.66,
+        bevel: clamp(spec.shape.bevel * 1.15, 0.06, 0.13),
+        asymmetry: 0.64,
+        taperTop: 0.32,
+        bottomFlat: 0.94,
+        slabs: 1,
+      },
+      detail: {
+        ...spec.detail,
+        subdivisions: 0,
+        chisel: 0,
+        undulation: 0.05,
+        cracks: 0,
+        sharpness: Math.max(0.88, spec.detail.sharpness),
+      },
+    }
+    // Natural tight front-left & foreground clusters visible cleanly from both front (pi/2) & 45° (pi/4) cameras
+    const clusterAnchors = [1.55, 1.85, 1.25, 2.15, 0.42, 0.74]
+    const anchorJitter = (rng() - 0.5) * 0.18
+    for (let pi = 0; pi < pebbles; pi++) {
+      const ang = clusterAnchors[pi % clusterAnchors.length] + anchorJitter + (rng() - 0.5) * 0.16
+      const chunky = isSpire && pi < 2
+      const pw = (chunky ? (0.30 + rng() * 0.12) : pi === 0 ? (0.20 + rng() * 0.07) : (0.11 + rng() * 0.09)) * baseSpan
+      const ph = pw * (chunky ? (0.72 + rng() * 0.24) : (0.38 + rng() * 0.22))
+      const pd = pw * (0.76 + rng() * 0.28)
+      const edgeR = Math.hypot(Math.cos(ang) * footRx, Math.sin(ang) * footRz)
+      const radialFactor = chunky ? (0.64 + rng() * 0.10) : pi < 2 ? (0.78 + rng() * 0.10) : (0.88 + rng() * 0.14)
+      const dist = edgeR * radialFactor + pw * 0.12
+      blocks.push(buildStoneBlock(pebbleSpec, seed + 1709 + pi * 197, 1, {
+        offset: {
+          x: footCenterX + Math.cos(ang) * dist,
+          y: 0,
+          z: footCenterZ + Math.sin(ang) * dist,
+        },
+        rotX: (rng() - 0.5) * 0.16,
+        rotY: rng() * Math.PI * 2,
+        rotZ: (rng() - 0.5) * 0.18,
+        scaleX: pw,
+        scaleY: ph,
+        scaleZ: pd,
+        isPebble: true,
+      }))
+    }
+  }
+
+  // 4. Inter-slab & foot-pebble crevice seam AO (darkens concave V-cleft joints in both shader & baked GLB vertex colors!)
+  const seamRange = Math.max(0.14, 0.17 * baseSpan)
+  for (let i = 0; i < blocks.length; i++) {
+    const bi = blocks[i]
+    for (let j = 0; j < blocks.length; j++) {
+      if (i === j) continue
+      const bj = blocks[j]
+      if (bj.hullPlanes.length === 0) continue
+      // Pebbles cast light contact AO onto main slabs; main slabs cast bold crevice AO onto each other & nestled pebbles
+      const weight = bi.isPebble ? (bj.isPebble ? 0.55 : 0.90) : (bj.isPebble ? 0.42 : 0.92)
+      const range = (bi.isPebble || bj.isPebble) ? seamRange * 0.65 : seamRange
+      for (let vi = 0; vi < bi.verts.length; vi++) {
+        const sd = convexHullSignedDist(bi.verts[vi], bj.hullPlanes)
+        if (sd < range) {
+          const seamAO = smoothstep(range, -range * 0.12, sd) * weight
+          if (seamAO > bi.cavityAttr[vi]) bi.cavityAttr[vi] = seamAO
+        }
+      }
+    }
+  }
+
+  // 5. Re-center compound stone horizontally around the main slabs while keeping exact y >= 0 grounding
+  let minY = Infinity
+  for (const b of blocks) {
+    for (const p of b.verts) if (p.y < minY) minY = p.y
+  }
+  for (const b of blocks) {
+    for (const p of b.verts) {
+      p.x -= footCenterX
+      p.z -= footCenterZ
+      p.y -= minY
+    }
+  }
+
+  return packStoneBlocksToGeometry(blocks, spec, scaleMul)
 }
 
 // ---------------------------------------------------------------------------
@@ -968,7 +1346,7 @@ export function buildRockGeometries(spec: RockSpec): {
       const scale = Math.pow(spec.cluster.scaleDecay, i === 1 ? 1 : 1 + (i - 1) * 0.42) * (0.9 + rng() * 0.22)
       const angle = startAngle + ((i - 1) * (Math.PI * 2) / (count - 1)) + (rng() - 0.5) * 0.45
       const dist = baseRadius * (0.58 + scale * 0.46) * spec.cluster.spread
-      const geo = buildSingleStoneGeometry(spec, spec.seed + i * 137 + 19, scale)
+      const geo = buildSingleStoneGeometry(spec, spec.seed + i * 137 + 19, scale, false)
       out.push({
         geometry: geo,
         position: new Vector3(Math.cos(angle) * dist, -0.02 * scale, Math.sin(angle) * dist),

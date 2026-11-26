@@ -1,4 +1,5 @@
 ﻿// Unified tree specification (schema v2) shared by broadleaf and conifer.
+import { botanicalTextureKeys, type BotanicalTextureKey } from './botanical-textures'
 import { defaultLeafParams, parseLeafParams, type LeafParams } from '../broadleaf/leaves'
 import {
   defaultLeafNormalEdit, parseLeafNormalEdit,
@@ -23,7 +24,7 @@ export {
   type BarkUvMode, type TrunkSculptSpec, type WoodSculptStyleId,
 } from './wood-sculpt'
 
-export const treeKinds = ['broadleaf', 'conifer', 'palm', 'bamboo', 'lotus', 'grass', 'fern', 'flowerbed'] as const
+export const treeKinds = ['broadleaf', 'conifer', 'palm', 'bamboo', 'lotus', 'grass', 'fern', 'flowerbed', 'botanical'] as const
 export type TreeKind = typeof treeKinds[number]
 export const bambooStyles = ['realistic', 'chibi'] as const
 export type BambooStyle = typeof bambooStyles[number]
@@ -371,6 +372,43 @@ export interface LotusSpec {
   alphaCutoff: number      // 0.05..0.9 leaf/petal alpha cutoff
 }
 
+export const botanicalModes = [
+  'fern-clump',
+  'blade-clump',
+  'rosette-shrub',
+  'hydrangea-shrub',
+  'cosmos-shrub',
+  'flower-groundcover',
+  'clover-groundcover',
+  'fine-herb',
+] as const
+export type BotanicalMode = typeof botanicalModes[number]
+
+/** High-craft hand-painted stylized botanical plant system (16 studio archetypes with zero-halo 512 PNG alpha sprites). */
+export interface BotanicalSpec {
+  mode: BotanicalMode
+  leafTexture: BotanicalTextureKey
+  flowerTexture?: BotanicalTextureKey
+  count: number          // primary fronds / blades / leaves / clovers
+  spread: number         // horizontal footprint radius (m)
+  height: number         // overall plant height (m)
+  leafSize: number       // single leaf / frond / floret / rosette size (m)
+  leafAspect: number     // blade width / length aspect ratio
+  arch: number           // outward curvature / parabolic arch lift
+  droop: number          // tip droop
+  cup: number            // cross-section V-fold / saucer cupping
+  stemCount: number      // primary branching stalks (shrubs / fine herbs)
+  flowerClusters: number // flower balls (hydrangea) or blossoms (cosmos / wildflower)
+  flowerSize: number     // single blossom diameter or hydrangea cluster radius (m)
+  tintInner: string      // inner/shaded vertex color multiplier
+  tintOuter: string      // outer/sunlit vertex color multiplier
+  flowerTintInner: string
+  flowerTintOuter: string
+  stemTint: string
+  aoStrength: number
+  alphaCutoff: number
+}
+
 export interface TreeSpec {
   schemaVersion: 2
   kind: TreeKind
@@ -387,6 +425,7 @@ export interface TreeSpec {
   lotus: LotusSpec
   flowers: FlowerSpec
   flowerbed: FlowerBedSpec
+  botanical?: BotanicalSpec
   shading: ShadingSpec
   accents?: WishingAccentsSpec
   normalEdit?: LeafNormalEditSpec
@@ -436,6 +475,29 @@ export const defaultLotus: LotusSpec = {
   flowerOpen: .74, flowerHeightBoost: .24,
   petalBaseColor: '#fff4f7', petalTipColor: '#ef6a98', stamenColor: '#ffd24a',
   tintVariance: .14, alphaCutoff: .36,
+}
+
+export const defaultBotanical: BotanicalSpec = {
+  mode: 'rosette-shrub',
+  leafTexture: 'heart-leaf-a',
+  count: 44,
+  spread: 0.45,
+  height: 0.72,
+  leafSize: 0.29,
+  leafAspect: 1.0,
+  arch: 0.28,
+  droop: 0.16,
+  cup: 0.17,
+  stemCount: 11,
+  flowerClusters: 6,
+  flowerSize: 0.14,
+  tintInner: '#4c8858',
+  tintOuter: '#ffffff',
+  flowerTintInner: '#bac4f8',
+  flowerTintOuter: '#ffffff',
+  stemTint: '#2b6a24',
+  aoStrength: 0.56,
+  alphaCutoff: 0.42,
 }
 
 export const defaultFlowers: FlowerSpec = {
@@ -907,13 +969,222 @@ export const presets = {
     ground: { mode: 'card', count: 16, length: 1.05, lengthVariance: .2, width: .19, spread: .06, lean: 40, arch: .92, twist: 12, planes: 1, fold: 22,
       segments: 7, spherize: .55, tintBase: '#4b823c', tintTip: '#eaffcc', aoStrength: .45, alphaCutoff: .32 },
   },
-} as const satisfies Record<string, Partial<Omit<TreeSpec, 'branches' | 'leaves' | 'fronds' | 'ground' | 'palm' | 'bamboo' | 'lotus' | 'flowers' | 'flowerbed' | 'shading' | 'accents'>> & { branches?: Partial<BranchSpec>; leaves?: Partial<LeafParams>; fronds?: Partial<FrondSpec>; ground?: Partial<GroundSpec>; palm?: Partial<PalmSpec>; bamboo?: Partial<BambooSpec>; lotus?: Partial<LotusSpec>; flowers?: Partial<FlowerSpec>; flowerbed?: Partial<FlowerBedSpec>; shading?: Partial<ShadingSpec>; accents?: Partial<WishingAccentsSpec> }>
+  // --- 16 Studio-Grade Stylized Hand-Painted Botanical Plants (Phase 3 Full Library) ---
+  'botanical-fern-a': {
+    kind: 'botanical', name: '01 大蕨类 A', seed: 3011,
+    trunk: { ...broadTrunk, height: .86, radius: .02 },
+    crown: { base: 0, top: 1, width: 1.15, depth: 1, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'fern-clump', leafTexture: 'fern-frond-a',
+      count: 24, spread: .09, height: .86, leafSize: 1.00, leafAspect: .90,
+      arch: .84, droop: .52, cup: .16, stemCount: 0, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#6ca872', tintOuter: '#fffef4', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#2b6a24', aoStrength: .38, alphaCutoff: .40,
+    },
+  },
+  'botanical-large-grass-a': {
+    kind: 'botanical', name: '02 大型草丛 A', seed: 3022,
+    trunk: { ...broadTrunk, height: .82, radius: .02 },
+    crown: { base: 0, top: 1, width: 1.02, depth: 1, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'blade-clump', leafTexture: 'broad-strap-leaf',
+      count: 18, spread: .08, height: .82, leafSize: .96, leafAspect: .72,
+      arch: .84, droop: .54, cup: .22, stemCount: 0, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#68a872', tintOuter: '#fffef6', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#2b6a24', aoStrength: .36, alphaCutoff: .40,
+    },
+  },
+  'botanical-fern-b': {
+    kind: 'botanical', name: '03 蕨类 B', seed: 3033,
+    trunk: { ...broadTrunk, height: .74, radius: .02 },
+    crown: { base: 0, top: 1, width: .98, depth: 1, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'fern-clump', leafTexture: 'fern-frond-b',
+      count: 20, spread: .08, height: .74, leafSize: .88, leafAspect: .90,
+      arch: .82, droop: .48, cup: .14, stemCount: 0, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#74b278', tintOuter: '#ffffff', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#367c2c', aoStrength: .36, alphaCutoff: .40,
+    },
+  },
+  'botanical-shrub-a': {
+    kind: 'botanical', name: '04 阔叶灌木 A', seed: 4041,
+    trunk: { ...broadTrunk, height: .72, radius: .02 },
+    crown: { base: 0, top: 1, width: .45, depth: .96, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'rosette-shrub', leafTexture: 'heart-leaf-a',
+      count: 44, spread: .45, height: .72, leafSize: .29, leafAspect: 1.0,
+      arch: .28, droop: .16, cup: .17, stemCount: 0, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#4c8858', tintOuter: '#ffffff', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#2b6a24', aoStrength: .56, alphaCutoff: .42,
+    },
+  },
+  'botanical-shrub-b': {
+    kind: 'botanical', name: '05 阔叶灌木 B', seed: 4052,
+    trunk: { ...broadTrunk, height: .54, radius: .02 },
+    crown: { base: 0, top: 1, width: .35, depth: .96, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'rosette-shrub', leafTexture: 'heart-leaf-b',
+      count: 46, spread: .35, height: .54, leafSize: .22, leafAspect: 1.0,
+      arch: .26, droop: .16, cup: .16, stemCount: 0, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#5e9e64', tintOuter: '#ffffff', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#327428', aoStrength: .48, alphaCutoff: .42,
+    },
+  },
+  'botanical-grass-a': {
+    kind: 'botanical', name: '06 草丛 A', seed: 3061,
+    trunk: { ...broadTrunk, height: .58, radius: .02 },
+    crown: { base: 0, top: 1, width: .72, depth: 1, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'blade-clump', leafTexture: 'grass-blade-deep',
+      count: 20, spread: .06, height: .58, leafSize: .72, leafAspect: 1.04,
+      arch: .76, droop: .44, cup: .18, stemCount: 0, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#6eae94', tintOuter: '#f4fff8', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#1f5e3b', aoStrength: .34, alphaCutoff: .40,
+    },
+  },
+  'botanical-grass-b': {
+    kind: 'botanical', name: '07 草丛 B', seed: 3072,
+    trunk: { ...broadTrunk, height: .50, radius: .02 },
+    crown: { base: 0, top: 1, width: .66, depth: 1, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'blade-clump', leafTexture: 'grass-blade-bright',
+      count: 25, spread: .08, height: .50, leafSize: .64, leafAspect: .80,
+      arch: .72, droop: .36, cup: .16, stemCount: 0, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#6ca86e', tintOuter: '#ffffff', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#2b6e28', aoStrength: .34, alphaCutoff: .40,
+    },
+  },
+  'botanical-grass-c': {
+    kind: 'botanical', name: '08 草丛 C', seed: 3083,
+    trunk: { ...broadTrunk, height: .66, radius: .02 },
+    crown: { base: 0, top: 1, width: .76, depth: 1, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'blade-clump', leafTexture: 'grass-blade-bright',
+      count: 22, spread: .06, height: .66, leafSize: .84, leafAspect: .72,
+      arch: .92, droop: .62, cup: .16, stemCount: 0, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#74ae66', tintOuter: '#fffbe4', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#367424', aoStrength: .34, alphaCutoff: .40,
+    },
+  },
+  'botanical-small-grass': {
+    kind: 'botanical', name: '09 小草丛', seed: 3094,
+    trunk: { ...broadTrunk, height: .32, radius: .02 },
+    crown: { base: 0, top: 1, width: .44, depth: 1, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'blade-clump', leafTexture: 'broad-strap-leaf',
+      count: 12, spread: .05, height: .32, leafSize: .40, leafAspect: .76,
+      arch: .74, droop: .42, cup: .20, stemCount: 0, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#78b472', tintOuter: '#fffef2', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#347a28', aoStrength: .30, alphaCutoff: .40,
+    },
+  },
+  'botanical-hydrangea': {
+    kind: 'botanical', name: '10 绣球花丛', seed: 1017,
+    trunk: { ...broadTrunk, height: .56, radius: .02 },
+    crown: { base: 0, top: 1, width: .72, depth: .94, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches, count: 11 },
+    botanical: {
+      mode: 'hydrangea-shrub', leafTexture: 'hydrangea-leaf', flowerTexture: 'hydrangea-floret-2x2',
+      count: 32, spread: .72, height: .56, leafSize: .25, leafAspect: .76,
+      arch: .26, droop: .16, cup: .14, stemCount: 11, flowerClusters: 6, flowerSize: .14,
+      tintInner: '#82ac90', tintOuter: '#ffffff', flowerTintInner: '#bac4f8', flowerTintOuter: '#ffffff',
+      stemTint: '#295c22', aoStrength: .44, alphaCutoff: .42,
+    },
+  },
+  'botanical-purple-shrub': {
+    kind: 'botanical', name: '11 紫花小灌木', seed: 3115,
+    trunk: { ...broadTrunk, height: .72, radius: .02 },
+    crown: { base: 0, top: 1, width: .48, depth: .95, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'cosmos-shrub', leafTexture: 'small-ovate-leaf', flowerTexture: 'pink-cosmos-2x2',
+      count: 96, spread: .46, height: .72, leafSize: .17, leafAspect: .94,
+      arch: .26, droop: .14, cup: .14, stemCount: 13, flowerClusters: 22, flowerSize: .13,
+      tintInner: '#629c6c', tintOuter: '#ffffff', flowerTintInner: '#f4c8e8', flowerTintOuter: '#ffffff',
+      stemTint: '#3b6a2c', aoStrength: .42, alphaCutoff: .42,
+    },
+  },
+  'botanical-flower-cover': {
+    kind: 'botanical', name: '12 小花地被', seed: 3126,
+    trunk: { ...broadTrunk, height: .30, radius: .02 },
+    crown: { base: 0, top: 1, width: .52, depth: .96, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'flower-groundcover', leafTexture: 'small-ovate-leaf', flowerTexture: 'violet-wildflower-2x2',
+      count: 118, spread: .50, height: .24, leafSize: .15, leafAspect: .92,
+      arch: .20, droop: .12, cup: .14, stemCount: 18, flowerClusters: 34, flowerSize: .105,
+      tintInner: '#549262', tintOuter: '#ffffff', flowerTintInner: '#c8ccff', flowerTintOuter: '#ffffff',
+      stemTint: '#2c6c28', aoStrength: .44, alphaCutoff: .42,
+    },
+  },
+  'botanical-clover-cover': {
+    kind: 'botanical', name: '13 三叶草地被', seed: 3137,
+    trunk: { ...broadTrunk, height: .30, radius: .02 },
+    crown: { base: 0, top: 1, width: .68, depth: .92, roundness: 2, topBias: 1, coneShape: 1, irregularity: .3 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'clover-groundcover', leafTexture: 'clover-shamrock-2x2',
+      count: 108, spread: .64, height: .13, leafSize: .13, leafAspect: 1.0,
+      arch: .10, droop: .08, cup: .16, stemCount: 0, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#54965c', tintOuter: '#ffffff', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#2b6826', aoStrength: .40, alphaCutoff: .42,
+    },
+  },
+  'botanical-creeping-cover': {
+    kind: 'botanical', name: '14 小叶蔓延地被', seed: 3148,
+    trunk: { ...broadTrunk, height: .30, radius: .02 },
+    crown: { base: 0, top: 1, width: .68, depth: .92, roundness: 2, topBias: 1, coneShape: 1, irregularity: .3 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'clover-groundcover', leafTexture: 'creeping-rosette-2x2',
+      count: 112, spread: .66, height: .08, leafSize: .12, leafAspect: 1.0,
+      arch: .08, droop: .06, cup: .14, stemCount: 1, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#6ca456', tintOuter: '#fffef0', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#447c2a', aoStrength: .36, alphaCutoff: .42,
+    },
+  },
+  'botanical-fine-herb-a': {
+    kind: 'botanical', name: '15 细叶草 A', seed: 3159,
+    trunk: { ...broadTrunk, height: .64, radius: .02 },
+    crown: { base: 0, top: 1, width: .44, depth: .96, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'fine-herb', leafTexture: 'narrow-herb-leaf',
+      count: 144, spread: .36, height: .64, leafSize: .23, leafAspect: 1.38,
+      arch: .46, droop: .16, cup: .12, stemCount: 11, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#629e60', tintOuter: '#fffef2', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#367428', aoStrength: .40, alphaCutoff: .40,
+    },
+  },
+  'botanical-fine-herb-b': {
+    kind: 'botanical', name: '16 细叶草 B', seed: 3164,
+    trunk: { ...broadTrunk, height: .66, radius: .02 },
+    crown: { base: 0, top: 1, width: .42, depth: .96, roundness: 2, topBias: 1, coneShape: 1, irregularity: .2 },
+    branches: { ...stubBranches },
+    botanical: {
+      mode: 'fine-herb', leafTexture: 'narrow-herb-leaf',
+      count: 290, spread: .40, height: .66, leafSize: .14, leafAspect: 1.48,
+      arch: .26, droop: .08, cup: .14, stemCount: 19, flowerClusters: 0, flowerSize: 0,
+      tintInner: '#5e9c58', tintOuter: '#fffef2', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
+      stemTint: '#3a7026', aoStrength: .42, alphaCutoff: .40,
+    },
+  },
+} as const satisfies Record<string, Partial<Omit<TreeSpec, 'branches' | 'leaves' | 'fronds' | 'ground' | 'palm' | 'bamboo' | 'lotus' | 'flowers' | 'flowerbed' | 'botanical' | 'shading' | 'accents'>> & { branches?: Partial<BranchSpec>; leaves?: Partial<LeafParams>; fronds?: Partial<FrondSpec>; ground?: Partial<GroundSpec>; palm?: Partial<PalmSpec>; bamboo?: Partial<BambooSpec>; lotus?: Partial<LotusSpec>; flowers?: Partial<FlowerSpec>; flowerbed?: Partial<FlowerBedSpec>; botanical?: Partial<BotanicalSpec>; shading?: Partial<ShadingSpec>; accents?: Partial<WishingAccentsSpec> }>
 
 export type PresetId = keyof typeof presets
 export const presetIds = Object.keys(presets) as PresetId[]
 
 export function presetSpec(id: PresetId, seed?: number): TreeSpec {
-  const p = presets[id] as unknown as Partial<Omit<TreeSpec, 'branches'>> & { branches?: Partial<BranchSpec>; leaves?: Partial<LeafParams>; fronds?: Partial<FrondSpec>; ground?: Partial<GroundSpec>; palm?: Partial<PalmSpec>; bamboo?: Partial<BambooSpec>; lotus?: Partial<LotusSpec>; flowers?: Partial<FlowerSpec>; flowerbed?: Partial<FlowerBedSpec>; shading?: Partial<ShadingSpec>; accents?: Partial<WishingAccentsSpec> }
+  const p = presets[id] as unknown as Partial<Omit<TreeSpec, 'branches'>> & { branches?: Partial<BranchSpec>; leaves?: Partial<LeafParams>; fronds?: Partial<FrondSpec>; ground?: Partial<GroundSpec>; palm?: Partial<PalmSpec>; bamboo?: Partial<BambooSpec>; lotus?: Partial<LotusSpec>; flowers?: Partial<FlowerSpec>; flowerbed?: Partial<FlowerBedSpec>; botanical?: Partial<BotanicalSpec>; shading?: Partial<ShadingSpec>; accents?: Partial<WishingAccentsSpec> }
   return {
     schemaVersion: 2, kind: p.kind!, name: p.name!, seed: seed ?? p.seed!,
     trunk: {
@@ -932,6 +1203,7 @@ export function presetSpec(id: PresetId, seed?: number): TreeSpec {
     lotus: { ...defaultLotus, ...(p.lotus ?? {}) },
     flowers: { ...defaultFlowers, ...(p.flowers ?? {}) },
     flowerbed: { ...defaultFlowerBed, ...(p.flowerbed ?? {}) },
+    ...(p.botanical ? { botanical: { ...defaultBotanical, ...p.botanical } } : {}),
     shading: { ...defaultShading, ...(p.shading ?? {}) },
     accents: { ...defaultAccents, ...(p.accents ?? {}) },
     normalEdit: defaultLeafNormalEdit(),
@@ -946,7 +1218,7 @@ export function parseTreeSpec(value: unknown): TreeSpec {
   const data = value as Partial<TreeSpec>
   if (data.schemaVersion !== 2) throw new Error('需要 schemaVersion 2 的树配置')
   if (!treeKinds.includes(data.kind as TreeKind)) throw new Error('未知树种类型')
-  const base = presetSpec(({ broadleaf: 'broadleaf-round', conifer: 'conifer-standard', palm: 'palm-tropical', bamboo: 'bamboo-realistic', lotus: 'lotus-stemmed', grass: 'grass-clump', fern: 'fern', flowerbed: 'flowerbed-stemmed' } as const)[data.kind as TreeKind])
+  const base = presetSpec(({ broadleaf: 'broadleaf-round', conifer: 'conifer-standard', palm: 'palm-tropical', bamboo: 'bamboo-realistic', lotus: 'lotus-stemmed', grass: 'grass-clump', fern: 'fern', flowerbed: 'flowerbed-stemmed', botanical: 'botanical-shrub-a' } as const)[data.kind as TreeKind])
   const finite = (group: Record<string, unknown>, fallback: Record<string, unknown>) => {
     const out: Record<string, unknown> = { ...fallback }
     for (const [k, v] of Object.entries(group ?? {})) {
@@ -1215,6 +1487,32 @@ export function parseTreeSpec(value: unknown): TreeSpec {
   parsedAccents.plaqueScale = clampIn(parsedAccents.plaqueScale, 0.3, 3)
   parsedAccents.sparkleCount = Math.round(clampIn(parsedAccents.sparkleCount, 0, 80))
   const parsedLeafEdits = parseLeafEditSpec(data.leafEdits)
+  let parsedBotanical: BotanicalSpec | undefined
+  if (data.kind === 'botanical' || data.botanical) {
+    const rawBot = finite((data.botanical ?? {}) as never, (base.botanical ?? defaultBotanical) as never) as unknown as BotanicalSpec
+    if (!(botanicalModes as readonly string[]).includes(rawBot.mode)) rawBot.mode = 'rosette-shrub'
+    if (!(botanicalTextureKeys as readonly string[]).includes(rawBot.leafTexture)) rawBot.leafTexture = 'heart-leaf-a'
+    const rawFlwTex = (data.botanical as Partial<BotanicalSpec> | undefined)?.flowerTexture
+    if (typeof rawFlwTex === 'string' && (botanicalTextureKeys as readonly string[]).includes(rawFlwTex)) {
+      rawBot.flowerTexture = rawFlwTex as BotanicalTextureKey
+    } else {
+      delete rawBot.flowerTexture
+    }
+    rawBot.count = Math.round(clampIn(rawBot.count, 4, 400))
+    rawBot.spread = clampIn(rawBot.spread, 0.02, 4)
+    rawBot.height = clampIn(rawBot.height, 0.04, 3.5)
+    rawBot.leafSize = clampIn(rawBot.leafSize, 0.03, 2.5)
+    rawBot.leafAspect = clampIn(rawBot.leafAspect, 0.15, 2.0)
+    rawBot.arch = clampIn(rawBot.arch, 0, 2.0)
+    rawBot.droop = clampIn(rawBot.droop, 0, 1.5)
+    rawBot.cup = clampIn(rawBot.cup, 0, 0.8)
+    rawBot.stemCount = Math.round(clampIn(rawBot.stemCount, 0, 48))
+    rawBot.flowerClusters = Math.round(clampIn(rawBot.flowerClusters, 0, 80))
+    rawBot.flowerSize = clampIn(rawBot.flowerSize, 0, 1.0)
+    rawBot.aoStrength = clampIn(rawBot.aoStrength, 0, 1)
+    rawBot.alphaCutoff = clampIn(rawBot.alphaCutoff, 0.05, 0.9)
+    parsedBotanical = rawBot
+  }
   return {
     schemaVersion: 2, kind: data.kind as TreeKind, name: String(data.name ?? base.name),
     seed: Number.isInteger(data.seed) ? data.seed! : base.seed,
@@ -1229,6 +1527,7 @@ export function parseTreeSpec(value: unknown): TreeSpec {
     lotus: parsedLotus,
     flowers: parsedFlowers,
     flowerbed: parsedFlowerBed,
+    ...(parsedBotanical ? { botanical: parsedBotanical } : {}),
     shading: parsedShading,
     accents: parsedAccents,
     normalEdit: parseLeafNormalEdit(data.normalEdit),

@@ -1,4 +1,4 @@
-export type RockStyle = 'painterly' | 'cel'
+export type RockStyle = 'painterly' | 'cel' | 'handpainted'
 export type RockTopMode = 'none' | 'sand' | 'moss' | 'snow'
 export type RockPresetId =
   | 'boulder-sand-cap'
@@ -7,6 +7,12 @@ export type RockPresetId =
   | 'boulder-slab'
   | 'mossy-forest-rock'
   | 'rock-cluster'
+  | 'handpainted-wedge'
+  | 'handpainted-twin-slab'
+  | 'handpainted-block-bluff'
+  | 'handpainted-layered-ridge'
+  | 'handpainted-crag-spire'
+  | 'handpainted-monolith'
 
 export interface RockShapeSpec {
   width: number
@@ -18,6 +24,8 @@ export interface RockShapeSpec {
   asymmetry: number
   taperTop: number
   bottomFlat: number
+  /** Interlocking geological blocks per stone (1 = single block, 2..3 = stepped concave clefts/overhangs). */
+  slabs?: number
 }
 
 export interface RockDetailSpec {
@@ -51,6 +59,8 @@ export interface RockClusterSpec {
   count: number
   spread: number
   scaleDecay: number
+  /** Grounded angular rubble chips nestled around the hero rock foot (0..6). */
+  pebbles?: number
 }
 
 export interface RockSpec {
@@ -73,6 +83,12 @@ export const rockPresetIds: RockPresetId[] = [
   'boulder-slab',
   'mossy-forest-rock',
   'rock-cluster',
+  'handpainted-wedge',
+  'handpainted-twin-slab',
+  'handpainted-block-bluff',
+  'handpainted-layered-ridge',
+  'handpainted-crag-spire',
+  'handpainted-monolith',
 ]
 
 export const rockPresets: Record<RockPresetId, RockSpec> = {
@@ -339,6 +355,276 @@ export const rockPresets: Record<RockPresetId, RockSpec> = {
     },
     cluster: { count: 3, spread: 0.96, scaleDecay: 0.54 },
   },
+
+  'handpainted-wedge': {
+    version: 1,
+    preset: 'handpainted-wedge',
+    name: '斜棱厚岩',
+    seed: 7129,
+    style: 'handpainted',
+    shape: {
+      width: 1.98,
+      height: 1.28,
+      depth: 1.48,
+      facetCount: 12,
+      flatness: 0.62,
+      bevel: 0.105,
+      asymmetry: 0.78,
+      taperTop: 0.42,
+      bottomFlat: 0.88,
+      slabs: 1,
+    },
+    detail: {
+      subdivisions: 1,
+      chisel: 0.16,
+      undulation: 0.10,
+      cracks: 0.58,
+      sharpness: 0.95,
+    },
+    shading: {
+      baseColor: '#c9a684',
+      shadowColor: '#5c4639',
+      edgeColor: '#f2dcc2',
+      edgeWear: 0.84,
+      edgeBreakup: 0.54,
+      cavityAO: 0.72,
+      facetVariation: 0.40,
+      roughness: 0.92,
+      grain: 0.16,
+    },
+    top: {
+      mode: 'none',
+      color: '#dec29c',
+      coverage: 0.0,
+      softness: 0.35,
+    },
+    cluster: { count: 1, spread: 0.92, scaleDecay: 0.52, pebbles: 4 },
+  },
+
+  'handpainted-twin-slab': {
+    version: 1,
+    preset: 'handpainted-twin-slab',
+    name: '双叠断层岩',
+    seed: 7218,
+    style: 'handpainted',
+    shape: {
+      width: 1.88,
+      height: 1.26,
+      depth: 1.44,
+      facetCount: 10,
+      flatness: 0.66,
+      bevel: 0.10,
+      asymmetry: 0.68,
+      taperTop: 0.30,
+      bottomFlat: 0.86,
+      slabs: 2,
+    },
+    detail: {
+      subdivisions: 1,
+      chisel: 0.12,
+      undulation: 0.09,
+      cracks: 0.58,
+      sharpness: 0.95,
+    },
+    shading: {
+      baseColor: '#ceab89',
+      shadowColor: '#584236',
+      edgeColor: '#f3dec4',
+      edgeWear: 0.84,
+      edgeBreakup: 0.54,
+      cavityAO: 0.78,
+      facetVariation: 0.40,
+      roughness: 0.92,
+      grain: 0.15,
+    },
+    top: {
+      mode: 'none',
+      color: '#e2c7a2',
+      coverage: 0.0,
+      softness: 0.34,
+    },
+    cluster: { count: 1, spread: 0.88, scaleDecay: 0.52, pebbles: 2 },
+  },
+
+  'handpainted-block-bluff': {
+    version: 1,
+    preset: 'handpainted-block-bluff',
+    name: '阶梯方巨岩',
+    seed: 7342,
+    style: 'handpainted',
+    shape: {
+      width: 1.66,
+      height: 1.56,
+      depth: 1.48,
+      facetCount: 13,
+      flatness: 0.60,
+      bevel: 0.11,
+      asymmetry: 0.62,
+      taperTop: 0.22,
+      bottomFlat: 0.86,
+      slabs: 3,
+    },
+    detail: {
+      subdivisions: 1,
+      chisel: 0.18,
+      undulation: 0.11,
+      cracks: 0.64,
+      sharpness: 0.92,
+    },
+    shading: {
+      baseColor: '#c5a180',
+      shadowColor: '#533e32',
+      edgeColor: '#efd7bb',
+      edgeWear: 0.86,
+      edgeBreakup: 0.56,
+      cavityAO: 0.80,
+      facetVariation: 0.42,
+      roughness: 0.92,
+      grain: 0.18,
+    },
+    top: {
+      mode: 'none',
+      color: '#dbc09c',
+      coverage: 0.0,
+      softness: 0.35,
+    },
+    cluster: { count: 1, spread: 0.90, scaleDecay: 0.50, pebbles: 4 },
+  },
+
+  'handpainted-layered-ridge': {
+    version: 1,
+    preset: 'handpainted-layered-ridge',
+    name: '层裂卧石',
+    seed: 7456,
+    style: 'handpainted',
+    shape: {
+      width: 2.12,
+      height: 1.08,
+      depth: 1.42,
+      facetCount: 12,
+      flatness: 0.68,
+      bevel: 0.105,
+      asymmetry: 0.72,
+      taperTop: 0.38,
+      bottomFlat: 0.90,
+      slabs: 3,
+    },
+    detail: {
+      subdivisions: 1,
+      chisel: 0.14,
+      undulation: 0.10,
+      cracks: 0.68,
+      sharpness: 0.94,
+    },
+    shading: {
+      baseColor: '#bf9c7e',
+      shadowColor: '#4c392f',
+      edgeColor: '#ecd4b8',
+      edgeWear: 0.84,
+      edgeBreakup: 0.52,
+      cavityAO: 0.82,
+      facetVariation: 0.40,
+      roughness: 0.92,
+      grain: 0.16,
+    },
+    top: {
+      mode: 'none',
+      color: '#d4b896',
+      coverage: 0.0,
+      softness: 0.36,
+    },
+    cluster: { count: 1, spread: 0.90, scaleDecay: 0.48, pebbles: 3 },
+  },
+
+  'handpainted-crag-spire': {
+    version: 1,
+    preset: 'handpainted-crag-spire',
+    name: '尖峰孤岩',
+    seed: 7588,
+    style: 'handpainted',
+    shape: {
+      width: 1.18,
+      height: 2.08,
+      depth: 1.04,
+      facetCount: 10,
+      flatness: 0.62,
+      bevel: 0.095,
+      asymmetry: 0.54,
+      taperTop: 0.64,
+      bottomFlat: 0.88,
+      slabs: 2,
+    },
+    detail: {
+      subdivisions: 1,
+      chisel: 0.12,
+      undulation: 0.08,
+      cracks: 0.48,
+      sharpness: 0.95,
+    },
+    shading: {
+      baseColor: '#b9987d',
+      shadowColor: '#4b382f',
+      edgeColor: '#ebd4b9',
+      edgeWear: 0.80,
+      edgeBreakup: 0.56,
+      cavityAO: 0.78,
+      facetVariation: 0.40,
+      roughness: 0.92,
+      grain: 0.15,
+    },
+    top: {
+      mode: 'none',
+      color: '#d2b698',
+      coverage: 0.0,
+      softness: 0.34,
+    },
+    cluster: { count: 1, spread: 0.82, scaleDecay: 0.46, pebbles: 4 },
+  },
+
+  'handpainted-monolith': {
+    version: 1,
+    preset: 'handpainted-monolith',
+    name: '简面立石',
+    seed: 7692,
+    style: 'handpainted',
+    shape: {
+      width: 1.48,
+      height: 1.80,
+      depth: 1.26,
+      facetCount: 9,
+      flatness: 0.72,
+      bevel: 0.10,
+      asymmetry: 0.58,
+      taperTop: 0.46,
+      bottomFlat: 0.88,
+      slabs: 1,
+    },
+    detail: {
+      subdivisions: 1,
+      chisel: 0.08,
+      undulation: 0.08,
+      cracks: 0.54,
+      sharpness: 0.96,
+    },
+    shading: {
+      baseColor: '#c6a689',
+      shadowColor: '#544035',
+      edgeColor: '#f0dbc2',
+      edgeWear: 0.82,
+      edgeBreakup: 0.54,
+      cavityAO: 0.72,
+      facetVariation: 0.38,
+      roughness: 0.92,
+      grain: 0.14,
+    },
+    top: {
+      mode: 'none',
+      color: '#dcc2a0',
+      coverage: 0.0,
+      softness: 0.35,
+    },
+    cluster: { count: 1, spread: 0.92, scaleDecay: 0.52, pebbles: 2 },
+  },
 }
 
 function clamp(v: number, lo: number, hi: number, fallback: number) {
@@ -386,11 +672,17 @@ export function parseRockSpec(raw: unknown): RockSpec {
 
   const rawSub = Math.round(clamp(dt.subdivisions as number, 0, 2, base.detail.subdivisions))
   const subdivisions = (rawSub <= 0 ? 0 : rawSub === 1 ? 1 : 2) as 0 | 1 | 2
-  const style: RockStyle = obj.style === 'cel' ? 'cel' : obj.style === 'painterly' ? 'painterly' : base.style
+  const style: RockStyle =
+    obj.style === 'cel' ? 'cel'
+      : obj.style === 'handpainted' ? 'handpainted'
+        : obj.style === 'painterly' ? 'painterly'
+          : base.style
   const topMode: RockTopMode =
     tp.mode === 'none' || tp.mode === 'sand' || tp.mode === 'moss' || tp.mode === 'snow'
       ? tp.mode
       : base.top.mode
+  const slabs = Math.round(clamp(sh.slabs as number, 1, 3, base.shape.slabs ?? 1))
+  const pebbles = Math.round(clamp(cl.pebbles as number, 0, 6, base.cluster.pebbles ?? 0))
 
   return {
     version: 1,
@@ -406,8 +698,9 @@ export function parseRockSpec(raw: unknown): RockSpec {
       flatness: clamp(sh.flatness as number, 0, 1, base.shape.flatness),
       bevel: clamp(sh.bevel as number, 0, 0.32, base.shape.bevel),
       asymmetry: clamp(sh.asymmetry as number, 0, 1, base.shape.asymmetry),
-      taperTop: clamp(sh.taperTop as number, -0.35, 0.55, base.shape.taperTop),
+      taperTop: clamp(sh.taperTop as number, -0.35, 0.85, base.shape.taperTop),
       bottomFlat: clamp(sh.bottomFlat as number, 0, 1, base.shape.bottomFlat),
+      ...(slabs > 1 || base.shape.slabs !== undefined ? { slabs } : {}),
     },
     detail: {
       subdivisions,
@@ -437,6 +730,7 @@ export function parseRockSpec(raw: unknown): RockSpec {
       count: Math.round(clamp(cl.count as number, 1, 5, base.cluster.count)),
       spread: clamp(cl.spread as number, 0.45, 1.8, base.cluster.spread),
       scaleDecay: clamp(cl.scaleDecay as number, 0.3, 0.85, base.cluster.scaleDecay),
+      ...(pebbles > 0 || base.cluster.pebbles !== undefined ? { pebbles } : {}),
     },
   }
 }
