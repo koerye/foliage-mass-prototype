@@ -1,4 +1,8 @@
 import {
+  loadDefaultPhotoCraftPbrLayers,
+  type ExternalPbrLayers,
+} from './photocraft-pbr'
+import {
   buildCreasePreviewBuffers,
   buildRouteCRock,
   type PolyCsgPresetId,
@@ -10,6 +14,7 @@ import type {
   PolyCWorkerPreviewResponse,
   PolyCWorkerRequest,
   PolyCWorkerResponse,
+  PolyCWorkerSetPbrMessage,
 } from './poly-c.worker'
 
 export interface PolyCJobMeta {
@@ -72,6 +77,8 @@ export class PolyCWorkerClient {
   }
   private onResult: PolyCResultHandler | null = null
   private onError: ((err: Error) => void) | null = null
+  private customExternalPbr: ExternalPbrLayers | null = null
+  private workerHasPbr = false
   private disposed = false
 
   constructor(
@@ -105,10 +112,26 @@ export class PolyCWorkerClient {
       }
       this.worker = w
       this.stats.usingWorker = true
+      this.workerHasPbr = false
+      if (this.customExternalPbr) {
+        const msg: PolyCWorkerSetPbrMessage = { kind: 'set-pbr', layers: this.customExternalPbr }
+        w.postMessage(msg)
+        this.workerHasPbr = true
+      }
       return w
     } catch {
       this.stats.usingWorker = false
       return null
+    }
+  }
+
+  /** Inject or reset custom PhotoCraft PBR texture sets for `'photocraft-pbr'` mode (cached in Worker RAM). */
+  setExternalPbr(layers: ExternalPbrLayers | null) {
+    this.customExternalPbr = layers
+    this.workerHasPbr = Boolean(layers)
+    if (this.worker) {
+      const msg: PolyCWorkerSetPbrMessage = { kind: 'set-pbr', layers }
+      this.worker.postMessage(msg)
     }
   }
 
@@ -196,13 +219,33 @@ export class PolyCWorkerClient {
   private dispatchToWorker(w: Worker, req: PolyCWorkerRequest) {
     this.inFlightJobId = req.jobId
     this.dispatchedTimes.set(req.jobId, performance.now())
+    if (req.stage === 'bake' && req.bake?.mode === 'photocraft-pbr' && !this.workerHasPbr) {
+      // Decode bundled PhotoCraft PNGs on the main thread (where relative asset URLs always resolve cleanly,
+      // even when the Worker runs from an inline blob: URL in Electron!) and push once to Worker RAM.
+      void loadDefaultPhotoCraftPbrLayers()
+        .then(layers => {
+          if (this.disposed || this.worker !== w) return
+          if (!this.workerHasPbr) {
+            const msg: PolyCWorkerSetPbrMessage = { kind: 'set-pbr', layers }
+            w.postMessage(msg)
+            this.workerHasPbr = true
+          }
+          w.postMessage(req)
+        })
+        .catch(err => {
+          this.inFlightJobId = null
+          this.onError?.(err instanceof Error ? err : new Error(String(err)))
+          this.flushPending()
+        })
+      return
+    }
     w.postMessage(req)
   }
 
   private dispatchFallback(req: PolyCWorkerRequest) {
     this.inFlightJobId = req.jobId
     this.dispatchedTimes.set(req.jobId, performance.now())
-    void runMainThreadFallback(req)
+    void runMainThreadFallback(req, this.customExternalPbr)
       .then(res => this.handleMessage(res))
       .catch(err => {
         this.inFlightJobId = null
@@ -268,7 +311,10 @@ export class PolyCWorkerClient {
   }
 }
 
-async function runMainThreadFallback(req: PolyCWorkerRequest): Promise<PolyCWorkerResponse> {
+async function runMainThreadFallback(
+  req: PolyCWorkerRequest,
+  customExternalPbr: ExternalPbrLayers | null,
+): Promise<PolyCWorkerResponse> {
   const t0 = performance.now()
   const c2 = await buildRouteCRock(req.preset, req.sculpt, {
     skipFullAudit: req.stage === 'preview',
@@ -299,15 +345,23 @@ async function runMainThreadFallback(req: PolyCWorkerRequest): Promise<PolyCWork
     }
   }
   const bakeSize = req.bake?.size ?? 512
-  const uv = unwrapPolyCsgUvCharts(c2, { atlasSize: bakeSize, gutterPx: 10 })
+  const isMossyTerrace = req.preset === 'terraced-moss-bluff-c2'
+  const mode = req.bake?.mode ?? 'shallow-detail'
+  let externalPbr: ExternalPbrLayers | undefined
+  if (mode === 'photocraft-pbr') {
+    externalPbr = customExternalPbr ?? await loadDefaultPhotoCraftPbrLayers()
+  }
+  const uv = unwrapPolyCsgUvCharts(c2, { atlasSize: bakeSize, gutterPx: isMossyTerrace ? 6 : 10 })
   const baked = bakePolyCsgPbr(c2, uv, {
     size: bakeSize,
-    mode: req.bake?.mode ?? 'shallow-detail',
-    baseColorHex: req.bake?.baseColorHex ?? '#caa57c',
-    dilationPasses: req.bake?.dilationPasses ?? 14,
-    aoRays: req.bake?.aoRays ?? 16,
-    seed: Math.round(req.sculpt.seed ?? 5104),
+    mode,
+    baseColorHex: req.bake?.baseColorHex ?? (isMossyTerrace ? '#cfa87d' : '#caa57c'),
+    dilationPasses: req.bake?.dilationPasses ?? (isMossyTerrace ? 8 : 14),
+    aoRays: req.bake?.aoRays ?? (isMossyTerrace ? 10 : 16),
+    seed: Math.round(req.sculpt.seed ?? (isMossyTerrace ? 7301 : 5104)),
     strataStrength: req.bake?.strataStrength ?? 1.0,
+    ...(isMossyTerrace ? { mossTop: true, mossColorHex: '#68a624' } : {}),
+    ...(externalPbr ? { externalPbr } : {}),
   })
   return {
     jobId: req.jobId,
@@ -321,6 +375,7 @@ async function runMainThreadFallback(req: PolyCWorkerRequest): Promise<PolyCWork
     albedo: baked.albedo,
     normal: baked.normal,
     ao: baked.ao,
+    roughness: baked.roughness,
     audit: c2.audit,
     uvAudit: uv.audit,
     uvMs: uv.uvMs,

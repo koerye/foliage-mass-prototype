@@ -277,7 +277,8 @@ byId('app').innerHTML = `
             <div class="as-select-row">
               <span>材质版本</span>
               <select id="as-rc2-mode">
-                <option value="shallow-detail">浅细节版 (去波纹层理)</option>
+                <option value="photocraft-pbr">🎨 PhotoCraft 精绘 PBR</option>
+                <option value="shallow-detail">浅细节版 (旧程序层理)</option>
                 <option value="baseline">材质基线 (纯平面)</option>
               </select>
             </div>
@@ -1537,6 +1538,20 @@ interface PaletteEntry {
 
 function savedPresetToEntry(p: SavedPreset, group: string): PaletteEntry {
   const hasTex = Boolean(p.textures && Object.keys(p.textures).length > 0)
+  if (p.scope === 'rock') {
+    const isC2 = p.kind === 'rock-c2'
+    return {
+      key: `saved:${p.id}`,
+      group,
+      name: p.name,
+      subtitle: `${p.kindLabel} · ${fmt.format(p.triangles)} 面`,
+      icon: isC2 ? '💎' : '🪨',
+      thumb: p.thumbnail || undefined,
+      create: () => isC2
+        ? createRockC2Item((p as SavedPreset<PolyCRockSpec>).payload, { name: p.name })
+        : createRockItem((p as SavedPreset<RockSpec>).payload, { name: p.name }),
+    }
+  }
   const isTreeScope = p.scope === 'tree'
   const treeSpec = isTreeScope ? (p as SavedPreset<TreeSpec>).payload : undefined
   const inferredCat = treeSpec
@@ -1544,16 +1559,18 @@ function savedPresetToEntry(p: SavedPreset, group: string): PaletteEntry {
         ? 'flower'
         : treeSpec.kind === 'grass' || treeSpec.kind === 'fern'
           ? 'grass'
-          : treeSpec.kind === 'broadleaf' && treeSpec.trunk.height < 2.1
-            ? 'shrub'
-            : 'tree')
+          : treeSpec.kind === 'botanical'
+            ? inferCategoryFromTree(treeSpec)
+            : treeSpec.kind === 'broadleaf' && treeSpec.trunk.height < 2.1
+              ? 'shrub'
+              : 'tree')
     : 'tree'
   return {
     key: `saved:${p.id}`,
     group,
     name: p.name,
     subtitle: `${p.kindLabel} · ${fmt.format(p.triangles)} 面${hasTex ? ' · 含自定义贴图' : ''}`,
-    icon: p.scope === 'ai' ? '✦' : (treeSpec?.kind === 'bamboo' ? '🎋' : treeSpec?.kind === 'lotus' ? '🪷' : '🌳'),
+    icon: p.scope === 'ai' ? '✦' : (treeSpec?.kind === 'bamboo' ? '🎋' : treeSpec?.kind === 'lotus' ? '🪷' : treeSpec?.kind === 'botanical' ? '🌱' : '🌳'),
     thumb: p.thumbnail || undefined,
     create: () => p.scope === 'ai'
       ? createAiItem((p as SavedPreset<AiSceneSpec>).payload, { name: p.name })
@@ -1577,7 +1594,7 @@ function buildPaletteEntries(tab: PaletteTab): PaletteEntry[] {
 
   if (tab === 'mine') {
     for (const p of savedPresets) {
-      entries.push(savedPresetToEntry(p, `★ 树木/AI 预设库（${savedPresets.length}）`))
+      entries.push(savedPresetToEntry(p, `★ 树木 / 石头 / AI 预设库（${savedPresets.length}）`))
     }
     const overriddenTreeIds = treeDefaults.listIds()
     for (const id of overriddenTreeIds) {
@@ -1634,7 +1651,7 @@ function buildPaletteEntries(tab: PaletteTab): PaletteEntry[] {
   }
 
   if (tab === 'trees') {
-    const savedTrees = savedPresets.filter(p => p.scope === 'ai' || !isLowPlantKind(p.kind, p.scope === 'tree' ? (p as SavedPreset<TreeSpec>).payload : undefined))
+    const savedTrees = savedPresets.filter(p => p.scope !== 'rock' && (p.scope === 'ai' || !isLowPlantKind(p.kind, p.scope === 'tree' ? (p as SavedPreset<TreeSpec>).payload : undefined)))
     for (const p of savedTrees) {
       entries.push(savedPresetToEntry(p, `★ 我的树木预设（${savedTrees.length}）`))
     }
@@ -1727,6 +1744,10 @@ function buildPaletteEntries(tab: PaletteTab): PaletteEntry[] {
   }
 
   // rocks tab
+  const savedRocks = savedPresets.filter(p => p.scope === 'rock')
+  for (const p of savedRocks) {
+    entries.push(savedPresetToEntry(p, `★ 我的石头预设（${savedRocks.length}）`))
+  }
   for (const id of polyCRockPresetIds) {
     const meta = polyCRockPresets[id]
     entries.push({

@@ -35,12 +35,14 @@ export function createHiddenShowcaseStore(options: HiddenShowcaseStoreOptions): 
   const fetcher = options.fetcher ?? (typeof fetch === 'function' ? fetch.bind(globalThis) : undefined)
 
   const hidden = new Set<string>()
+  // Preserve IDs belonging to other workbenches (e.g. Rock Studio vs AI Studio) sharing `/api/hidden-showcases`!
+  let foreignIds: string[] = []
   let mode: StorageMode = 'local'
   const listeners = new Set<() => void>()
 
   const notify = () => { for (const fn of listeners) fn() }
 
-  const parseList = (raw: unknown): string[] => {
+  const extractRawArray = (raw: unknown): string[] => {
     const arr = Array.isArray(raw)
       ? raw
       : (raw && typeof raw === 'object' && Array.isArray((raw as { hiddenIds?: unknown }).hiddenIds)
@@ -51,7 +53,20 @@ export function createHiddenShowcaseStore(options: HiddenShowcaseStoreOptions): 
     for (const item of arr) {
       if (typeof item !== 'string') continue
       const id = item.trim()
-      if (!validSet.has(id) || seen.has(id)) continue
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      out.push(id)
+    }
+    return out
+  }
+
+  const parseList = (raw: unknown): string[] => extractRawArray(raw).filter(id => validSet.has(id))
+
+  const mergeWithForeign = (ids: readonly string[]): string[] => {
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const id of [...foreignIds, ...ids]) {
+      if (!id || seen.has(id)) continue
       seen.add(id)
       out.push(id)
     }
@@ -84,7 +99,7 @@ export function createHiddenShowcaseStore(options: HiddenShowcaseStoreOptions): 
       const resp = await fetcher(apiUrl, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schemaVersion: 1, hiddenIds: [...ids] }),
+        body: JSON.stringify({ schemaVersion: 1, hiddenIds: mergeWithForeign(ids) }),
       })
       if (resp.ok) {
         mode = 'file'
@@ -145,7 +160,9 @@ export function createHiddenShowcaseStore(options: HiddenShowcaseStoreOptions): 
       const doc = (await resp.json()) as { persisted?: boolean; hiddenIds?: unknown }
       mode = 'file'
       if (doc.persisted) {
-        const nextIds = parseList(doc.hiddenIds)
+        const allRemote = extractRawArray(doc.hiddenIds)
+        foreignIds = allRemote.filter(id => !validSet.has(id))
+        const nextIds = allRemote.filter(id => validSet.has(id))
         const prevSnap = JSON.stringify([...hidden])
         hidden.clear()
         for (const id of nextIds) hidden.add(id)

@@ -10,6 +10,16 @@ export const MCP_SERVER_INFO = {
   version: '1.0.0',
 }
 
+export const MCP_SERVER_INSTRUCTIONS = [
+  'MANDATORY ASSET PIPELINE (Hard Gates G0-G5): Whenever creating, replicating, or upgrading stylized 3D plants, trees, shrubs, flowers, grasses, groundcovers, rocks, or diorama scenes in Vegetation Studio, activate and strictly enforce global skill `vegetation-studio-asset-pipeline` (`~/.gemini/config/skills/vegetation-studio-asset-pipeline/SKILL.md`):',
+  '- G0 Topology Match: Do NOT shoehorn incompatible legacy presets by tweaking sliders when geometry topology differs.',
+  '- G1 3-View Blueprint: For single-view references, generate/inspect multi-view turnarounds before writing geometry or calling MCP mutations; get plan approval for batch (>=3) assets.',
+  '- G2 Benchmark Sign-off: For batch (>=3) assets, perfect 1-3 representative benchmarks first and obtain user sign-off before rolling out the rest.',
+  '- G3 Zero-Halo 512 Textures: Extract 512x512 RGBA textures with distance-transform RGB dilation and visually audit on split light/dark backdrops; respect inkAspect.',
+  '- G4 Visual Multi-View / Cross-Engine Loop: Inspect Hero 3/4 + Top renders (and Blender Cycles reload for Route C2 rocks) via read_file before delivery.',
+  '- G5 Contract & Live Verification: Pass tsc/vitest/build, back up & restore user data on desktop packaging, and visually verify live studio_screenshot output.',
+].join('\n')
+
 export const MCP_TOOLS = [
   {
     name: 'studio_status',
@@ -721,6 +731,7 @@ export async function handleMcpJsonRpc(msg, bridgeCall) {
           protocolVersion: requested,
           capabilities: { tools: { listChanged: false } },
           serverInfo: MCP_SERVER_INFO,
+          instructions: MCP_SERVER_INSTRUCTIONS,
         },
       }
     }

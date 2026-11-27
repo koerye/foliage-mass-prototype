@@ -330,13 +330,13 @@ export function defaultPolyCRockSpec(
     version: 1,
     preset,
     name: meta.name,
-    mode: 'shallow-detail',
+    mode: preset === 'terraced-moss-bluff-c2' ? 'photocraft-pbr' : 'shallow-detail',
     seed: meta.canonicalSeed,
     shoulderDepth: 1.0,
     bevelScale: 1.0,
     notchDepth: 1.0,
     strataStrength: 1.0,
-    baseColor: preset === 'terraced-moss-bluff-c2' ? '#c69f7b' : '#caa57c',
+    baseColor: preset === 'terraced-moss-bluff-c2' ? '#cfa87d' : '#caa57c',
     ...overrides,
   }
 }
@@ -347,7 +347,13 @@ export function parsePolyCRockSpec(raw: unknown): PolyCRockSpec {
     ? (o.preset as PolyCsgPresetId)
     : 'sandstone-ledge-c2'
   const d = defaultPolyCRockSpec(preset)
-  const mode: PolyPbrMode = o.mode === 'baseline' ? 'baseline' : 'shallow-detail'
+  const mode: PolyPbrMode = o.mode === 'baseline'
+    ? 'baseline'
+    : o.mode === 'photocraft-pbr'
+      ? 'photocraft-pbr'
+      : o.mode === 'shallow-detail'
+        ? 'shallow-detail'
+        : d.mode
   return {
     version: 1,
     preset,

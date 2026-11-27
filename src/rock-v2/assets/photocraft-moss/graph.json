@@ -1,0 +1,525 @@
+{
+  "name": "stylized_terrace_velvet_moss_v3",
+  "seed": 3207,
+  "resolution": 1024,
+  "exposed_params": {
+    "moss_normal_strength": {
+      "description": "Soft painterly velvet tuft normal relief depth",
+      "type": "float",
+      "value": 2.1,
+      "min": 0.6,
+      "max": 4.0,
+      "bindings": [
+        {
+          "node_id": "normal",
+          "field": "strength",
+          "scale": 1.0,
+          "bias": 0.0
+        }
+      ]
+    },
+    "moss_roughness": {
+      "description": "Matte velvet moss base roughness",
+      "type": "float",
+      "value": 0.92,
+      "min": 0.78,
+      "max": 0.97,
+      "bindings": [
+        {
+          "node_id": "roughness_final",
+          "field": "base_roughness",
+          "scale": 1.0,
+          "bias": 0.0
+        }
+      ]
+    },
+    "sunlit_tips": {
+      "description": "Sunlit chartreuse painterly blade-tip catch intensity",
+      "type": "float",
+      "value": 0.42,
+      "min": 0.0,
+      "max": 0.8,
+      "bindings": [
+        {
+          "node_id": "col_with_tips",
+          "field": "opacity",
+          "scale": 1.0,
+          "bias": 0.0
+        }
+      ]
+    }
+  },
+  "nodes": [
+    {
+      "id": "moss_warp_lo",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 4.0,
+        "scale_y": 4.0,
+        "octaves": 2,
+        "persistence": 0.48,
+        "lacunarity": 2.0,
+        "seed": 3201,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "moss_warp_med",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 10.0,
+        "scale_y": 10.0,
+        "octaves": 3,
+        "persistence": 0.5,
+        "lacunarity": 2.0,
+        "seed": 3209,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "pillow_broad_raw",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 4.0,
+        "scale_y": 4.0,
+        "octaves": 2,
+        "persistence": 0.46,
+        "lacunarity": 2.0,
+        "seed": 3217,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "pillow_med_raw",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 8.0,
+        "scale_y": 8.0,
+        "octaves": 2,
+        "persistence": 0.48,
+        "lacunarity": 2.0,
+        "seed": 3225,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "pillow_broad_w",
+      "op": {
+        "op": "directional_warp",
+        "intensity": 0.075,
+        "angle_deg": 32.0
+      },
+      "inputs": {
+        "source": "pillow_broad_raw",
+        "warp": "moss_warp_lo"
+      }
+    },
+    {
+      "id": "pillow_med_w",
+      "op": {
+        "op": "directional_warp",
+        "intensity": 0.06,
+        "angle_deg": -45.0
+      },
+      "inputs": {
+        "source": "pillow_med_raw",
+        "warp": "moss_warp_lo"
+      }
+    },
+    {
+      "id": "pillow_mix",
+      "op": {
+        "op": "blend",
+        "mode": "overlay",
+        "opacity": 0.42
+      },
+      "inputs": {
+        "bg": "pillow_broad_w",
+        "fg": "pillow_med_w"
+      }
+    },
+    {
+      "id": "pillow_base",
+      "op": {
+        "op": "levels",
+        "in_low": 0.08,
+        "in_high": 0.92,
+        "gamma": 1.0,
+        "out_low": 0.28,
+        "out_high": 0.78
+      },
+      "inputs": {
+        "input": "pillow_mix"
+      }
+    },
+    {
+      "id": "stroke_a_raw",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 28.0,
+        "scale_y": 12.0,
+        "octaves": 3,
+        "persistence": 0.52,
+        "lacunarity": 2.0,
+        "seed": 3237,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "stroke_b_raw",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 13.0,
+        "scale_y": 30.0,
+        "octaves": 3,
+        "persistence": 0.52,
+        "lacunarity": 2.0,
+        "seed": 3249,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "stroke_a_w",
+      "op": {
+        "op": "directional_warp",
+        "intensity": 0.055,
+        "angle_deg": 28.0
+      },
+      "inputs": {
+        "source": "stroke_a_raw",
+        "warp": "moss_warp_med"
+      }
+    },
+    {
+      "id": "stroke_b_w",
+      "op": {
+        "op": "directional_warp",
+        "intensity": 0.055,
+        "angle_deg": -62.0
+      },
+      "inputs": {
+        "source": "stroke_b_raw",
+        "warp": "moss_warp_med"
+      }
+    },
+    {
+      "id": "stroke_cross",
+      "op": {
+        "op": "blend",
+        "mode": "overlay",
+        "opacity": 0.58
+      },
+      "inputs": {
+        "bg": "stroke_a_w",
+        "fg": "stroke_b_w"
+      }
+    },
+    {
+      "id": "stroke_painterly",
+      "op": {
+        "op": "slope_blur",
+        "intensity": 0.011,
+        "samples": 10,
+        "mode": "blur"
+      },
+      "inputs": {
+        "slope": "moss_warp_med",
+        "source": "stroke_cross"
+      }
+    },
+    {
+      "id": "blade_fine",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 44.0,
+        "scale_y": 26.0,
+        "octaves": 2,
+        "persistence": 0.5,
+        "lacunarity": 2.0,
+        "seed": 3263,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "blade_fine_w",
+      "op": {
+        "op": "directional_warp",
+        "intensity": 0.032,
+        "angle_deg": 40.0
+      },
+      "inputs": {
+        "source": "blade_fine",
+        "warp": "moss_warp_med"
+      }
+    },
+    {
+      "id": "blade_peaks",
+      "op": {
+        "op": "histogram_scan",
+        "position": 0.32,
+        "contrast": 0.72,
+        "invert_position": false
+      },
+      "inputs": {
+        "input": "blade_fine_w"
+      }
+    },
+    {
+      "id": "h_tufted",
+      "op": {
+        "op": "blend",
+        "mode": "overlay",
+        "opacity": 0.54
+      },
+      "inputs": {
+        "bg": "pillow_base",
+        "fg": "stroke_painterly"
+      }
+    },
+    {
+      "id": "h_velvet",
+      "op": {
+        "op": "blend",
+        "mode": "soft_light",
+        "opacity": 0.24
+      },
+      "inputs": {
+        "bg": "h_tufted",
+        "fg": "blade_fine_w"
+      }
+    },
+    {
+      "id": "final_height",
+      "op": {
+        "op": "levels",
+        "in_low": 0.1,
+        "in_high": 0.9,
+        "gamma": 0.98,
+        "out_low": 0.12,
+        "out_high": 0.9
+      },
+      "inputs": {
+        "input": "h_velvet"
+      }
+    },
+    {
+      "id": "normal",
+      "op": {
+        "op": "height_to_normal",
+        "strength": 2.1,
+        "format": "opengl",
+        "detail_weight": 0.55
+      },
+      "inputs": {
+        "input": "final_height"
+      }
+    },
+    {
+      "id": "ao",
+      "op": {
+        "op": "height_to_ao",
+        "radius": 0.022,
+        "strength": 1.05,
+        "directions": 16,
+        "steps": 10
+      },
+      "inputs": {
+        "input": "h_tufted"
+      }
+    },
+    {
+      "id": "tone_driver",
+      "op": {
+        "op": "blend",
+        "mode": "soft_light",
+        "opacity": 0.65
+      },
+      "inputs": {
+        "bg": "pillow_base",
+        "fg": "stroke_painterly"
+      }
+    },
+    {
+      "id": "moss_grad",
+      "op": {
+        "op": "gradient_map",
+        "stops": [
+          [
+            0.0,
+            [
+              0.24,
+              0.45,
+              0.115,
+              1.0
+            ]
+          ],
+          [
+            0.28,
+            [
+              0.355,
+              0.585,
+              0.148,
+              1.0
+            ]
+          ],
+          [
+            0.55,
+            [
+              0.478,
+              0.705,
+              0.185,
+              1.0
+            ]
+          ],
+          [
+            0.8,
+            [
+              0.605,
+              0.8,
+              0.238,
+              1.0
+            ]
+          ],
+          [
+            1.0,
+            [
+              0.71,
+              0.865,
+              0.3,
+              1.0
+            ]
+          ]
+        ]
+      },
+      "inputs": {
+        "input": "tone_driver"
+      }
+    },
+    {
+      "id": "tip_col",
+      "op": {
+        "op": "constant_color",
+        "rgba": [
+          0.76,
+          0.895,
+          0.345,
+          1.0
+        ]
+      },
+      "inputs": {}
+    },
+    {
+      "id": "tip_mask_high",
+      "op": {
+        "op": "blend",
+        "mode": "multiply",
+        "opacity": 1.0
+      },
+      "inputs": {
+        "bg": "blade_peaks",
+        "fg": "pillow_base"
+      }
+    },
+    {
+      "id": "col_with_tips",
+      "op": {
+        "op": "blend",
+        "mode": "copy",
+        "opacity": 0.42
+      },
+      "inputs": {
+        "bg": "moss_grad",
+        "fg": "tip_col",
+        "mask": "tip_mask_high"
+      }
+    },
+    {
+      "id": "ao_moss_tint",
+      "op": {
+        "op": "gradient_map",
+        "stops": [
+          [
+            0.0,
+            [
+              0.32,
+              0.52,
+              0.22,
+              1.0
+            ]
+          ],
+          [
+            0.64,
+            [
+              0.88,
+              0.94,
+              0.82,
+              1.0
+            ]
+          ],
+          [
+            1.0,
+            [
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          ]
+        ]
+      },
+      "inputs": {
+        "input": "ao"
+      }
+    },
+    {
+      "id": "base_color_final",
+      "op": {
+        "op": "blend",
+        "mode": "multiply",
+        "opacity": 0.28
+      },
+      "inputs": {
+        "bg": "col_with_tips",
+        "fg": "ao_moss_tint"
+      }
+    },
+    {
+      "id": "roughness_final",
+      "op": {
+        "op": "roughness_from_height",
+        "base_roughness": 0.92,
+        "variation": 0.1,
+        "invert": true,
+        "min_roughness": 0.84,
+        "max_roughness": 0.97
+      },
+      "inputs": {
+        "input": "final_height"
+      }
+    },
+    {
+      "id": "metallic_zero",
+      "op": {
+        "op": "constant_gray",
+        "value": 0.0
+      },
+      "inputs": {}
+    }
+  ],
+  "outputs": {
+    "base_color": "base_color_final",
+    "height": "final_height",
+    "normal": "normal",
+    "roughness": "roughness_final",
+    "metallic": "metallic_zero",
+    "ao": "ao",
+    "emissive": null
+  }
+}

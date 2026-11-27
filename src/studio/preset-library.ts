@@ -1,15 +1,14 @@
-// Non-modal right-docked Preset Library drawer with live 3D hover preview,
+// Non-modal right-docked Preset Library drawer with zero-jank click-to-preview,
+// double-click-to-apply-and-close, 1-click revert to pre-browse snapshot,
 // real-time cover thumbnail capture, save/overwrite/rename/delete, and bundle import/export.
 import './presets.css'
-import type { AiSceneSpec } from '../ai/scene'
-import type { TreeKind, TreeSpec } from '../tree/spec'
 import type { LightingPreset } from '../viewport'
-import type { PresetScope, PresetStore, SavedPreset } from './preset-store'
+import type { PresetScope, PresetStore, SavedPreset, SavedPresetKind, SavedPresetPayload } from './preset-store'
 import type { SavedTextureMap } from './texture-serialize'
 
 export interface CurrentCapture<T> {
   defaultName: string
-  kind: TreeKind | 'multi'
+  kind: SavedPresetKind
   kindLabel: string
   triangles: number
   lighting: LightingPreset
@@ -30,10 +29,13 @@ export interface ShowcaseOption<T> {
   build: () => T
 }
 
-export interface PresetLibraryHost<T extends TreeSpec | AiSceneSpec, S> {
+export interface PresetLibraryHost<T extends SavedPresetPayload, S> {
   scope: PresetScope
   store: PresetStore
-  /** Optional built-in curated showcases displayed in a dedicated tab with live 3D hover preview. */
+  /** Optional custom tab labels (e.g. '🪨 内置石头' / '★ 我的石头' for Rock Studio). */
+  showcasesTabLabel?: string
+  mineTabLabel?: string
+  /** Optional built-in curated showcases displayed in a dedicated tab with click preview & delete/restore. */
   showcases?: ShowcaseOption<T>[]
   /** Optional set of user-deleted/hidden built-in showcase IDs. */
   getHiddenShowcaseIds?(): ReadonlySet<string>
@@ -90,9 +92,14 @@ export interface PresetLibraryController {
   dispose(): void
 }
 
-export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
+export function mountPresetLibrary<T extends SavedPresetPayload, S>(
   host: PresetLibraryHost<T, S>,
 ): PresetLibraryController {
+  const isRockScope = host.scope === 'rock'
+  const showcasesTabLabel = host.showcasesTabLabel ?? (isRockScope ? '🪨 内置石头' : '✿ 案例库')
+  const mineTabLabel = host.mineTabLabel ?? (isRockScope ? '★ 我的石头' : '★ 我的预设')
+  const fallbackIcon = isRockScope ? '🪨' : '🌿'
+  const showcaseIcon = isRockScope ? '🪨' : '✿'
   const showcases = host.showcases ?? []
   const hasShowcases = showcases.length > 0
   const canDeleteShowcase = Boolean(host.deleteShowcase)
@@ -108,29 +115,25 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
   const drawer = document.createElement('aside')
   drawer.className = 'pl-drawer'
   drawer.id = 'preset-library-drawer'
-  drawer.setAttribute('aria-label', hasShowcases ? '案例库与我的预设库' : '我的预设库与实时预览')
+  drawer.setAttribute('aria-label', hasShowcases ? `${showcasesTabLabel}与${mineTabLabel}（单击预览 · 双击返回）` : `${mineTabLabel}（单击预览 · 双击返回）`)
   drawer.hidden = true
   drawer.innerHTML = `
     <header class="pl-head">
       ${hasShowcases
         ? `<div class="pl-tabs" role="tablist">
-            <button type="button" data-pl-tab="showcases" aria-pressed="false">✿ 案例库 <span class="pl-badge" id="pl-showcase-count">${getVisibleShowcases().length}</span></button>
-            <button type="button" data-pl-tab="mine" aria-pressed="true">★ 我的预设 <span class="pl-badge" id="pl-count">0</span></button>
+            <button type="button" data-pl-tab="showcases" aria-pressed="false">${showcasesTabLabel} <span class="pl-badge" id="pl-showcase-count">${getVisibleShowcases().length}</span></button>
+            <button type="button" data-pl-tab="mine" aria-pressed="true">${mineTabLabel} <span class="pl-badge" id="pl-count">0</span></button>
           </div>`
-        : `<h3>★ 我的预设库 <span class="pl-badge" id="pl-count">0</span></h3>`}
+        : `<h3>${mineTabLabel} <span class="pl-badge" id="pl-count">0</span></h3>`}
       <button type="button" class="pl-close" id="pl-close">收起</button>
     </header>
-    <div class="pl-preview-bar" id="pl-preview-bar" hidden>
-      <span id="pl-preview-text">👁 正在实时预览</span>
-      <span>单击应用 · 移开恢复</span>
-    </div>
     <section class="pl-capture" id="pl-capture-box">
       <div class="pl-thumb-box">
         <img id="pl-cap-img" alt="当前 3D 实时封面">
         <button type="button" class="pl-thumb-refresh" id="pl-cap-refresh" title="按当前 3D 视角重新截取封面">🔄 刷新封面</button>
       </div>
       <div class="pl-capture-form">
-        <input id="pl-cap-name" type="text" maxlength="80" placeholder="输入预设名称（如：风吹老柳 / 夕阳红枫）">
+        <input id="pl-cap-name" type="text" maxlength="80" placeholder="${isRockScope ? '输入石头名称（如：苔藓方巨岩 / 断层砂岩）' : '输入预设名称（如：风吹老柳 / 夕阳红枫）'}">
         <div class="pl-meta-line" id="pl-cap-meta"></div>
         <div class="pl-capture-btns">
           <button type="button" class="primary" id="pl-save-new">★ 保存为新预设</button>
@@ -139,18 +142,23 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
       </div>
     </section>
     <div class="pl-toolbar">
-      <input id="pl-search" class="pl-search" type="search" placeholder="搜索已保存预设…">
-      <label class="pl-hover-toggle" title="鼠标移入卡片时在左侧 3D 视口实时预览模型">
-        <input id="pl-hover-on" type="checkbox" checked>
-        <span>悬停实时 3D 预览</span>
-      </label>
+      <input id="pl-search" class="pl-search" type="search" placeholder="${isRockScope ? '搜索已保存石头…' : '搜索已保存预设…'}">
+      <span class="pl-hint-pill" title="仅在单击卡片时载入并预览，鼠标划过与滚动列表不触发跳动；双击应用并收起面板">单击预览 · 双击返回</span>
     </div>
     <div class="pl-grid-wrap" id="pl-grid-wrap">
       <div class="pl-grid" id="pl-grid"></div>
       <div class="pl-empty" id="pl-empty" hidden>
-        还没有保存的预设。<br>在左侧调好植物后，填个名字点上方「★ 保存为新预设」，即可带 3D 缩略图永久收藏并随时悬停预览。
+        ${isRockScope
+          ? '还没有保存的自定义石头预设。<br>调好造型或切到「💎 路线 C2」后，填个名字点上方「★ 保存为新预设」，即可带 3D 封面收藏、改名、删除并同步到场景组装。'
+          : '还没有保存的预设。<br>在左侧调好植物后，填个名字点上方「★ 保存为新预设」，即可带 3D 缩略图永久收藏并随时单击预览。'}
       </div>
       <div class="pl-restore-bar" id="pl-restore-bar" hidden></div>
+    </div>
+    <div class="pl-preview-bar" id="pl-preview-bar" hidden>
+      <span id="pl-preview-text">👁 当前预设</span>
+      <div class="pl-preview-actions">
+        <button type="button" class="pl-restore-orig" id="pl-restore-orig" title="还原打开预设库前的原模型">↺ 还原</button>
+      </div>
     </div>
     <footer class="pl-foot">
       <div class="pl-foot-storage" id="pl-storage-info"><span class="pl-foot-dot"></span><span>本地预设库</span></div>
@@ -167,6 +175,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
   const showcaseCountEl = drawer.querySelector<HTMLElement>('#pl-showcase-count')
   const previewBar = q('#pl-preview-bar')
   const previewText = q('#pl-preview-text')
+  const restoreOrigBtn = q<HTMLButtonElement>('#pl-restore-orig')
   const captureBox = q('#pl-capture-box')
   const capImg = q<HTMLImageElement>('#pl-cap-img')
   const capName = q<HTMLInputElement>('#pl-cap-name')
@@ -174,7 +183,6 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
   const saveNewBtn = q<HTMLButtonElement>('#pl-save-new')
   const overwriteBtn = q<HTMLButtonElement>('#pl-overwrite-active')
   const searchInput = q<HTMLInputElement>('#pl-search')
-  const hoverCheck = q<HTMLInputElement>('#pl-hover-on')
   const gridWrap = q('#pl-grid-wrap')
   const gridEl = q('#pl-grid')
   const emptyEl = q('#pl-empty')
@@ -186,8 +194,9 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
   let currentTab: PresetLibraryTab = 'mine'
   let activeId: string | undefined
   let activeShowcaseId: string | undefined
-  let previewSnapshot: { state: S } | undefined
-  let previewingId: string | undefined
+  // Pre-browse snapshot captured right before the first click in this drawer session (enables 1-click「↺ 还原」)
+  let openSnapshot: { state: S; activeId?: string; activeShowcaseId?: string } | undefined
+  let lastApplied: { key: string; at: number } | undefined
 
   const showcaseToPreset = (s: ShowcaseOption<T>): SavedPreset<T> => ({
     id: 'showcase:' + s.id,
@@ -203,7 +212,6 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     payload: s.build(),
   })
 
-  let hoverTimer: ReturnType<typeof setTimeout> | undefined
   let renamingId: string | undefined
   let confirmDeleteId: string | undefined
   let confirmTimer: ReturnType<typeof setTimeout> | undefined
@@ -217,61 +225,23 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     confirmDeleteCaseId = undefined
   }
 
+  const clearPreviewBanner = () => {
+    previewBar.hidden = true
+  }
+
   const setTab = (tab: PresetLibraryTab) => {
     const next: PresetLibraryTab = hasShowcases && tab === 'showcases' ? 'showcases' : 'mine'
     if (next !== currentTab) {
-      if (previewSnapshot || hoverTimer !== undefined) endHoverPreview(true)
       clearConfirmTimers()
     }
     currentTab = next
     for (const b of tabBtns) b.setAttribute('aria-pressed', String(b.dataset.plTab === currentTab))
     captureBox.hidden = currentTab === 'showcases'
     searchInput.placeholder = currentTab === 'showcases' ? '搜索内置案例库…' : '搜索已保存预设…'
-    if (currentTab === 'mine' && !drawer.hidden && !previewSnapshot) refreshCapture(false)
+    if (currentTab === 'mine' && !drawer.hidden) refreshCapture(false)
     renderGrid()
   }
   for (const b of tabBtns) b.onclick = () => setTab(b.dataset.plTab as PresetLibraryTab)
-
-  const clearHoverTimer = () => {
-    if (hoverTimer !== undefined) { clearTimeout(hoverTimer); hoverTimer = undefined }
-  }
-
-  const endHoverPreview = (restore: boolean) => {
-    clearHoverTimer()
-    const snap = previewSnapshot
-    previewSnapshot = undefined
-    previewingId = undefined
-    previewBar.hidden = true
-    updateCardClasses()
-    if (restore && snap) host.restoreState(snap.state)
-  }
-
-  const startHoverPreview = (preset: SavedPreset<T>) => {
-    if (!hoverCheck.checked || renamingId) return
-    if (previewingId === preset.id) return
-    clearHoverTimer()
-    hoverTimer = setTimeout(() => {
-      hoverTimer = undefined
-      if (drawer.hidden || !hoverCheck.checked || renamingId) return
-      let live: SavedPreset<T> | undefined
-      if (preset.id.startsWith('showcase:')) {
-        const sid = preset.id.slice('showcase:'.length)
-        const sc = getVisibleShowcases().find(s => s.id === sid)
-        if (!sc) return
-        live = preset
-      } else {
-        // Re-verify user preset still exists in store (prevents ghost preview after delete/rename!)
-        live = host.store.get<T>(preset.id)
-      }
-      if (!live) return
-      if (!previewSnapshot) previewSnapshot = { state: host.snapshotState() }
-      previewingId = live.id
-      previewText.textContent = `👁 正在实时预览：「${live.name}」`
-      previewBar.hidden = false
-      updateCardClasses()
-      host.preview(live)
-    }, 85)
-  }
 
   const updateCardClasses = () => {
     for (const card of gridEl.querySelectorAll<HTMLElement>('.pl-card')) {
@@ -279,16 +249,13 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
       const sid = card.dataset.showcaseId
       if (sid) {
         card.classList.toggle('is-active', sid === activeShowcaseId)
-        card.classList.toggle('is-previewing', 'showcase:' + sid === previewingId)
       } else {
         card.classList.toggle('is-active', Boolean(pid && pid === activeId))
-        card.classList.toggle('is-previewing', Boolean(pid && pid === previewingId))
       }
     }
   }
 
   const refreshCapture = (updateNameIfEmpty = false) => {
-    if (previewSnapshot) endHoverPreview(true)
     const cap = host.capture()
     if (cap.thumbnail) {
       capImg.src = cap.thumbnail
@@ -307,7 +274,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     saveNewBtn.disabled = cap.canSave === false
     const activePreset = activeId ? host.store.get<T>(activeId) : undefined
     overwriteBtn.hidden = !activePreset || cap.canSave === false
-    if (activePreset) overwriteBtn.textContent = `覆盖「${activePreset.name.slice(0, 10)}」`
+    if (activePreset) overwriteBtn.textContent = `覆盖「${activePreset.name.slice(0, 8)}」`
   }
 
   const updateStorageBadge = () => {
@@ -354,11 +321,10 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         const sub = esc(s.subtitle)
         const tag = esc(s.tag)
         const activeCls = s.id === activeShowcaseId ? 'is-active' : ''
-        const prevCls = 'showcase:' + s.id === previewingId ? 'is-previewing' : ''
         const isConfirmDel = confirmDeleteCaseId === s.id
-        return `<article class="pl-card ${activeCls} ${prevCls}" data-showcase-id="${sid}" title="单击加载全参数案例；悬停实时 3D 预览">
+        return `<article class="pl-card ${activeCls}" data-showcase-id="${sid}" title="单击预览并载入；双击应用并收起">
           <div class="pl-card-thumb">
-            <div class="pl-card-noimg">✿</div>
+            <div class="pl-card-noimg">${showcaseIcon}</div>
             ${s.thumbnail ? `<img src="${esc(s.thumbnail)}" alt="${name}" loading="lazy" style="position:absolute;inset:0" onerror="this.remove()">` : ''}
             <span class="pl-card-tag">${tag}</span>
           </div>
@@ -366,16 +332,16 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
             <div class="pl-card-title">${name}</div>
             <div class="pl-card-sub is-multi">${sub}</div>
             <div class="pl-card-actions${canDeleteShowcase ? ' is-case-3' : ''}">
-              <button type="button" data-act="load-case" data-id="${sid}" title="载入此案例并可任意调参">载入编辑</button>
+              <button type="button" data-act="load-case" data-id="${sid}" title="载入并可任意调参">载入编辑</button>
               <button type="button" data-act="fork-case" data-id="${sid}" title="载入并收藏一份到我的预设库">★ 收藏</button>
-              ${canDeleteShowcase ? `<button type="button" class="is-danger ${isConfirmDel ? 'is-confirm' : ''}" data-act="delete-case" data-id="${sid}" title="从案例库删除此素材">${isConfirmDel ? '确认删' : '删除'}</button>` : ''}
+              ${canDeleteShowcase ? `<button type="button" class="is-danger ${isConfirmDel ? 'is-confirm' : ''}" data-act="delete-case" data-id="${sid}" title="从内置列表删除/隐藏此预设（随时可恢复）">${isConfirmDel ? '确认删' : '删除'}</button>` : ''}
             </div>
           </div>
         </article>`
       }).join('')
       if (hiddenCaseCount > 0 && host.restoreShowcases) {
         restoreBar.hidden = false
-        restoreBar.innerHTML = `<span>已删除 ${hiddenCaseCount} 个内置案例</span><button type="button" class="pl-restore-btn" data-act="restore-cases">↺ 恢复已删案例</button>`
+        restoreBar.innerHTML = `<span>已删除 ${hiddenCaseCount} 个内置预设</span><button type="button" class="pl-restore-btn" data-act="restore-cases">↺ 恢复已删预设</button>`
       }
       return
     }
@@ -387,7 +353,9 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     if (!filtered.length) {
       emptyEl.innerHTML = all.length
         ? '没有匹配的预设，试试清空搜索词。'
-        : '还没有保存的预设。<br>在左侧调好植物后，填个名字点上方「★ 保存为新预设」，即可带 3D 缩略图永久收藏并随时悬停预览。'
+        : (isRockScope
+            ? '还没有保存的自定义石头预设。<br>调好造型或切到「💎 路线 C2」后，填个名字点上方「★ 保存为新预设」，即可带 3D 封面收藏、改名、删除并同步到场景组装。'
+            : '还没有保存的预设。<br>在左侧调好植物后，填个名字点上方「★ 保存为新预设」，即可带 3D 缩略图永久收藏并随时单击预览。')
       gridEl.innerHTML = ''
       return
     }
@@ -397,9 +365,9 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
       const kind = esc(p.kindLabel)
       const isRenaming = renamingId === p.id
       const isConfirmDel = confirmDeleteId === p.id
-      return `<article class="pl-card ${p.id === activeId ? 'is-active' : ''} ${p.id === previewingId ? 'is-previewing' : ''}" data-preset-id="${id}" title="单击应用预设；悬停可实时预览">
+      return `<article class="pl-card ${p.id === activeId ? 'is-active' : ''}" data-preset-id="${id}" title="单击预览并载入预设；双击应用并收起">
         <div class="pl-card-thumb">
-          ${p.thumbnail ? `<img src="${p.thumbnail}" alt="${name}" loading="lazy">` : '<div class="pl-card-noimg">🌿</div>'}
+          ${p.thumbnail ? `<img src="${p.thumbnail}" alt="${name}" loading="lazy">` : `<div class="pl-card-noimg">${fallbackIcon}</div>`}
           <span class="pl-card-tag">${kind}</span>
         </div>
         <div class="pl-card-body">
@@ -449,7 +417,6 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
   }
 
   const saveNew = async () => {
-    if (previewSnapshot) endHoverPreview(true)
     const cap = host.capture()
     if (cap.canSave === false) {
       host.message(cap.emptyReason || '当前没有可保存的内容', true)
@@ -470,6 +437,8 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         ...(cap.textures ? { textures: cap.textures } : {}),
       })
       activeId = saved.id
+      openSnapshot = undefined
+      clearPreviewBanner()
       host.onActiveChange?.(activeId)
       refreshCapture(false)
       renderGrid()
@@ -482,7 +451,6 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
   }
 
   const overwritePreset = async (id: string, customName?: string) => {
-    if (previewSnapshot) endHoverPreview(true)
     const cap = host.capture()
     if (cap.canSave === false) {
       host.message(cap.emptyReason || '当前画布为空，无法覆盖预设', true)
@@ -500,6 +468,8 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         textures: cap.textures,
       })
       activeId = updated.id
+      openSnapshot = undefined
+      clearPreviewBanner()
       host.onActiveChange?.(activeId)
       refreshCapture(false)
       renderGrid()
@@ -509,11 +479,37 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     }
   }
 
+  const ensurePreBrowseSnapshot = () => {
+    if (!openSnapshot) {
+      openSnapshot = { state: host.snapshotState(), activeId, activeShowcaseId }
+    }
+  }
+
+  const showSelectionBanner = (label: string) => {
+    previewText.textContent = `👁 当前预览：「${label}」`
+    restoreOrigBtn.hidden = !openSnapshot
+    previewBar.hidden = false
+  }
+
   // ---- DOM events ----------------------------------------------------------
   q('#pl-close').onclick = () => controller.close()
   q('#pl-cap-refresh').onclick = () => {
     refreshCapture(false)
     host.message('已按当前 3D 视角刷新封面')
+  }
+  restoreOrigBtn.onclick = () => {
+    const snap = openSnapshot
+    openSnapshot = undefined
+    lastApplied = undefined
+    clearPreviewBanner()
+    if (!snap) return
+    activeId = snap.activeId
+    activeShowcaseId = snap.activeShowcaseId
+    host.restoreState(snap.state)
+    host.onActiveChange?.(activeId)
+    refreshCapture(false)
+    updateCardClasses()
+    host.message('已还原打开预设库前的原模型')
   }
   saveNewBtn.onclick = () => { void saveNew() }
   overwriteBtn.onclick = () => {
@@ -526,26 +522,7 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     }
   }
   searchInput.oninput = () => renderGrid()
-  hoverCheck.onchange = () => {
-    if (!hoverCheck.checked && previewSnapshot) endHoverPreview(true)
-  }
 
-  gridEl.addEventListener('pointerover', e => {
-    const target = e.target as HTMLElement
-    if (target.closest('button, input')) return
-    const card = target.closest<HTMLElement>('.pl-card')
-    if (card?.dataset.showcaseId) {
-      const sc = getVisibleShowcases().find(s => s.id === card.dataset.showcaseId)
-      if (sc) startHoverPreview(showcaseToPreset(sc))
-      return
-    }
-    if (!card?.dataset.presetId) return
-    const preset = host.store.get<T>(card.dataset.presetId)
-    if (preset) startHoverPreview(preset)
-  })
-  gridWrap.addEventListener('pointerleave', () => {
-    if (previewSnapshot || hoverTimer !== undefined) endHoverPreview(true)
-  })
   gridWrap.addEventListener('click', async e => {
     const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-act="restore-cases"]')
     if (!btn || !host.restoreShowcases) return
@@ -563,15 +540,41 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
   })
 
   const applyShowcaseCard = (sc: ShowcaseOption<T>) => {
-    endHoverPreview(false)
+    const key = `showcase:${sc.id}`
+    if (lastApplied?.key === key && activeShowcaseId === sc.id && performance.now() - lastApplied.at < 450) {
+      return
+    }
+    ensurePreBrowseSnapshot()
     activeId = undefined
     activeShowcaseId = sc.id
+    lastApplied = { key, at: performance.now() }
     host.onActiveChange?.(undefined)
     if (host.applyShowcase) host.applyShowcase(sc)
     else host.apply(showcaseToPreset(sc))
     capName.value = sc.name
     refreshCapture(false)
-    renderGrid()
+    // Pure CSS highlight toggle (0 DOM rebuild, 0 scroll/layout jump!)
+    updateCardClasses()
+    showSelectionBanner(sc.name)
+  }
+
+  const applyPresetCard = (preset: SavedPreset<T>) => {
+    const key = `preset:${preset.id}`
+    if (lastApplied?.key === key && activeId === preset.id && performance.now() - lastApplied.at < 450) {
+      return
+    }
+    ensurePreBrowseSnapshot()
+    activeId = preset.id
+    activeShowcaseId = undefined
+    lastApplied = { key, at: performance.now() }
+    host.apply(preset)
+    host.onActiveChange?.(activeId)
+    capName.value = preset.name
+    refreshCapture(false)
+    // Pure CSS highlight toggle (0 DOM rebuild, 0 scroll/layout jump!)
+    updateCardClasses()
+    showSelectionBanner(preset.name)
+    host.message(`已预览并载入预设「${preset.name}」`)
   }
 
   gridEl.addEventListener('click', async e => {
@@ -595,7 +598,6 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         }
       } else if (act === 'delete-case' && host.deleteShowcase) {
         if (confirmDeleteCaseId !== id) {
-          endHoverPreview(true)
           confirmDeleteCaseId = id
           if (confirmCaseTimer !== undefined) clearTimeout(confirmCaseTimer)
           confirmCaseTimer = setTimeout(() => { confirmDeleteCaseId = undefined; confirmCaseTimer = undefined; renderGrid() }, 3200)
@@ -603,7 +605,6 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         } else {
           if (confirmCaseTimer !== undefined) { clearTimeout(confirmCaseTimer); confirmCaseTimer = undefined }
           confirmDeleteCaseId = undefined
-          if (previewingId === 'showcase:' + id || hoverTimer !== undefined) endHoverPreview(true)
           const sc = showcases.find(s => s.id === id)
           if (sc) {
             try {
@@ -624,13 +625,11 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
           const inp = gridEl.querySelector<HTMLInputElement>(`[data-rename-input="${CSS.escape(id)}"]`)
           await commitRename(id, inp?.value ?? '')
         } else {
-          if (previewSnapshot) endHoverPreview(true)
           renamingId = id
           renderGrid()
         }
       } else if (act === 'delete') {
         if (confirmDeleteId !== id) {
-          endHoverPreview(true)
           confirmDeleteId = id
           if (confirmTimer) clearTimeout(confirmTimer)
           confirmTimer = setTimeout(() => { confirmDeleteId = undefined; renderGrid() }, 3200)
@@ -638,7 +637,6 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
         } else {
           if (confirmTimer) clearTimeout(confirmTimer)
           confirmDeleteId = undefined
-          if (previewingId === id || hoverTimer !== undefined) endHoverPreview(true)
           const item = host.store.get<T>(id)
           try {
             await host.store.remove(id)
@@ -666,15 +664,30 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
     if (!card?.dataset.presetId) return
     const preset = host.store.get<T>(card.dataset.presetId)
     if (!preset) return
-    endHoverPreview(false)
-    activeId = preset.id
-    activeShowcaseId = undefined
-    host.apply(preset)
-    host.onActiveChange?.(activeId)
-    capName.value = preset.name
-    refreshCapture(false)
-    renderGrid()
-    host.message(`已应用预设「${preset.name}」`)
+    applyPresetCard(preset)
+  })
+
+  gridEl.addEventListener('dblclick', e => {
+    const target = e.target as HTMLElement
+    if (target.closest('input') || target.closest('button:not([data-act="load-case"])')) return
+    const card = target.closest<HTMLElement>('.pl-card')
+    if (!card) return
+    e.preventDefault()
+    if (card.dataset.showcaseId) {
+      const sc = getVisibleShowcases().find(s => s.id === card.dataset.showcaseId)
+      if (sc) {
+        applyShowcaseCard(sc)
+        controller.close()
+      }
+      return
+    }
+    if (card.dataset.presetId) {
+      const preset = host.store.get<T>(card.dataset.presetId)
+      if (preset) {
+        applyPresetCard(preset)
+        controller.close()
+      }
+    }
   })
 
   q('#pl-export-btn').onclick = () => {
@@ -720,19 +733,24 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
 
   const controller: PresetLibraryController = {
     open(focusSaveInput = false, tab?: PresetLibraryTab) {
+      openSnapshot = undefined
+      lastApplied = undefined
+      clearPreviewBanner()
       drawer.hidden = false
       document.body.classList.add('pl-open')
       setTab(tab ?? (focusSaveInput ? 'mine' : currentTab))
       if (currentTab === 'mine') refreshCapture(true)
       renderGrid()
-      requestAnimationFrame(() => { if (!drawer.hidden && !previewSnapshot && currentTab === 'mine') refreshCapture(false) })
+      requestAnimationFrame(() => { if (!drawer.hidden && currentTab === 'mine') refreshCapture(false) })
       if (focusSaveInput && currentTab === 'mine') {
         capName.focus()
         capName.select()
       }
     },
     close() {
-      if (previewSnapshot || hoverTimer !== undefined) endHoverPreview(true)
+      openSnapshot = undefined
+      lastApplied = undefined
+      clearPreviewBanner()
       renamingId = undefined
       clearConfirmTimers()
       drawer.hidden = true
@@ -744,22 +762,22 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
       else controller.close()
     },
     isOpen: () => !drawer.hidden,
-    isPreviewing: () => Boolean(previewSnapshot || previewingId),
+    isPreviewing: () => false,
     getActiveId: () => activeId,
     setActiveId(id) {
       activeId = id
       if (id) activeShowcaseId = undefined
       if (!drawer.hidden) {
         if (currentTab === 'mine') refreshCapture(false)
-        renderGrid()
+        updateCardClasses()
       }
     },
     setActiveShowcaseId(id) {
       activeShowcaseId = id
       if (id) activeId = undefined
-      if (!drawer.hidden) renderGrid()
+      if (!drawer.hidden) updateCardClasses()
     },
-    refreshCapture: (syncName = false) => { if (!drawer.hidden && !previewSnapshot && currentTab === 'mine') refreshCapture(syncName) },
+    refreshCapture: (syncName = false) => { if (!drawer.hidden && currentTab === 'mine') refreshCapture(syncName) },
     refreshShowcases() {
       if (activeShowcaseId && host.getHiddenShowcaseIds?.().has(activeShowcaseId)) {
         activeShowcaseId = undefined
@@ -767,7 +785,8 @@ export function mountPresetLibrary<T extends TreeSpec | AiSceneSpec, S>(
       renderGrid()
     },
     dispose() {
-      endHoverPreview(false)
+      openSnapshot = undefined
+      lastApplied = undefined
       clearConfirmTimers()
       unsub()
       window.removeEventListener('keydown', onKeyDown)

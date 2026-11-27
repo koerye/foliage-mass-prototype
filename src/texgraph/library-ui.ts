@@ -201,11 +201,11 @@ export function mountTextureLibrary<S>(host: TextureLibraryHost<S>): TextureLibr
         <span class="tl-hover-toggle" title="仅在单击卡片时载入并预览贴图，杜绝鼠标划过卡顿；双击直接应用并返回">单击预览 · 双击返回</span>
       </div>
     </div>
+    <div class="tl-scroll"><div class="tl-grid" id="tl-grid"></div></div>
     <div class="tl-preview-bar" id="tl-preview-bar" hidden>
       <span id="tl-preview-text">👁 已预览贴图</span>
       <span>单击切换 · 双击应用并返回</span>
     </div>
-    <div class="tl-scroll"><div class="tl-grid" id="tl-grid"></div></div>
     <footer class="tl-foot">
       <div class="tl-foot-btns">
         <input id="tl-import-file" type="file" accept=".json,application/json" hidden>

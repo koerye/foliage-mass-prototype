@@ -1,5 +1,7 @@
 ﻿// Unified tree specification (schema v2) shared by broadleaf and conifer.
 import { botanicalTextureKeys, type BotanicalTextureKey } from './botanical-textures'
+import { botanicalLayouts, type BotanicalLayout } from './botanical-layout'
+export { botanicalLayouts, botanicalLayoutLabels, type BotanicalLayout } from './botanical-layout'
 import { defaultLeafParams, parseLeafParams, type LeafParams } from '../broadleaf/leaves'
 import {
   defaultLeafNormalEdit, parseLeafNormalEdit,
@@ -392,6 +394,9 @@ export interface BotanicalSpec {
   count: number          // primary fronds / blades / leaves / clovers
   spread: number         // horizontal footprint radius (m)
   height: number         // overall plant height (m)
+  heightJitter: number   // 0..1 vertical height stratification & anti-overlap stagger across leaves
+  layout: BotanicalLayout // horizontal distribution pattern (phyllotaxis / ring / scatter / clumps / fan)
+  lateralJitter: number  // 0..1 horizontal left-right stagger, tangential offset & XY separation
   leafSize: number       // single leaf / frond / floret / rosette size (m)
   leafAspect: number     // blade width / length aspect ratio
   arch: number           // outward curvature / parabolic arch lift
@@ -483,6 +488,9 @@ export const defaultBotanical: BotanicalSpec = {
   count: 44,
   spread: 0.45,
   height: 0.72,
+  heightJitter: 0.36,
+  layout: 'phyllotaxis',
+  lateralJitter: 0.46,
   leafSize: 0.29,
   leafAspect: 1.0,
   arch: 0.28,
@@ -977,7 +985,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'fern-clump', leafTexture: 'fern-frond-a',
-      count: 24, spread: .09, height: .86, leafSize: 1.00, leafAspect: .90,
+      count: 24, spread: .09, height: .86, heightJitter: .40, layout: 'ring', lateralJitter: .44, leafSize: 1.00, leafAspect: .90,
       arch: .84, droop: .52, cup: .16, stemCount: 0, flowerClusters: 0, flowerSize: 0,
       tintInner: '#6ca872', tintOuter: '#fffef4', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#2b6a24', aoStrength: .38, alphaCutoff: .40,
@@ -990,7 +998,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'blade-clump', leafTexture: 'broad-strap-leaf',
-      count: 18, spread: .08, height: .82, leafSize: .96, leafAspect: .72,
+      count: 18, spread: .08, height: .82, heightJitter: .46, layout: 'phyllotaxis', lateralJitter: .54, leafSize: .96, leafAspect: .72,
       arch: .84, droop: .54, cup: .22, stemCount: 0, flowerClusters: 0, flowerSize: 0,
       tintInner: '#68a872', tintOuter: '#fffef6', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#2b6a24', aoStrength: .36, alphaCutoff: .40,
@@ -1003,7 +1011,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'fern-clump', leafTexture: 'fern-frond-b',
-      count: 20, spread: .08, height: .74, leafSize: .88, leafAspect: .90,
+      count: 20, spread: .08, height: .74, heightJitter: .40, layout: 'ring', lateralJitter: .44, leafSize: .88, leafAspect: .90,
       arch: .82, droop: .48, cup: .14, stemCount: 0, flowerClusters: 0, flowerSize: 0,
       tintInner: '#74b278', tintOuter: '#ffffff', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#367c2c', aoStrength: .36, alphaCutoff: .40,
@@ -1016,7 +1024,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'rosette-shrub', leafTexture: 'heart-leaf-a',
-      count: 44, spread: .45, height: .72, leafSize: .29, leafAspect: 1.0,
+      count: 44, spread: .45, height: .72, heightJitter: .36, layout: 'phyllotaxis', lateralJitter: .42, leafSize: .29, leafAspect: 1.0,
       arch: .28, droop: .16, cup: .17, stemCount: 0, flowerClusters: 0, flowerSize: 0,
       tintInner: '#4c8858', tintOuter: '#ffffff', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#2b6a24', aoStrength: .56, alphaCutoff: .42,
@@ -1029,7 +1037,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'rosette-shrub', leafTexture: 'heart-leaf-b',
-      count: 46, spread: .35, height: .54, leafSize: .22, leafAspect: 1.0,
+      count: 46, spread: .35, height: .54, heightJitter: .36, layout: 'phyllotaxis', lateralJitter: .42, leafSize: .22, leafAspect: 1.0,
       arch: .26, droop: .16, cup: .16, stemCount: 0, flowerClusters: 0, flowerSize: 0,
       tintInner: '#5e9e64', tintOuter: '#ffffff', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#327428', aoStrength: .48, alphaCutoff: .42,
@@ -1042,7 +1050,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'blade-clump', leafTexture: 'grass-blade-deep',
-      count: 20, spread: .06, height: .58, leafSize: .72, leafAspect: 1.04,
+      count: 20, spread: .06, height: .58, heightJitter: .40, layout: 'phyllotaxis', lateralJitter: .48, leafSize: .72, leafAspect: 1.04,
       arch: .76, droop: .44, cup: .18, stemCount: 0, flowerClusters: 0, flowerSize: 0,
       tintInner: '#6eae94', tintOuter: '#f4fff8', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#1f5e3b', aoStrength: .34, alphaCutoff: .40,
@@ -1055,7 +1063,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'blade-clump', leafTexture: 'grass-blade-bright',
-      count: 25, spread: .08, height: .50, leafSize: .64, leafAspect: .80,
+      count: 25, spread: .08, height: .50, heightJitter: .40, layout: 'phyllotaxis', lateralJitter: .48, leafSize: .64, leafAspect: .80,
       arch: .72, droop: .36, cup: .16, stemCount: 0, flowerClusters: 0, flowerSize: 0,
       tintInner: '#6ca86e', tintOuter: '#ffffff', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#2b6e28', aoStrength: .34, alphaCutoff: .40,
@@ -1068,7 +1076,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'blade-clump', leafTexture: 'grass-blade-bright',
-      count: 22, spread: .06, height: .66, leafSize: .84, leafAspect: .72,
+      count: 22, spread: .06, height: .66, heightJitter: .42, layout: 'phyllotaxis', lateralJitter: .50, leafSize: .84, leafAspect: .72,
       arch: .92, droop: .62, cup: .16, stemCount: 0, flowerClusters: 0, flowerSize: 0,
       tintInner: '#74ae66', tintOuter: '#fffbe4', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#367424', aoStrength: .34, alphaCutoff: .40,
@@ -1081,7 +1089,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'blade-clump', leafTexture: 'broad-strap-leaf',
-      count: 12, spread: .05, height: .32, leafSize: .40, leafAspect: .76,
+      count: 12, spread: .05, height: .32, heightJitter: .44, layout: 'phyllotaxis', lateralJitter: .46, leafSize: .40, leafAspect: .76,
       arch: .74, droop: .42, cup: .20, stemCount: 0, flowerClusters: 0, flowerSize: 0,
       tintInner: '#78b472', tintOuter: '#fffef2', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#347a28', aoStrength: .30, alphaCutoff: .40,
@@ -1094,7 +1102,7 @@ export const presets = {
     branches: { ...stubBranches, count: 11 },
     botanical: {
       mode: 'hydrangea-shrub', leafTexture: 'hydrangea-leaf', flowerTexture: 'hydrangea-floret-2x2',
-      count: 32, spread: .72, height: .56, leafSize: .25, leafAspect: .76,
+      count: 32, spread: .72, height: .56, heightJitter: .36, layout: 'phyllotaxis', lateralJitter: .42, leafSize: .25, leafAspect: .76,
       arch: .26, droop: .16, cup: .14, stemCount: 11, flowerClusters: 6, flowerSize: .14,
       tintInner: '#82ac90', tintOuter: '#ffffff', flowerTintInner: '#bac4f8', flowerTintOuter: '#ffffff',
       stemTint: '#295c22', aoStrength: .44, alphaCutoff: .42,
@@ -1107,7 +1115,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'cosmos-shrub', leafTexture: 'small-ovate-leaf', flowerTexture: 'pink-cosmos-2x2',
-      count: 96, spread: .46, height: .72, leafSize: .17, leafAspect: .94,
+      count: 96, spread: .46, height: .72, heightJitter: .36, layout: 'phyllotaxis', lateralJitter: .42, leafSize: .17, leafAspect: .94,
       arch: .26, droop: .14, cup: .14, stemCount: 13, flowerClusters: 22, flowerSize: .13,
       tintInner: '#629c6c', tintOuter: '#ffffff', flowerTintInner: '#f4c8e8', flowerTintOuter: '#ffffff',
       stemTint: '#3b6a2c', aoStrength: .42, alphaCutoff: .42,
@@ -1120,7 +1128,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'flower-groundcover', leafTexture: 'small-ovate-leaf', flowerTexture: 'violet-wildflower-2x2',
-      count: 118, spread: .50, height: .24, leafSize: .15, leafAspect: .92,
+      count: 118, spread: .50, height: .24, heightJitter: .36, layout: 'scatter', lateralJitter: .48, leafSize: .15, leafAspect: .92,
       arch: .20, droop: .12, cup: .14, stemCount: 18, flowerClusters: 34, flowerSize: .105,
       tintInner: '#549262', tintOuter: '#ffffff', flowerTintInner: '#c8ccff', flowerTintOuter: '#ffffff',
       stemTint: '#2c6c28', aoStrength: .44, alphaCutoff: .42,
@@ -1133,7 +1141,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'clover-groundcover', leafTexture: 'clover-shamrock-2x2',
-      count: 108, spread: .64, height: .13, leafSize: .13, leafAspect: 1.0,
+      count: 108, spread: .64, height: .13, heightJitter: .40, layout: 'clumps', lateralJitter: .50, leafSize: .13, leafAspect: 1.0,
       arch: .10, droop: .08, cup: .16, stemCount: 0, flowerClusters: 0, flowerSize: 0,
       tintInner: '#54965c', tintOuter: '#ffffff', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#2b6826', aoStrength: .40, alphaCutoff: .42,
@@ -1146,7 +1154,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'clover-groundcover', leafTexture: 'creeping-rosette-2x2',
-      count: 112, spread: .66, height: .08, leafSize: .12, leafAspect: 1.0,
+      count: 112, spread: .66, height: .08, heightJitter: .40, layout: 'clumps', lateralJitter: .50, leafSize: .12, leafAspect: 1.0,
       arch: .08, droop: .06, cup: .14, stemCount: 1, flowerClusters: 0, flowerSize: 0,
       tintInner: '#6ca456', tintOuter: '#fffef0', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#447c2a', aoStrength: .36, alphaCutoff: .42,
@@ -1159,7 +1167,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'fine-herb', leafTexture: 'narrow-herb-leaf',
-      count: 144, spread: .36, height: .64, leafSize: .23, leafAspect: 1.38,
+      count: 144, spread: .36, height: .64, heightJitter: .36, layout: 'phyllotaxis', lateralJitter: .44, leafSize: .23, leafAspect: 1.38,
       arch: .46, droop: .16, cup: .12, stemCount: 11, flowerClusters: 0, flowerSize: 0,
       tintInner: '#629e60', tintOuter: '#fffef2', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#367428', aoStrength: .40, alphaCutoff: .40,
@@ -1172,7 +1180,7 @@ export const presets = {
     branches: { ...stubBranches },
     botanical: {
       mode: 'fine-herb', leafTexture: 'narrow-herb-leaf',
-      count: 290, spread: .40, height: .66, leafSize: .14, leafAspect: 1.48,
+      count: 290, spread: .40, height: .66, heightJitter: .36, layout: 'phyllotaxis', lateralJitter: .44, leafSize: .14, leafAspect: 1.48,
       arch: .26, droop: .08, cup: .14, stemCount: 19, flowerClusters: 0, flowerSize: 0,
       tintInner: '#5e9c58', tintOuter: '#fffef2', flowerTintInner: '#ffffff', flowerTintOuter: '#ffffff',
       stemTint: '#3a7026', aoStrength: .42, alphaCutoff: .40,
@@ -1501,6 +1509,17 @@ export function parseTreeSpec(value: unknown): TreeSpec {
     rawBot.count = Math.round(clampIn(rawBot.count, 4, 400))
     rawBot.spread = clampIn(rawBot.spread, 0.02, 4)
     rawBot.height = clampIn(rawBot.height, 0.04, 3.5)
+    rawBot.heightJitter = clampIn(rawBot.heightJitter, 0, 1)
+    if (!(botanicalLayouts as readonly string[]).includes(rawBot.layout)) {
+      rawBot.layout = rawBot.mode === 'clover-groundcover'
+        ? 'clumps'
+        : rawBot.mode === 'flower-groundcover'
+          ? 'scatter'
+          : rawBot.mode === 'fern-clump'
+            ? 'ring'
+            : 'phyllotaxis'
+    }
+    rawBot.lateralJitter = clampIn(rawBot.lateralJitter, 0, 1)
     rawBot.leafSize = clampIn(rawBot.leafSize, 0.03, 2.5)
     rawBot.leafAspect = clampIn(rawBot.leafAspect, 0.15, 2.0)
     rawBot.arch = clampIn(rawBot.arch, 0, 2.0)

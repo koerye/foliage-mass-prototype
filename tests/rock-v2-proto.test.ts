@@ -431,7 +431,7 @@ describe('Rock v2 Route-B Prototype — Gate 1, Gate 2 & Regression Audits', () 
         jobId: req.jobId, stage: 'bake',
         positions: new Float32Array(9), normals: new Float32Array(9), uvs: new Float32Array(6),
         tangents: new Float32Array(12), indices: new Uint32Array([0, 1, 2]),
-        size: 4, albedo: new Uint8ClampedArray(64), normal: new Uint8ClampedArray(64), ao: new Uint8ClampedArray(64),
+        size: 4, albedo: new Uint8ClampedArray(64), normal: new Uint8ClampedArray(64), ao: new Uint8ClampedArray(64), roughness: new Uint8ClampedArray(64),
         audit: dummyAudit,
         uvAudit: {
           rawFaceGroups: 1, coplanarPatchCount: 1, chartCount: 1, vertexCountBeforeSplit: 3, vertexCountAfterSplit: 3,

@@ -1,0 +1,717 @@
+{
+  "name": "stylized_terraced_sandstone_cliff_v4",
+  "seed": 2707,
+  "resolution": 1024,
+  "exposed_params": {
+    "chisel_strength": {
+      "description": "Strength of hand-chiselled planar stone facets across sedimentary strata",
+      "type": "float",
+      "value": 0.42,
+      "min": 0.1,
+      "max": 0.8,
+      "bindings": [
+        {
+          "node_id": "h_strata_facet",
+          "field": "opacity",
+          "scale": 1.0,
+          "bias": 0.0
+        }
+      ]
+    },
+    "edge_drybrush": {
+      "description": "Crisp pale-ivory dry-brush catch on sedimentary step ledges",
+      "type": "float",
+      "value": 0.34,
+      "min": 0.0,
+      "max": 0.65,
+      "bindings": [
+        {
+          "node_id": "col_curv_hi",
+          "field": "opacity",
+          "scale": 1.0,
+          "bias": 0.0
+        }
+      ]
+    },
+    "normal_strength": {
+      "description": "OpenGL tangent-space normal relief depth for sandstone ledges and chisel facets",
+      "type": "float",
+      "value": 3.4,
+      "min": 0.8,
+      "max": 5.0,
+      "bindings": [
+        {
+          "node_id": "normal",
+          "field": "strength",
+          "scale": 1.0,
+          "bias": 0.0
+        }
+      ]
+    },
+    "roughness_base": {
+      "description": "Base matte roughness of stylized sandstone cliff faces",
+      "type": "float",
+      "value": 0.82,
+      "min": 0.58,
+      "max": 0.92,
+      "bindings": [
+        {
+          "node_id": "rough_base",
+          "field": "base_roughness",
+          "scale": 1.0,
+          "bias": 0.0
+        }
+      ]
+    },
+    "strata_warmth": {
+      "description": "Warm umber AO depth in recessed sedimentary shelves",
+      "type": "float",
+      "value": 0.4,
+      "min": 0.05,
+      "max": 0.75,
+      "bindings": [
+        {
+          "node_id": "base_color_final",
+          "field": "opacity",
+          "scale": 1.0,
+          "bias": 0.0
+        }
+      ]
+    }
+  },
+  "nodes": [
+    {
+      "id": "strata_warp_lo",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 2.0,
+        "scale_y": 2.0,
+        "octaves": 2,
+        "persistence": 0.45,
+        "lacunarity": 2.0,
+        "seed": 2701,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "strata_warp_med",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 4.0,
+        "scale_y": 3.0,
+        "octaves": 2,
+        "persistence": 0.45,
+        "lacunarity": 2.0,
+        "seed": 2709,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "strata_broad_raw",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 1.0,
+        "scale_y": 4.0,
+        "octaves": 2,
+        "persistence": 0.42,
+        "lacunarity": 2.0,
+        "seed": 2717,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "strata_mid_raw",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 1.0,
+        "scale_y": 8.0,
+        "octaves": 2,
+        "persistence": 0.44,
+        "lacunarity": 2.0,
+        "seed": 2723,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "strata_fine_raw",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 2.0,
+        "scale_y": 14.0,
+        "octaves": 2,
+        "persistence": 0.42,
+        "lacunarity": 2.0,
+        "seed": 2729,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "strata_broad_w1",
+      "op": {
+        "op": "directional_warp",
+        "intensity": 0.095,
+        "angle_deg": 90.0
+      },
+      "inputs": {
+        "source": "strata_broad_raw",
+        "warp": "strata_warp_lo"
+      }
+    },
+    {
+      "id": "strata_broad_w2",
+      "op": {
+        "op": "directional_warp",
+        "intensity": 0.022,
+        "angle_deg": 90.0
+      },
+      "inputs": {
+        "source": "strata_broad_w1",
+        "warp": "strata_warp_med"
+      }
+    },
+    {
+      "id": "strata_mid_w1",
+      "op": {
+        "op": "directional_warp",
+        "intensity": 0.088,
+        "angle_deg": 90.0
+      },
+      "inputs": {
+        "source": "strata_mid_raw",
+        "warp": "strata_warp_lo"
+      }
+    },
+    {
+      "id": "strata_mid_w2",
+      "op": {
+        "op": "directional_warp",
+        "intensity": 0.018,
+        "angle_deg": 90.0
+      },
+      "inputs": {
+        "source": "strata_mid_w1",
+        "warp": "strata_warp_med"
+      }
+    },
+    {
+      "id": "strata_fine_w1",
+      "op": {
+        "op": "directional_warp",
+        "intensity": 0.072,
+        "angle_deg": 90.0
+      },
+      "inputs": {
+        "source": "strata_fine_raw",
+        "warp": "strata_warp_lo"
+      }
+    },
+    {
+      "id": "strata_mix_a",
+      "op": {
+        "op": "blend",
+        "mode": "overlay",
+        "opacity": 0.54
+      },
+      "inputs": {
+        "bg": "strata_broad_w2",
+        "fg": "strata_mid_w2"
+      }
+    },
+    {
+      "id": "strata_mix_b",
+      "op": {
+        "op": "blend",
+        "mode": "soft_light",
+        "opacity": 0.22
+      },
+      "inputs": {
+        "bg": "strata_mix_a",
+        "fg": "strata_fine_w1"
+      }
+    },
+    {
+      "id": "strata_stepped",
+      "op": {
+        "op": "levels",
+        "in_low": 0.22,
+        "in_high": 0.78,
+        "gamma": 0.96,
+        "out_low": 0.04,
+        "out_high": 0.96
+      },
+      "inputs": {
+        "input": "strata_mix_b"
+      }
+    },
+    {
+      "id": "chisel_vor_broad",
+      "op": {
+        "op": "voronoi_cells",
+        "scale_x": 4.0,
+        "scale_y": 3.0,
+        "jitter": 0.82,
+        "seed": 2741
+      },
+      "inputs": {}
+    },
+    {
+      "id": "chisel_vor_med",
+      "op": {
+        "op": "voronoi_cells",
+        "scale_x": 7.0,
+        "scale_y": 5.0,
+        "jitter": 0.85,
+        "seed": 2749
+      },
+      "inputs": {}
+    },
+    {
+      "id": "brush_slope_noise",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 5.0,
+        "scale_y": 10.0,
+        "octaves": 2,
+        "persistence": 0.45,
+        "lacunarity": 2.0,
+        "seed": 2757,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "strata_painterly",
+      "op": {
+        "op": "slope_blur",
+        "intensity": 0.015,
+        "samples": 10,
+        "mode": "min"
+      },
+      "inputs": {
+        "slope": "chisel_vor_broad.f1",
+        "source": "strata_stepped"
+      }
+    },
+    {
+      "id": "strata_gouache",
+      "op": {
+        "op": "slope_blur",
+        "intensity": 0.011,
+        "samples": 10,
+        "mode": "blur"
+      },
+      "inputs": {
+        "slope": "brush_slope_noise",
+        "source": "strata_painterly"
+      }
+    },
+    {
+      "id": "facet_sloped",
+      "op": {
+        "op": "slope_blur",
+        "intensity": 0.018,
+        "samples": 10,
+        "mode": "min"
+      },
+      "inputs": {
+        "slope": "chisel_vor_med.f1",
+        "source": "chisel_vor_broad.f1"
+      }
+    },
+    {
+      "id": "facet_levels",
+      "op": {
+        "op": "levels",
+        "in_low": 0.1,
+        "in_high": 0.86,
+        "gamma": 1.0,
+        "out_low": 0.18,
+        "out_high": 0.86
+      },
+      "inputs": {
+        "input": "facet_sloped"
+      }
+    },
+    {
+      "id": "grain_sandstone",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 22.0,
+        "scale_y": 18.0,
+        "octaves": 2,
+        "persistence": 0.45,
+        "lacunarity": 2.0,
+        "seed": 2789,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "h_strata_facet",
+      "op": {
+        "op": "blend",
+        "mode": "overlay",
+        "opacity": 0.42
+      },
+      "inputs": {
+        "bg": "strata_gouache",
+        "fg": "facet_levels"
+      }
+    },
+    {
+      "id": "h_with_grain",
+      "op": {
+        "op": "blend",
+        "mode": "soft_light",
+        "opacity": 0.07
+      },
+      "inputs": {
+        "bg": "h_strata_facet",
+        "fg": "grain_sandstone"
+      }
+    },
+    {
+      "id": "final_height",
+      "op": {
+        "op": "levels",
+        "in_low": 0.06,
+        "in_high": 0.94,
+        "gamma": 1.0,
+        "out_low": 0.06,
+        "out_high": 0.94
+      },
+      "inputs": {
+        "input": "h_with_grain"
+      }
+    },
+    {
+      "id": "normal",
+      "op": {
+        "op": "height_to_normal",
+        "strength": 3.4,
+        "format": "opengl",
+        "detail_weight": 0.52
+      },
+      "inputs": {
+        "input": "final_height"
+      }
+    },
+    {
+      "id": "ao",
+      "op": {
+        "op": "height_to_ao",
+        "radius": 0.03,
+        "strength": 1.45,
+        "directions": 16,
+        "steps": 12
+      },
+      "inputs": {
+        "input": "h_strata_facet"
+      }
+    },
+    {
+      "id": "curv",
+      "op": {
+        "op": "height_to_curvature",
+        "strength": 2.8,
+        "radius": 0.012
+      },
+      "inputs": {
+        "input": "h_strata_facet"
+      }
+    },
+    {
+      "id": "curv_hi",
+      "op": {
+        "op": "levels",
+        "in_low": 0.55,
+        "in_high": 0.82,
+        "gamma": 0.88,
+        "out_low": 0.0,
+        "out_high": 1.0
+      },
+      "inputs": {
+        "input": "curv"
+      }
+    },
+    {
+      "id": "curv_lo",
+      "op": {
+        "op": "levels",
+        "in_low": 0.16,
+        "in_high": 0.45,
+        "gamma": 1.0,
+        "out_low": 1.0,
+        "out_high": 0.0
+      },
+      "inputs": {
+        "input": "curv"
+      }
+    },
+    {
+      "id": "warm_mottle",
+      "op": {
+        "op": "perlin_noise",
+        "scale_x": 3.0,
+        "scale_y": 3.0,
+        "octaves": 2,
+        "persistence": 0.45,
+        "lacunarity": 2.0,
+        "seed": 2801,
+        "ridged": false
+      },
+      "inputs": {}
+    },
+    {
+      "id": "tone_a",
+      "op": {
+        "op": "blend",
+        "mode": "soft_light",
+        "opacity": 0.32
+      },
+      "inputs": {
+        "bg": "strata_gouache",
+        "fg": "facet_levels"
+      }
+    },
+    {
+      "id": "tone_driver",
+      "op": {
+        "op": "blend",
+        "mode": "soft_light",
+        "opacity": 0.2
+      },
+      "inputs": {
+        "bg": "tone_a",
+        "fg": "warm_mottle"
+      }
+    },
+    {
+      "id": "stone_grad",
+      "op": {
+        "op": "gradient_map",
+        "stops": [
+          [
+            0.0,
+            [
+              0.56,
+              0.34,
+              0.175,
+              1.0
+            ]
+          ],
+          [
+            0.24,
+            [
+              0.745,
+              0.52,
+              0.305,
+              1.0
+            ]
+          ],
+          [
+            0.52,
+            [
+              0.868,
+              0.675,
+              0.43,
+              1.0
+            ]
+          ],
+          [
+            0.78,
+            [
+              0.932,
+              0.79,
+              0.558,
+              1.0
+            ]
+          ],
+          [
+            1.0,
+            [
+              0.97,
+              0.882,
+              0.695,
+              1.0
+            ]
+          ]
+        ]
+      },
+      "inputs": {
+        "input": "tone_driver"
+      }
+    },
+    {
+      "id": "drybrush_col",
+      "op": {
+        "op": "constant_color",
+        "rgba": [
+          0.978,
+          0.91,
+          0.758,
+          1.0
+        ]
+      },
+      "inputs": {}
+    },
+    {
+      "id": "col_curv_hi",
+      "op": {
+        "op": "blend",
+        "mode": "copy",
+        "opacity": 0.34
+      },
+      "inputs": {
+        "bg": "stone_grad",
+        "fg": "drybrush_col",
+        "mask": "curv_hi"
+      }
+    },
+    {
+      "id": "crevice_col",
+      "op": {
+        "op": "constant_color",
+        "rgba": [
+          0.475,
+          0.28,
+          0.145,
+          1.0
+        ]
+      },
+      "inputs": {}
+    },
+    {
+      "id": "col_curv_lo",
+      "op": {
+        "op": "blend",
+        "mode": "copy",
+        "opacity": 0.42
+      },
+      "inputs": {
+        "bg": "col_curv_hi",
+        "fg": "crevice_col",
+        "mask": "curv_lo"
+      }
+    },
+    {
+      "id": "ao_tint",
+      "op": {
+        "op": "gradient_map",
+        "stops": [
+          [
+            0.0,
+            [
+              0.56,
+              0.36,
+              0.2,
+              1.0
+            ]
+          ],
+          [
+            0.6,
+            [
+              0.9,
+              0.83,
+              0.73,
+              1.0
+            ]
+          ],
+          [
+            1.0,
+            [
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ]
+          ]
+        ]
+      },
+      "inputs": {
+        "input": "ao"
+      }
+    },
+    {
+      "id": "base_color_final",
+      "op": {
+        "op": "blend",
+        "mode": "multiply",
+        "opacity": 0.4
+      },
+      "inputs": {
+        "bg": "col_curv_lo",
+        "fg": "ao_tint"
+      }
+    },
+    {
+      "id": "rough_base",
+      "op": {
+        "op": "roughness_from_height",
+        "base_roughness": 0.82,
+        "variation": 0.15,
+        "invert": true,
+        "min_roughness": 0.68,
+        "max_roughness": 0.93
+      },
+      "inputs": {
+        "input": "final_height"
+      }
+    },
+    {
+      "id": "rough_worn",
+      "op": {
+        "op": "blend",
+        "mode": "subtract",
+        "opacity": 0.08
+      },
+      "inputs": {
+        "bg": "rough_base",
+        "fg": "curv_hi"
+      }
+    },
+    {
+      "id": "rough_crev_val",
+      "op": {
+        "op": "constant_gray",
+        "value": 0.94
+      },
+      "inputs": {}
+    },
+    {
+      "id": "roughness_final",
+      "op": {
+        "op": "blend",
+        "mode": "max",
+        "opacity": 0.75
+      },
+      "inputs": {
+        "bg": "rough_worn",
+        "fg": "rough_crev_val",
+        "mask": "curv_lo"
+      }
+    },
+    {
+      "id": "metallic_zero",
+      "op": {
+        "op": "constant_gray",
+        "value": 0.0
+      },
+      "inputs": {}
+    }
+  ],
+  "outputs": {
+    "base_color": "base_color_final",
+    "height": "final_height",
+    "normal": "normal",
+    "roughness": "roughness_final",
+    "metallic": "metallic_zero",
+    "ao": "ao",
+    "emissive": null
+  }
+}

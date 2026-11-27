@@ -1,6 +1,12 @@
 {
   "schemaVersion": 1,
   "hiddenIds": [
-    "wishing-tree"
+    "wishing-tree",
+    "rock:cel-anime-rock",
+    "rock:handpainted-wedge",
+    "rock:handpainted-twin-slab",
+    "rock:handpainted-block-bluff",
+    "rock:handpainted-crag-spire",
+    "rock:handpainted-monolith"
   ]
 }

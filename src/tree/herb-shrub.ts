@@ -4,6 +4,7 @@
 // florets arranged on a dome shell with shaded interior core — ZERO flat billboard circles!).
 import { BufferAttribute, BufferGeometry, Color, MathUtils, Vector3 } from 'three'
 import { rng, seedFor } from '../shape'
+import { sampleHorizontalSlots, type BotanicalLayout } from './botanical-layout'
 import type { CrownEnvelope } from './envelope'
 import type { TreeSpec } from './spec'
 
@@ -248,24 +249,41 @@ export function buildHerbShrub(spec: TreeSpec, env: CrownEnvelope): BuiltHerbShr
   let leaves = 0
   let flowers = 0
 
-  // 1. Build lush spreading green stems + graceful forked secondary twigs (low-to-mid mound matching 10_hydrangea_3view!)
-  for (let i = 0; i < stemCount; i++) {
-    const ringFrac = i / stemCount
-    const isInner = i < Math.max(3, Math.round(stemCount * 0.30))
-    const angle = i * GOLDEN + (random() - 0.5) * 0.32
+  // 1. Build lush spreading green stems + graceful forked secondary twigs using chosen horizontal layout!
+  const hj = MathUtils.clamp(spec.botanical?.heightJitter ?? 0.36, 0, 1)
+  const lj = MathUtils.clamp(spec.botanical?.lateralJitter ?? 0.42, 0, 1)
+  const layout: BotanicalLayout = spec.botanical?.layout ?? 'phyllotaxis'
+  const hjMul = MathUtils.lerp(0.25, 2.00, hj)
+  const stemSlots = sampleHorizontalSlots({
+    layout,
+    count: stemCount,
+    radius: shrubW * 0.18,
+    areaRadius: shrubW * 0.52,
+    lateralJitter: lj,
+    random,
+  })
+  for (let i = 0; i < stemSlots.length; i++) {
+    const slot = stemSlots[i]
+    const ringFrac = i / stemSlots.length
+    const isInner = slot.group === 0
+    const angle = slot.angle
     const out = new Vector3(Math.cos(angle), 0, Math.sin(angle))
-    const r0 = shrubW * (isInner ? 0.08 : 0.17) * (0.45 + random() * 0.55)
-    const len = shrubH * (isInner ? 0.92 + random() * 0.16 : 0.78 + random() * 0.24)
+    const sideAxis = new Vector3().crossVectors(out, UP).normalize()
+    const len = shrubH * MathUtils.clamp((isInner ? 1.00 : 0.90) + (random() - 0.5) * 0.24 * hjMul, 0.50, 1.42)
     const leanRad = MathUtils.degToRad(isInner ? 18 + random() * 14 : 38 + random() * 20)
     const arch = isInner ? 0.16 + random() * 0.12 : 0.34 + random() * 0.18
 
     const rings = 6
-    const spine: Vector3[] = [new Vector3(out.x * r0, 0, out.z * r0)]
+    const spine: Vector3[] = [new Vector3(slot.x, 0, slot.z)]
     const step = len / (rings - 1)
     for (let k = 1; k < rings; k++) {
       const t = (k - 0.5) / (rings - 1)
       const aHere = leanRad + arch * t * t * Math.PI * 0.44
-      const dir = UP.clone().multiplyScalar(Math.cos(aHere)).addScaledVector(out, Math.sin(aHere)).normalize()
+      const dir = UP.clone()
+        .multiplyScalar(Math.cos(aHere))
+        .addScaledVector(out, Math.sin(aHere))
+        .addScaledVector(sideAxis, slot.sideSign * lj * 0.14 * t)
+        .normalize()
       const pt = spine[k - 1].clone().addScaledVector(dir, step)
       spine.push(env.deform(pt, k / (rings - 1)))
     }

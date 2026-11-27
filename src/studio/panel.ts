@@ -4,6 +4,7 @@ import { cardTypeLabels, cardTypes, leafRules, normalSources } from '../broadlea
 import { CrownEnvelope, evalProfileCurve } from '../tree/envelope'
 import { lodPresets } from '../tree/optimize'
 import {
+  botanicalLayoutLabels, botanicalLayouts,
   defaultAccents, defaultLeafNormalEdit, defaultTrunkSculpt, isWoodSculptActive,
   woodSculptStyleIds, woodSculptStyleMeta,
   type TreeKind, type TreeSpec, type TrunkSculptSpec, type WoodSculptStyleId,
@@ -372,9 +373,18 @@ export const sections: Section[] = [
     r('lotus.alphaCutoff', 'Alpha 裁切', .05, .9, .01),
   ] },
   { title: '风格化植物 · 手绘单叶 / 花球 / 地被', kinds: ['botanical'], open: true, fields: [
+    {
+      path: 'botanical.layout',
+      label: '水平分布算法',
+      type: 'select',
+      options: botanicalLayouts.map(id => [id, botanicalLayoutLabels[id]]),
+      hint: '选择叶片/枝簇的水平排布算法：黄金角螺旋错位（360° 零叠叶）、圆形环绕错缝、范围内泊松随机、多簇自然聚落、或扇形左右交错',
+    },
     r('botanical.count', '叶片 / 枝叶数量', 6, 300, 1),
     r('botanical.spread', '水平冠幅 m', .04, 1.8, .01),
     r('botanical.height', '整体高度 m', .06, 2.0, .01),
+    r('botanical.lateralJitter', '叶片左右错开', 0, 1, .02, '控制水平方向的左右错位、切向偏移与 XY 防重叠推离；搭配不同水平分布算法呈现不同层次节奏'),
+    r('botanical.heightJitter', '叶片高度错落', 0, 1, .02, '控制叶片上下高度的随机分层分布：增大可增加层次感并减少相邻叶片穿插重叠'),
     r('botanical.leafSize', '单片叶 / 羽叶尺寸 m', .05, 1.6, .01),
     r('botanical.leafAspect', '叶片宽长比', .2, 1.5, .02),
     r('botanical.arch', '向外弯拱弧度', 0, 1.4, .02),

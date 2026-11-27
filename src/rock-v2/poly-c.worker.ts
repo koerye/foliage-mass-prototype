@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import type { ExternalPbrLayers } from './photocraft-sampler'
 import {
   buildCreasePreviewBuffers,
   buildRouteCRock,
@@ -49,6 +50,13 @@ export interface PolyCWorkerPreviewResponse {
   }
 }
 
+export interface PolyCWorkerSetPbrMessage {
+  kind: 'set-pbr'
+  layers: ExternalPbrLayers | null
+}
+
+export type PolyCWorkerMessage = PolyCWorkerRequest | PolyCWorkerSetPbrMessage
+
 export interface PolyCWorkerBakeResponse {
   jobId: number
   stage: 'bake'
@@ -61,6 +69,7 @@ export interface PolyCWorkerBakeResponse {
   albedo: Uint8ClampedArray
   normal: Uint8ClampedArray
   ao: Uint8ClampedArray
+  roughness: Uint8ClampedArray
   audit: PolyCsgAudit
   uvAudit: PolyUvAudit
   uvMs: number
@@ -76,13 +85,19 @@ export interface PolyCWorkerErrorResponse {
 export type PolyCWorkerResponse = PolyCWorkerPreviewResponse | PolyCWorkerBakeResponse | PolyCWorkerErrorResponse
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope
+let customExternalPbr: ExternalPbrLayers | null = null
 
 // Pre-warm offline Manifold WASM immediately when Worker boots so first drag has zero WASM compile stall!
 void getManifoldModule()
 
-ctx.onmessage = async (ev: MessageEvent<PolyCWorkerRequest>) => {
-  const req = ev.data
-  if (!req) return
+ctx.onmessage = async (ev: MessageEvent<PolyCWorkerMessage>) => {
+  const raw = ev.data
+  if (!raw) return
+  if ('kind' in raw && raw.kind === 'set-pbr') {
+    customExternalPbr = raw.layers
+    return
+  }
+  const req = raw as PolyCWorkerRequest
 
   try {
     const t0 = performance.now()
@@ -122,16 +137,19 @@ ctx.onmessage = async (ev: MessageEvent<PolyCWorkerRequest>) => {
 
     const bakeSize = req.bake?.size ?? 512
     const isMossyTerrace = req.preset === 'terraced-moss-bluff-c2'
+    const mode = req.bake?.mode ?? 'shallow-detail'
+    const externalPbr: ExternalPbrLayers | undefined = mode === 'photocraft-pbr' ? (customExternalPbr ?? undefined) : undefined
     const uv = unwrapPolyCsgUvCharts(c2, { atlasSize: bakeSize, gutterPx: isMossyTerrace ? 6 : 10 })
     const bakeOpts: BakePolyPbrOptions = {
       size: bakeSize,
-      mode: req.bake?.mode ?? 'shallow-detail',
-      baseColorHex: req.bake?.baseColorHex ?? (isMossyTerrace ? '#c49b76' : '#caa57c'),
+      mode,
+      baseColorHex: req.bake?.baseColorHex ?? (isMossyTerrace ? '#cfa87d' : '#caa57c'),
       dilationPasses: req.bake?.dilationPasses ?? (isMossyTerrace ? 8 : 14),
-      aoRays: req.bake?.aoRays ?? (isMossyTerrace ? 12 : 16),
+      aoRays: req.bake?.aoRays ?? (isMossyTerrace ? 10 : 16),
       seed: Math.round(req.sculpt.seed ?? (isMossyTerrace ? 7301 : 5104)),
       strataStrength: req.bake?.strataStrength ?? 1.0,
       ...(isMossyTerrace ? { mossTop: true, mossColorHex: '#68a624' } : {}),
+      ...(externalPbr ? { externalPbr } : {}),
     }
     const baked = bakePolyCsgPbr(c2, uv, bakeOpts)
 
@@ -147,6 +165,7 @@ ctx.onmessage = async (ev: MessageEvent<PolyCWorkerRequest>) => {
       albedo: baked.albedo,
       normal: baked.normal,
       ao: baked.ao,
+      roughness: baked.roughness,
       audit: c2.audit,
       uvAudit: uv.audit,
       uvMs: uv.uvMs,
@@ -161,6 +180,7 @@ ctx.onmessage = async (ev: MessageEvent<PolyCWorkerRequest>) => {
       baked.albedo.buffer,
       baked.normal.buffer,
       baked.ao.buffer,
+      baked.roughness.buffer,
     ])
   } catch (err) {
     const errRes: PolyCWorkerErrorResponse = {

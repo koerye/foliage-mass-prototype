@@ -641,6 +641,7 @@ describe('Independent Audit Remediation Regressions (P0 + P1 + Round-2 Contracts
         build: () => presetSpec('broadleaf-sakura'),
       }]
 
+      const appliedIds: string[] = []
       const previewedIds: string[] = []
       let restoreCount = 0
       const ctrl = mountPresetLibrary<TreeSpec, { marker: string }>({
@@ -660,63 +661,72 @@ describe('Independent Audit Remediation Regressions (P0 + P1 + Round-2 Contracts
         snapshotState: () => ({ marker: 'orig' }),
         restoreState: () => { restoreCount++ },
         preview: p => { previewedIds.push(p.id) },
-        apply: () => {},
+        apply: p => { appliedIds.push(p.id) },
         message: () => {},
       })
 
       ctrl.open(false, 'showcases')
       const gridEl = getOrMake('#pl-grid')
+      const restoreOrigBtn = getOrMake('#pl-restore-orig')
 
-      // 1. Hovering built-in showcase:* card works even though it is NOT in host.store
+      // 1. Hovering (pointerover) NEVER triggers preview or layout jumps (zero scroll/hover jank!)
       const showcaseCard = { dataset: { showcaseId: 'sakura' } }
       gridEl.dispatch('pointerover', {
         target: {
           closest: (sel: string) => (sel === '.pl-card' ? showcaseCard : null),
         },
       })
-      vi.advanceTimersByTime(100)
-      expect(previewedIds).toEqual(['showcase:sakura'])
-      expect(ctrl.isPreviewing()).toBe(true)
+      vi.advanceTimersByTime(150)
+      expect(previewedIds).toEqual([])
+      expect(appliedIds).toEqual([])
+      expect(ctrl.isPreviewing()).toBe(false)
 
-      // 2. Hidden showcase is blocked before 85ms timer fires
-      ctrl.open(false, 'showcases')
-      previewedIds.length = 0
-      gridEl.dispatch('pointerover', {
+      // 2. Single-clicking a visible showcase card loads/previews it immediately without rebuilding grid DOM
+      gridEl.dispatch('click', {
         target: { closest: (sel: string) => (sel === '.pl-card' ? showcaseCard : null) },
       })
-      hiddenShowcases.add('sakura')
-      vi.advanceTimersByTime(100)
-      expect(previewedIds).toEqual([])
+      expect(appliedIds).toEqual(['showcase:sakura'])
 
-      // 3. Hovering a user preset previews it, and first Delete click immediately calls endHoverPreview(true)
+      // 3. Hidden showcase is blocked on click
+      appliedIds.length = 0
+      hiddenShowcases.add('sakura')
+      vi.advanceTimersByTime(500)
+      gridEl.dispatch('click', {
+        target: { closest: (sel: string) => (sel === '.pl-card' ? showcaseCard : null) },
+      })
+      expect(appliedIds).toEqual([])
+
+      // 4. Single-clicking a user preset loads/previews it, ↺ 还原 restores pre-browse state, and deleted preset is blocked
       ctrl.open(false, 'mine')
       const presetCard = { dataset: { presetId: saved.id } }
-      gridEl.dispatch('pointerover', {
-        target: { closest: (sel: string) => (sel === '.pl-card' ? presetCard : null) },
-      })
-      vi.advanceTimersByTime(100)
-      expect(previewedIds).toEqual([saved.id])
-      expect(ctrl.isPreviewing()).toBe(true)
-
-      const restoresBeforeDel = restoreCount
-      const deleteBtn = { dataset: { act: 'delete', id: saved.id } }
       gridEl.dispatch('click', {
-        stopPropagation: () => {},
-        target: {
-          closest: (sel: string) => (sel === 'button[data-act]' ? deleteBtn : null),
-        },
-      })
-      expect(ctrl.isPreviewing()).toBe(false)
-      expect(restoreCount).toBe(restoresBeforeDel + 1)
-
-      // 4. Deleted user preset is blocked before 85ms timer fires (no ghost preview)
-      previewedIds.length = 0
-      gridEl.dispatch('pointerover', {
         target: { closest: (sel: string) => (sel === '.pl-card' ? presetCard : null) },
       })
+      expect(appliedIds).toEqual([saved.id])
+
+      // 1-click restore reverts back to pre-browse snapshot
+      const restoresBefore = restoreCount
+      restoreOrigBtn.onclick?.()
+      expect(restoreCount).toBe(restoresBefore + 1)
+
+      // Double-click applies once and closes the drawer
+      appliedIds.length = 0
+      vi.advanceTimersByTime(500)
+      gridEl.dispatch('dblclick', {
+        preventDefault: () => {},
+        target: { closest: (sel: string) => (sel === '.pl-card' ? presetCard : null) },
+      })
+      expect(appliedIds).toEqual([saved.id])
+      expect(ctrl.isOpen()).toBe(false)
+
+      // Deleted user preset is blocked on click
+      ctrl.open(false, 'mine')
+      appliedIds.length = 0
       await store.remove(saved.id)
-      vi.advanceTimersByTime(100)
-      expect(previewedIds).toEqual([])
+      gridEl.dispatch('click', {
+        target: { closest: (sel: string) => (sel === '.pl-card' ? presetCard : null) },
+      })
+      expect(appliedIds).toEqual([])
 
       ctrl.dispose()
     } finally {

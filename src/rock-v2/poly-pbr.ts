@@ -1,10 +1,15 @@
 import { BufferAttribute, BufferGeometry } from 'three'
 import { dilatePerChart } from './bake'
+import {
+  sampleTopPlanarPbr,
+  sampleTriplanarPbr,
+  type ExternalPbrLayers,
+} from './photocraft-sampler'
 import type { PolyCsgResult } from './poly-csg'
 import { fbm2, fbm3, type Vec3 } from './sdf'
 import { computeLockedTangents, type UvChartInfo } from './uv-charts'
 
-export type PolyPbrMode = 'baseline' | 'shallow-detail'
+export type PolyPbrMode = 'baseline' | 'shallow-detail' | 'photocraft-pbr'
 
 export interface PolyCreaseEdge {
   ax: number; ay: number; az: number
@@ -72,6 +77,10 @@ export interface BakePolyPbrOptions {
   mossTop?: boolean
   /** Primary moss hex color when mossTop is enabled (default '#76b82c'). */
   mossColorHex?: string
+  /** Seamless PhotoCraft Material Studio PBR texture sets (stone + optional moss) used when mode === 'photocraft-pbr'. */
+  externalPbr?: ExternalPbrLayers
+  /** World-space triplanar repeat scale for external PhotoCraft PBR maps (default 0.92). */
+  pbrScale?: number
 }
 
 export interface PolyBakeStats {
@@ -98,6 +107,8 @@ export interface PolyBakedPbrTextures {
   albedo: Uint8ClampedArray
   normal: Uint8ClampedArray
   ao: Uint8ClampedArray
+  /** Linear roughness RGBA buffer (0..255) for MeshStandardMaterial.roughnessMap & glTF metallicRoughnessTexture. */
+  roughness: Uint8ClampedArray
   /** Diagnostic atlas: Blue=wide interior detail allowed, Amber=edge-protected band, Green=shoulder V-notch, Cyan=local bevels. */
   diagnostic: Uint8ClampedArray
   /** 512x512 UV chart color-block map (distinct pastel per merged chart, crisp outline borders). */
@@ -830,6 +841,7 @@ export function bakePolyCsgPbr(
   const albedo = new Uint8ClampedArray(totalPix * 4)
   const normal = new Uint8ClampedArray(totalPix * 4)
   const ao = new Uint8ClampedArray(totalPix * 4)
+  const roughness = new Uint8ClampedArray(totalPix * 4)
   const diagnostic = new Uint8ClampedArray(totalPix * 4)
   const uvChartMap = new Uint8ClampedArray(totalPix * 4)
 
@@ -839,6 +851,7 @@ export function bakePolyCsgPbr(
     albedo[p4] = baseR; albedo[p4 + 1] = baseG; albedo[p4 + 2] = baseB; albedo[p4 + 3] = 255
     normal[p4] = 128; normal[p4 + 1] = 128; normal[p4 + 2] = 255; normal[p4 + 3] = 255
     ao[p4] = 255; ao[p4 + 1] = 255; ao[p4 + 2] = 255; ao[p4 + 3] = 255
+    roughness[p4] = 224; roughness[p4 + 1] = 224; roughness[p4 + 2] = 224; roughness[p4 + 3] = 255
     diagnostic[p4] = 236; diagnostic[p4 + 1] = 232; diagnostic[p4 + 2] = 224; diagnostic[p4 + 3] = 255
     uvChartMap[p4] = 244; uvChartMap[p4 + 1] = 241; uvChartMap[p4 + 2] = 235; uvChartMap[p4 + 3] = 255
   }
@@ -1198,6 +1211,16 @@ export function bakePolyCsgPbr(
   let bevelTexels = 0
   let maxNormalDevDeg = 0
 
+  const usePhotoCraft = opts.mode === 'photocraft-pbr' && Boolean(opts.externalPbr?.stone)
+  const pcStone = opts.externalPbr?.stone
+  const pcMoss = opts.externalPbr?.moss
+  const pcTileScale = opts.pbrScale ?? (enableMossTop ? 0.66 : 0.62)
+  // Relative color tint ratio so custom baseColorHex shifts PhotoCraft sandstone cleanly while default '#cfa87d' stays 1:1 faithful!
+  const refSandR = 207, refSandG = 168, refSandB = 125
+  const tintRatioR = clamp(baseR / refSandR, 0.55, 1.45)
+  const tintRatioG = clamp(baseG / refSandG, 0.55, 1.45)
+  const tintRatioB = clamp(baseB / refSandB, 0.55, 1.45)
+
   for (let pix = 0; pix < totalPix; pix++) {
     const cid = chartIdBuf[pix]
     if (cid < 0) continue
@@ -1235,8 +1258,161 @@ export function bakePolyCsgPbr(
 
     // Write AO map (linear grayscale RGB)
     const p4 = pix * 4
+    let outAo = aoVal
+    let outRough = 0.88
+
+    // --- PhotoCraft PBR Mode: Triplanar Stylized Sandstone Cliff + Inset Velvet Terrace Moss ---
+    if (usePhotoCraft && pcStone) {
+      const hNorm = clamp(py / maxY, 0, 1)
+      const upBias = clamp(nly * 0.5 + 0.5, 0, 1)
+      const edgeWearBreakup = 0.65 + 0.35 * fbm3(px * 4.5, py * 4.5, pz * 4.5, seed + 13, 2)
+      const edgeProtect = smoothstep(0.012, 0.048, distHard)
+      const notchProtect = inNotch ? 0 : smoothstep(0.028, 0.085, distNotch)
+      const detailMask = edgeProtect * notchProtect
+
+      // Diagnostic atlas
+      if (inNotch) {
+        diagnostic[p4] = 56; diagnostic[p4 + 1] = 178; diagnostic[p4 + 2] = 104; diagnostic[p4 + 3] = 255
+      } else if (inBevel) {
+        diagnostic[p4] = 56; diagnostic[p4 + 1] = 168; diagnostic[p4 + 2] = 204; diagnostic[p4 + 3] = 255
+      } else if (detailMask < 0.35) {
+        diagnostic[p4] = 228; diagnostic[p4 + 1] = 176; diagnostic[p4 + 2] = 74; diagnostic[p4 + 3] = 255
+      } else {
+        diagnostic[p4] = 92; diagnostic[p4 + 1] = 132; diagnostic[p4 + 2] = 194; diagnostic[p4 + 3] = 255
+      }
+
+      // 1. Sample PhotoCraft Sandstone Cliff PBR (gravity-aligned horizontal strata + crisp OpenGL normal!)
+      const stoneNormalGain = (0.62 + strataStrength * 0.45) * (0.28 + 0.72 * detailMask)
+      const stSmp = sampleTriplanarPbr(pcStone, px, py, pz, nlx, nly, nlz, pcTileScale, stoneNormalGain, seed % 997)
+      // Gentle height/orientation warmth + user baseColorHex tint preservation
+      const lift = 0.94 + hNorm * 0.08 + (upBias - 0.5) * 0.05
+      let r = stSmp.r * tintRatioR * lift
+      let g = stSmp.g * tintRatioG * lift
+      let b = stSmp.b * tintRatioB * lift
+      outRough = stSmp.roughness
+      outAo = aoVal * lerp(1.0, stSmp.ao, 0.55)
+
+      let targetWnx = stSmp.wnx
+      let targetWny = stSmp.wny
+      let targetWnz = stSmp.wnz
+
+      // 2. Signature pale-ivory dry-brush bevel highlight frame (matching turnaround TOP & HERO 3/4 views!)
+      const bevelCatch = inNotch
+        ? 0
+        : (inBevel ? 0.78 : 0) + (1 - smoothstep(0.003, 0.030, distConvex)) * clamp(edgeWearBreakup, 0.52, 1.0) * smoothstep(0.014, 0.048, distNotch) * 0.82
+      const catchAmt = clamp(bevelCatch, 0, 0.90)
+      if (catchAmt > 0.01) {
+        r = lerp(r, Math.min(255, 248 * tintRatioR), catchAmt * 0.68)
+        g = lerp(g, Math.min(255, 230 * tintRatioG), catchAmt * 0.68)
+        b = lerp(b, Math.min(255, 192 * tintRatioB), catchAmt * 0.68)
+        outRough = lerp(outRough, 0.66, catchAmt * 0.42)
+      }
+
+      // 3. Grounded warm-earth base dampening + warm-umber real 3D crevice deepening
+      const baseDamp = 1 - smoothstep(0.0, 0.30, py)
+      r *= 1 - baseDamp * 0.11
+      g *= 1 - baseDamp * 0.13
+      b *= 1 - baseDamp * 0.13
+
+      const creviceAmt = smoothstep(0.86, 0.40, aoVal)
+      if (creviceAmt > 0.005) {
+        r = lerp(r, r * 0.56 - 7, creviceAmt * 0.78)
+        g = lerp(g, g * 0.47 - 9, creviceAmt * 0.78)
+        b = lerp(b, b * 0.40 - 8, creviceAmt * 0.78)
+        outRough = lerp(outRough, 0.94, creviceAmt * 0.65)
+      }
+
+      // 4. Inset scalloped PhotoCraft Velvet Terrace Moss on flat horizontal terrace tops!
+      if (enableMossTop) {
+        const isFlatTop = smoothstep(0.84, 0.93, nly) * (inBevel ? 0 : 1) * smoothstep(0.06, 0.15, py)
+        let mossMask = 0
+        let cushionCore = 0
+        if (isFlatTop > 0.005) {
+          const lobeBig = fbm3(px * 3.8 + 1.1, py * 2.8, pz * 3.8 - 1.9, seed + 409, 2) * 0.025
+          const lobeFine = fbm3(px * 10.2 - 2.4, py * 5.5, pz * 10.2 + 3.1, seed + 421, 2) * 0.010
+          const insetDist = distConvex + lobeBig + lobeFine
+          const rimInset = smoothstep(0.007, 0.026, insetDist)
+          mossMask = clamp(isFlatTop * rimInset, 0, 1)
+          // 3D cushion pillow gradient: deep lush forest-olive shadow around outer scalloped skirt, lifting to sunlit crown inside!
+          cushionCore = smoothstep(0.014, 0.105, insetDist)
+        }
+        if (mossMask > 0.005) {
+          const mossScale = pcTileScale * 2.15
+          const mSmp = pcMoss
+            ? sampleTopPlanarPbr(pcMoss, px, pz, mossScale, 0.90, seed % 991)
+            : { r: mossR, g: mossG, b: mossB, roughness: 0.91, ao: 0.92, wnx: nlx, wny: nly, wnz: nlz }
+          const sunLift = 0.88 + hNorm * 0.15
+          const innerShade = 0.72 + 0.28 * smoothstep(0.48, 0.90, aoVal)
+          const cushionLightR = lerp(0.58, 1.05, cushionCore)
+          const cushionLightG = lerp(0.68, 1.03, cushionCore)
+          const cushionLightB = lerp(0.56, 0.96, cushionCore)
+          let mr = mSmp.r * sunLift * innerShade * cushionLightR
+          let mg = mSmp.g * sunLift * innerShade * cushionLightG
+          let mb = mSmp.b * sunLift * innerShade * cushionLightB
+
+          // Crisp deep forest-olive contact shadow right along the scalloped edge inside the pale sandstone frame
+          const rimEdge = mossMask * (1 - mossMask) * 4
+          mr = lerp(mr, mr * 0.48, rimEdge * 0.72)
+          mg = lerp(mg, mg * 0.56, rimEdge * 0.72)
+          mb = lerp(mb, mb * 0.46, rimEdge * 0.72)
+
+          r = lerp(r, mr, mossMask)
+          g = lerp(g, mg, mossMask)
+          b = lerp(b, mb, mossMask)
+          outRough = lerp(outRough, mSmp.roughness, mossMask)
+          outAo = lerp(outAo, aoVal * lerp(1.0, mSmp.ao, 0.45) * lerp(0.76, 1.0, cushionCore), mossMask)
+          targetWnx = lerp(targetWnx, mSmp.wnx, mossMask)
+          targetWny = lerp(targetWny, mSmp.wny, mossMask)
+          targetWnz = lerp(targetWnz, mSmp.wnz, mossMask)
+        }
+      }
+
+      // 5. Project blended world-space PBR normal accurately into C2's locked MikkTSpace tangent frame!
+      const tx = tanX[pix], ty = tanY[pix], tz = tanZ[pix], tw = tanW[pix]
+      const bx = (nly * tz - nlz * ty) * tw
+      const by = (nlz * tx - nlx * tz) * tw
+      const bz = (nlx * ty - nly * tx) * tw
+      const bLen = Math.hypot(bx, by, bz) || 1
+      const bux = bx / bLen, buy = by / bLen, buz = bz / bLen
+
+      const wl = Math.hypot(targetWnx, targetWny, targetWnz) || 1
+      const wux = targetWnx / wl, wuy = targetWny / wl, wuz = targetWnz / wl
+      // Blend slightly toward geometric normal on steep bevels/notches so silhouette stays razor-clean
+      const nBlend = inNotch ? 0.25 : inBevel ? 0.35 : 0.85
+      const fnx = lerp(nlx, wux, nBlend)
+      const fny = lerp(nly, wuy, nBlend)
+      const fnz = lerp(nlz, wuz, nBlend)
+      const fl = Math.hypot(fnx, fny, fnz) || 1
+      const ux = fnx / fl, uy = fny / fl, uz = fnz / fl
+
+      const rawTx = ux * tx + uy * ty + uz * tz
+      const rawTy = ux * bux + uy * buy + uz * buz
+      const rawTz = Math.max(0.25, ux * nlx + uy * nly + uz * nlz)
+      const tl = Math.hypot(rawTx, rawTy, rawTz) || 1
+      const tnx = rawTx / tl, tny = rawTy / tl, tnz = rawTz / tl
+      const devDeg = (Math.acos(clamp(tnz, -1, 1)) * 180) / Math.PI
+      if (devDeg > maxNormalDevDeg) maxNormalDevDeg = devDeg
+
+      normal[p4] = Math.round(clamp(tnx * 0.5 + 0.5, 0, 1) * 255)
+      normal[p4 + 1] = Math.round(clamp(tny * 0.5 + 0.5, 0, 1) * 255)
+      normal[p4 + 2] = Math.round(clamp(tnz * 0.5 + 0.5, 0, 1) * 255)
+      normal[p4 + 3] = 255
+
+      const aoByte = Math.round(clamp(outAo, 0, 1) * 255)
+      ao[p4] = aoByte; ao[p4 + 1] = aoByte; ao[p4 + 2] = aoByte; ao[p4 + 3] = 255
+      const rghByte = Math.round(clamp(outRough, 0.04, 0.99) * 255)
+      roughness[p4] = rghByte; roughness[p4 + 1] = rghByte; roughness[p4 + 2] = rghByte; roughness[p4 + 3] = 255
+      albedo[p4] = Math.round(clamp(r, 0, 255))
+      albedo[p4 + 1] = Math.round(clamp(g, 0, 255))
+      albedo[p4 + 2] = Math.round(clamp(b, 0, 255))
+      albedo[p4 + 3] = 255
+      continue
+    }
+
     const aoByte = Math.round(clamp(aoVal, 0, 1) * 255)
     ao[p4] = aoByte; ao[p4 + 1] = aoByte; ao[p4 + 2] = aoByte; ao[p4 + 3] = 255
+    const rghDefault = Math.round(outRough * 255)
+    roughness[p4] = rghDefault; roughness[p4 + 1] = rghDefault; roughness[p4 + 2] = rghDefault; roughness[p4 + 3] = 255
 
     // --- Shared Clean C2 Baseline Albedo (NO baked key-light shadows, NO dark V-notch seam core!) ---
     const hNorm = clamp(py / maxY, 0, 1)
@@ -1461,7 +1637,7 @@ export function bakePolyCsgPbr(
   // Pass 4: Isolated Per-Chart Mip-Safe Dilation (fills full 12px gutter!)
   // -------------------------------------------------------------------------
   const tDil0 = performance.now()
-  dilatePerChart(size, chartIdBuf, [albedo, normal, ao], dilationPasses)
+  dilatePerChart(size, chartIdBuf, [albedo, normal, ao, roughness], dilationPasses)
   const dilationMs = performance.now() - tDil0
 
   // Region thin-face strip width audit (shoulder V-notch & C2 bevel faces)
@@ -1493,6 +1669,7 @@ export function bakePolyCsgPbr(
     albedo,
     normal,
     ao,
+    roughness,
     diagnostic,
     uvChartMap,
     stats: {

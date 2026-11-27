@@ -182,6 +182,9 @@ describe('Electron Dual-Mode Server & MCP Protocol', () => {
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } }) + '\n')
       const initR = await waitReply(1)
       expect(initR.result.serverInfo.name).toBe('vegetation-studio')
+      expect(initR.result.instructions).toContain('vegetation-studio-asset-pipeline')
+      expect(initR.result.instructions).toContain('G0')
+      expect(initR.result.instructions).toContain('G5')
 
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }) + '\n')
       const listR = await waitReply(2)

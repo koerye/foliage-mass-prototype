@@ -6,6 +6,7 @@ import {
   MeshStandardMaterial, NoColorSpace, RGBAFormat, SRGBColorSpace, Vector2, type Object3D, type Texture,
 } from 'three'
 import { buildAiScene, type AiSceneSpec, type LeafTextureSource } from '../ai/scene'
+import { loadDefaultPhotoCraftPbrLayers, type ExternalPbrLayers } from '../rock-v2/photocraft-pbr'
 import { buildRouteCRock } from '../rock-v2/poly-csg'
 import { bakePolyCsgPbr, unwrapPolyCsgUvCharts } from '../rock-v2/poly-pbr'
 import { buildRockGroup } from '../rock/geometry'
@@ -234,16 +235,25 @@ export async function buildAssemblyItem(
       notchDepth: c2Spec.notchDepth,
     })
     const isMossyTerrace = c2Spec.preset === 'terraced-moss-bluff-c2'
+    let externalPbr: ExternalPbrLayers | undefined
+    if (c2Spec.mode === 'photocraft-pbr') {
+      try {
+        externalPbr = await loadDefaultPhotoCraftPbrLayers()
+      } catch {
+        // Headless Node test environment without image decoder falls back cleanly
+      }
+    }
     const uv = unwrapPolyCsgUvCharts(c2, { atlasSize: 512, gutterPx: isMossyTerrace ? 6 : 10 })
     const baked = bakePolyCsgPbr(c2, uv, {
       size: 512,
-      mode: c2Spec.mode,
+      mode: externalPbr ? c2Spec.mode : (c2Spec.mode === 'photocraft-pbr' ? 'shallow-detail' : c2Spec.mode),
       baseColorHex: c2Spec.baseColor,
       dilationPasses: isMossyTerrace ? 8 : 14,
-      aoRays: isMossyTerrace ? 12 : 16,
+      aoRays: isMossyTerrace ? 10 : 16,
       seed: c2Spec.seed,
       strataStrength: c2Spec.strataStrength,
       ...(isMossyTerrace ? { mossTop: true, mossColorHex: '#68a624' } : {}),
+      ...(externalPbr ? { externalPbr } : {}),
     })
     const geo = uv.toBufferGeometry()
     const tag = c2Spec.preset === 'terraced-moss-bluff-c2'
@@ -254,16 +264,19 @@ export async function buildAssemblyItem(
     const mapTex = makePolyCPbrTexture(baked.albedo, baked.size, true, `RockC2_${tag}_BaseColor`)
     const normTex = makePolyCPbrTexture(baked.normal, baked.size, false, `RockC2_${tag}_Normal`)
     const aoTex = makePolyCPbrTexture(baked.ao, baked.size, false, `RockC2_${tag}_AO`)
+    const roughTex = makePolyCPbrTexture(baked.roughness, baked.size, false, `RockC2_${tag}_Roughness`)
     aoTex.channel = 0
+    const useRoughMap = Boolean(externalPbr && c2Spec.mode === 'photocraft-pbr')
     const mat = new MeshStandardMaterial({
-      name: `Mat_RockC2_${tag}_${c2Spec.mode === 'baseline' ? 'Baseline' : 'PBR'}`,
+      name: `Mat_RockC2_${tag}_${c2Spec.mode === 'baseline' ? 'Baseline' : useRoughMap ? 'PhotoCraftPBR' : 'PBR'}`,
       color: 0xffffff,
       map: mapTex,
       normalMap: normTex,
       normalScale: new Vector2(1, 1),
       aoMap: aoTex,
-      aoMapIntensity: 0.85,
-      roughness: 0.90,
+      aoMapIntensity: useRoughMap ? 0.92 : 0.85,
+      roughnessMap: useRoughMap ? roughTex : null,
+      roughness: useRoughMap ? 1.0 : 0.90,
       metalness: 0.0,
     })
     const mesh = new Mesh(geo, mat)
@@ -281,6 +294,7 @@ export async function buildAssemblyItem(
       mapTex.dispose()
       normTex.dispose()
       aoTex.dispose()
+      roughTex.dispose()
     }
   } else if (item.kind === 'ai') {
     const aiSpec = item.payload as AiSceneSpec

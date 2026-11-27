@@ -3,18 +3,22 @@
 // with automatic localStorage mirror & offline/static fallback.
 import type { Object3D } from 'three'
 import { parseAiScene, type AiSceneSpec } from '../ai/scene'
+import { parsePolyCRockSpec, polyCRockPresetIds, type PolyCRockSpec } from '../assembly/spec'
+import { parseRockSpec, type RockSpec } from '../rock/spec'
 import { parseTreeSpec, type TreeKind, type TreeSpec } from '../tree/spec'
 import { lightingPresets, type LightingPreset, type Viewer } from '../viewport'
 import { parseSavedTextureMap, type SavedTextureMap } from './texture-serialize'
 
-export type PresetScope = 'tree' | 'ai'
+export type PresetScope = 'tree' | 'ai' | 'rock'
+export type SavedPresetKind = TreeKind | 'multi' | 'rock' | 'rock-c2'
+export type SavedPresetPayload = TreeSpec | AiSceneSpec | RockSpec | PolyCRockSpec
 export type StorageMode = 'file' | 'local'
 
-export interface SavedPreset<T = TreeSpec | AiSceneSpec> {
+export interface SavedPreset<T = SavedPresetPayload> {
   id: string
   scope: PresetScope
   name: string
-  kind: TreeKind | 'multi'
+  kind: SavedPresetKind
   kindLabel: string
   triangles: number
   lighting: LightingPreset
@@ -31,10 +35,10 @@ export interface PresetLibraryFile {
   items: SavedPreset[]
 }
 
-export interface SavePresetInput<T = TreeSpec | AiSceneSpec> {
+export interface SavePresetInput<T = SavedPresetPayload> {
   scope: PresetScope
   name: string
-  kind: TreeKind | 'multi'
+  kind: SavedPresetKind
   kindLabel: string
   triangles: number
   lighting: LightingPreset
@@ -55,13 +59,44 @@ function makeId(scope: PresetScope) {
   return `${scope}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 }
 
+function isPolyCRockPayload(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object') return false
+  const p = (raw as { preset?: unknown }).preset
+  return typeof p === 'string' && (polyCRockPresetIds as readonly string[]).includes(p)
+}
+
 export function parsePresetItem(raw: unknown): SavedPreset | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const o = raw as Record<string, unknown>
-  const scope: PresetScope | undefined = o.scope === 'tree' || o.scope === 'ai' ? o.scope : undefined
+  const scope: PresetScope | undefined = o.scope === 'tree' || o.scope === 'ai' || o.scope === 'rock' ? o.scope : undefined
   if (!scope) return undefined
   try {
-    const payload = scope === 'tree' ? parseTreeSpec(o.payload) : parseAiScene(o.payload)
+    let payload: SavedPresetPayload
+    let kind: SavedPresetKind
+    let defaultKindLabel: string
+    if (scope === 'tree') {
+      const tree = parseTreeSpec(o.payload)
+      payload = tree
+      kind = tree.kind
+      defaultKindLabel = kind
+    } else if (scope === 'ai') {
+      const ai = parseAiScene(o.payload)
+      payload = ai
+      kind = ai.parts.length === 1 ? ai.parts[0].spec.kind : 'multi'
+      defaultKindLabel = `${ai.parts.length} 部件场景`
+    } else {
+      if (o.kind === 'rock-c2' || isPolyCRockPayload(o.payload)) {
+        const c2 = parsePolyCRockSpec(o.payload)
+        payload = c2
+        kind = 'rock-c2'
+        defaultKindLabel = '路线 C2 · 512 PBR'
+      } else {
+        const rk = parseRockSpec(o.payload)
+        payload = rk
+        kind = 'rock'
+        defaultKindLabel = rk.style === 'cel' ? '赛璐璐岩' : rk.style === 'handpainted' ? '手绘裂纹' : '厚涂切面'
+      }
+    }
     const name = typeof o.name === 'string' && o.name.trim() ? o.name.trim().slice(0, 80) : payload.name || '未命名预设'
     const lighting: LightingPreset = typeof o.lighting === 'string' && validLighting.has(o.lighting)
       ? o.lighting as LightingPreset
@@ -70,16 +105,13 @@ export function parsePresetItem(raw: unknown): SavedPreset | undefined {
     const now = new Date().toISOString()
     const createdAt = typeof o.createdAt === 'string' && o.createdAt ? o.createdAt : now
     const updatedAt = typeof o.updatedAt === 'string' && o.updatedAt ? o.updatedAt : createdAt
-    const kind = scope === 'tree'
-      ? (payload as TreeSpec).kind
-      : ((payload as AiSceneSpec).parts.length === 1 ? (payload as AiSceneSpec).parts[0].spec.kind : 'multi')
     const kindLabel = typeof o.kindLabel === 'string' && o.kindLabel.trim()
       ? o.kindLabel.trim().slice(0, 32)
-      : (scope === 'tree' ? kind : `${(payload as AiSceneSpec).parts.length} 部件场景`)
+      : defaultKindLabel
     const triangles = typeof o.triangles === 'number' && Number.isFinite(o.triangles) && o.triangles >= 0
       ? Math.round(o.triangles)
       : 0
-    const textures = parseSavedTextureMap(o.textures)
+    const textures = scope === 'tree' ? parseSavedTextureMap(o.textures) : undefined
     return {
       id: typeof o.id === 'string' && o.id.trim() ? o.id.trim() : makeId(scope),
       scope,
@@ -148,10 +180,10 @@ export interface PresetStore {
   readonly storageMode: StorageMode
   ready(): Promise<void>
   reload(): Promise<SavedPreset[]>
-  list<T = TreeSpec | AiSceneSpec>(scope?: PresetScope): SavedPreset<T>[]
-  get<T = TreeSpec | AiSceneSpec>(id: string): SavedPreset<T> | undefined
-  saveNew<T extends TreeSpec | AiSceneSpec>(input: SavePresetInput<T>): Promise<SavedPreset<T>>
-  overwrite<T extends TreeSpec | AiSceneSpec>(id: string, input: Omit<SavePresetInput<T>, 'scope' | 'name'> & { name?: string }): Promise<SavedPreset<T>>
+  list<T = SavedPresetPayload>(scope?: PresetScope): SavedPreset<T>[]
+  get<T = SavedPresetPayload>(id: string): SavedPreset<T> | undefined
+  saveNew<T extends SavedPresetPayload>(input: SavePresetInput<T>): Promise<SavedPreset<T>>
+  overwrite<T extends SavedPresetPayload>(id: string, input: Omit<SavePresetInput<T>, 'scope' | 'name'> & { name?: string }): Promise<SavedPreset<T>>
   rename(id: string, nextName: string): Promise<SavedPreset>
   remove(id: string): Promise<boolean>
   exportBundle(scope?: PresetScope): PresetLibraryFile
@@ -337,17 +369,17 @@ export function createPresetStore(options: PresetStoreOptions = {}): PresetStore
     get storageMode() { return mode },
     ready: () => initPromise,
     reload,
-    list<T = TreeSpec | AiSceneSpec>(scope?: PresetScope) {
+    list<T = SavedPresetPayload>(scope?: PresetScope) {
       return (scope ? items.filter(x => x.scope === scope) : items) as SavedPreset<T>[]
     },
-    get<T = TreeSpec | AiSceneSpec>(id: string) {
+    get<T = SavedPresetPayload>(id: string) {
       return items.find(x => x.id === id) as SavedPreset<T> | undefined
     },
-    async saveNew<T extends TreeSpec | AiSceneSpec>(input: SavePresetInput<T>) {
+    async saveNew<T extends SavedPresetPayload>(input: SavePresetInput<T>) {
       await initPromise
       return mutateWithRollback(() => {
         const now = new Date().toISOString()
-        const name = input.name.trim().slice(0, 80) || '我的植物预设'
+        const name = input.name.trim().slice(0, 80) || (input.scope === 'rock' ? '我的石头预设' : '我的植物预设')
         const payload = deepClone(input.payload)
         payload.name = name
         const cleanTex = parseSavedTextureMap(input.textures)
@@ -368,7 +400,7 @@ export function createPresetStore(options: PresetStoreOptions = {}): PresetStore
         return { next: [entry, ...items], result: entry }
       })
     },
-    async overwrite<T extends TreeSpec | AiSceneSpec>(id: string, input: Omit<SavePresetInput<T>, 'scope' | 'name'> & { name?: string }) {
+    async overwrite<T extends SavedPresetPayload>(id: string, input: Omit<SavePresetInput<T>, 'scope' | 'name'> & { name?: string }) {
       await initPromise
       return mutateWithRollback(() => {
         const idx = items.findIndex(x => x.id === id)

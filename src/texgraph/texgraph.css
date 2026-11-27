@@ -101,12 +101,13 @@
 .tl-preview-bar {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 6px 12px; font-size: 11.5px; font-weight: 600;
-  background: #e4f2e8; color: #1e5231; border-bottom: 1px solid #bdd9c4;
+  background: #e4f2e8; color: #1e5231; border-top: 1px solid #bdd9c4;
 }
 .tl-preview-bar[hidden] { display: none; }
 
 .tl-scroll {
   flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px 14px;
+  overflow-anchor: none;
 }
 .tl-grid {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
@@ -125,13 +126,12 @@
 .tl-card {
   display: flex; flex-direction: column; overflow: hidden; align-self: start;
   border: 1px solid #d8decf; border-radius: 9px; background: #fff;
-  transition: border-color .14s, box-shadow .14s, transform .14s;
+  transition: border-color .14s, box-shadow .14s;
   cursor: pointer;
 }
 .tl-card:hover {
   border-color: #4f8560;
   box-shadow: 0 5px 16px rgba(34, 62, 42, .12);
-  transform: translateY(-1px);
 }
 .tl-card.is-active {
   border-color: #26593a;

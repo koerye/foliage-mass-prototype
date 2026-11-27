@@ -18,8 +18,15 @@ import {
   Vector2,
   Vector3,
 } from 'three'
+import { createHiddenShowcaseStore } from '../ai/showcase-store'
+import { defaultPolyCRockSpec, parsePolyCRockSpec, polyCRockPresetIds, polyCRockPresets, type PolyCRockSpec } from '../assembly/spec'
 import { exportGlb } from '../export-glb'
 import type { RockV2BakeDiagnostics, RockV2BrushMode } from '../rock-v2/bake'
+import {
+  decodePhotoCraftPbrFiles,
+  loadDefaultPhotoCraftPbrLayers,
+  type ExternalPbrLayers,
+} from '../rock-v2/photocraft-pbr'
 import { PolyCWorkerClient, type PolyCJobMeta } from '../rock-v2/poly-c-client'
 import type { PolyCWorkerBakeResponse, PolyCWorkerPreviewResponse } from '../rock-v2/poly-c.worker'
 import PolyCWorker from '../rock-v2/poly-c.worker?worker&inline'
@@ -35,6 +42,8 @@ import { mountDesktopToolbarBadge, tryDesktopSaveBlob } from '../studio/desktop-
 import { SnapshotHistory } from '../studio/history'
 import { createDefaultOverrideStore } from '../studio/default-overrides'
 import { bindGlbExportPopover } from '../studio/glb-export-ui'
+import { mountPresetLibrary, type ShowcaseOption } from '../studio/preset-library'
+import { captureViewportThumbnail, createPresetStore, deepClone, type SavedPreset } from '../studio/preset-store'
 import { lightingPresets, Viewer, type Camera, type LightingPreset } from '../viewport'
 import { buildRockGroup, type RockBuildStats } from './geometry'
 import { makeRockMaterial, updateRockMaterialLive, type RockViewMode } from './material'
@@ -177,6 +186,8 @@ byId('app').innerHTML = `
     <a class="b-link" href="./ai.html" title="前往 AI 模式空白工程">✦ AI 模式</a>
     <a class="b-link" href="./scene.html" title="场景组装工作台 · 自由摆放树木花草石头查看整体效果">❖ 场景组装</a>
     <button id="rk-quick-reseed" title="随机生成新外形">🎲 随机石形</button>
+    <button id="rk-save-preset" class="pl-save-btn" title="将当前石头（支持传统岩与路线 C2 岩）带 3D 缩略图保存到预设库">★ 保存预设</button>
+    <button id="rk-open-presets" title="管理石头预设库：单击预览、改名、覆盖、删除与内置预设管理">预设库<span class="pl-badge" id="rk-preset-count">0</span></button>
     <input id="file" type="file" accept=".json,application/json" hidden>
     <button id="import">导入 JSON</button>
     <button id="json">保存 JSON</button>
@@ -218,8 +229,12 @@ byId('app').innerHTML = `
   <form class="inspector panel s-inspector" id="form" aria-label="石头参数" onsubmit="return false">
     <header class="inspect-head"><h2>石头参数</h2><button id="reset" type="button">恢复预设</button></header>
     <div class="s-scroll" id="panel">
-      <div class="rk-preset-grid" role="group" aria-label="石头预设">
+      <div class="rk-preset-grid" id="rk-preset-grid" role="group" aria-label="石头预设">
         ${rockPresetIds.map(id => `<button type="button" class="rk-preset-btn" data-preset="${id}" aria-pressed="false"><span>${rockPresets[id].name}</span><span class="rk-preset-tag">${presetBadges[id]}</span></button>`).join('')}
+      </div>
+      <div class="rk-hidden-restore" id="rk-hidden-restore" hidden>
+        <span id="rk-hidden-restore-text">已隐藏内置预设</span>
+        <button type="button" id="rk-hidden-restore-btn">↺ 恢复全部</button>
       </div>
       <button type="button" id="rk-sdf-proto-btn" class="rk-sdf-btn" aria-pressed="false" title="路线 B 单偏心母体减切 SDF + Surface Nets + 512 标准 PBR Worker 实验入口">
         <span>🧪 路线 B · SDF 雕刻实验</span><span class="rk-preset-tag">方案 B · 512 PBR</span>
@@ -235,8 +250,21 @@ byId('app').innerHTML = `
           <button type="button" data-polyc-preset="terraced-moss-bluff-c2" aria-pressed="false">苔藓层叠巨岩</button>
         </div>
         <div class="rk-polyc-mode-tabs" role="group" aria-label="C2 材质模式">
-          <button type="button" data-polyc-mode="shallow-detail" aria-pressed="true">浅细节版（面内层理）</button>
-          <button type="button" data-polyc-mode="baseline" aria-pressed="false">材质基线（诊断）</button>
+          <button type="button" data-polyc-mode="photocraft-pbr" aria-pressed="false" title="使用 PhotoCraft Material Studio 制作的无接缝 1024 手绘砂岩+天鹅绒苔藓 PBR 贴图组（支持一键导入替换）">🎨 PhotoCraft</button>
+          <button type="button" data-polyc-mode="shallow-detail" aria-pressed="true" title="旧版内置程序面内层理 PBR（便于前后对比）">旧程序浅细节</button>
+          <button type="button" data-polyc-mode="baseline" aria-pressed="false" title="纯平坦法线诊断基线">材质基线</button>
+        </div>
+        <div class="rk-pc-import-box" id="rk-pc-import-box" hidden>
+          <div class="rk-pc-import-head">
+            <span id="rk-pc-import-label">🎨 PhotoCraft · 层叠砂岩 + 苔藓 PBR</span>
+          </div>
+          <div class="rk-pc-import-row">
+            <input id="polyc-pc-stone-file" type="file" accept=".png,.jpg,.jpeg,.webp" multiple hidden>
+            <input id="polyc-pc-moss-file" type="file" accept=".png,.jpg,.jpeg,.webp" multiple hidden>
+            <button type="button" id="polyc-pc-stone-btn" title="可一次多选 PhotoCraft 导出的 base_color / normal / roughness / ao PNG 替换石体 PBR">📂 导入石体 PBR</button>
+            <button type="button" id="polyc-pc-moss-btn" title="可一次多选 PhotoCraft 导出的 base_color / normal / roughness / ao PNG 替换苔藓 PBR">🌿 导入苔藓 PBR</button>
+            <button type="button" id="polyc-pc-reset-btn" title="恢复内置 PhotoCraft 精绘砂岩与苔藓 PBR" hidden>↺ 恢复内置</button>
+          </div>
         </div>
         <label class="s-field s-top"><span>随机种子</span><input id="polyc-seed" type="number" min="0" step="1" value="5104"><button type="button" id="polyc-reseed" title="随机路线 C2 种子">🎲</button></label>
         <label class="s-field"><span>肩台切深</span><input type="range" data-polyc-r="shoulderDepth" min="0.65" max="1.35" step="0.02" value="1.0"><input type="number" data-polyc-n="shoulderDepth" min="0.65" max="1.35" step="0.02" value="1.0"></label>
@@ -278,6 +306,21 @@ byId('app').innerHTML = `
   </form>
 </section>
 <div id="toast" class="toast" role="status" hidden></div>`
+
+function syncStudioTop() {
+  const bar = document.querySelector<HTMLElement>('#app > header.bar')
+  const barH = bar ? (bar.getBoundingClientRect().height || bar.offsetHeight) : 70
+  document.documentElement.style.setProperty('--studio-top', `${Math.max(0, Math.ceil(barH))}px`)
+}
+{
+  const bar = document.querySelector<HTMLElement>('#app > header.bar')
+  if (typeof ResizeObserver !== 'undefined' && bar) {
+    new ResizeObserver(syncStudioTop).observe(bar)
+  }
+  window.addEventListener('resize', syncStudioTop)
+  syncStudioTop()
+  requestAnimationFrame(syncStudioTop)
+}
 
 const livePaths = new Set<string>(
   sections.flatMap(s => s.fields).filter(f => 'live' in f && f.live).map(f => f.path),
@@ -682,6 +725,7 @@ let polyCAutoBakeAfterPreview = false
 let polyCLastBakeStats: PolyBakeStats | null = null
 let polyCLastUvAudit: PolyUvAudit | null = null
 let polyCActiveTextures: CanvasTexture[] = []
+let polyCCustomPbrLayers: ExternalPbrLayers | null = null
 let polyCActiveMat: MeshStandardMaterial | null = null
 let polyCActiveBakeMat: MeshStandardMaterial | null = null
 let polyCActiveBakeGeo: BufferGeometry | null = null
@@ -879,17 +923,24 @@ function applyPolyCWorkerResult(res: PolyCWorkerPreviewResponse | PolyCWorkerBak
     const mapTex = makeSdfCanvasTexture(res.albedo, res.size, true, 'RockC2_BaseColor')
     const normTex = makeSdfCanvasTexture(res.normal, res.size, false, 'RockC2_Normal')
     const aoTex = makeSdfCanvasTexture(res.ao, res.size, false, 'RockC2_AO')
+    const roughTex = makeSdfCanvasTexture(res.roughness, res.size, false, 'RockC2_Roughness')
     aoTex.channel = 0
-    polyCActiveTextures = [mapTex, normTex, aoTex]
+    polyCActiveTextures = [mapTex, normTex, aoTex, roughTex]
+    const useRoughMap = jobParams.mode === 'photocraft-pbr'
     mat = new MeshStandardMaterial({
-      name: jobParams.mode === 'baseline' ? 'Mat_RockC2_Baseline' : 'Mat_RockC2_ShallowDetail',
+      name: jobParams.mode === 'baseline'
+        ? 'Mat_RockC2_Baseline'
+        : jobParams.mode === 'photocraft-pbr'
+          ? 'Mat_RockC2_PhotoCraftPBR'
+          : 'Mat_RockC2_ShallowDetail',
       color: 0xffffff,
       map: mapTex,
       normalMap: normTex,
       normalScale: new Vector2(1, 1),
       aoMap: aoTex,
-      aoMapIntensity: 0.85,
-      roughness: 0.90,
+      aoMapIntensity: jobParams.mode === 'photocraft-pbr' ? 0.92 : 0.85,
+      roughnessMap: useRoughMap ? roughTex : null,
+      roughness: useRoughMap ? 1.0 : 0.90,
       metalness: 0.0,
     })
     polyCActiveBakeMat = mat
@@ -1037,7 +1088,11 @@ function applyPolyCWorkerResult(res: PolyCWorkerPreviewResponse | PolyCWorkerBak
     })
     if (polyCMetrics.appliedHistory.length > 140) polyCMetrics.appliedHistory.shift()
     const stageLbl = res.stage === 'bake'
-      ? (jobParams.mode === 'baseline' ? '512 基线 PBR 就绪' : '512 浅细节 PBR 就绪')
+      ? (jobParams.mode === 'baseline'
+        ? '512 基线 PBR 就绪'
+        : jobParams.mode === 'photocraft-pbr'
+          ? 'PhotoCraft 512 PBR 就绪'
+          : '512 旧程序浅细节就绪')
       : 'C2 灰模拖拽预览'
     updatePolyCMetricsBanner(stageLbl, workerMs, paintVisibleMs)
     if (res.stage === 'preview' && polyCAutoBakeAfterPreview && polyCProtoActive) {
@@ -1067,8 +1122,18 @@ function syncPolyCPanel() {
   byId('rk-legacy-controls').hidden = sdfProtoActive || polyCProtoActive
   if (!polyCProtoActive) return
   const presetMeta = POLYC_PRESET_META[polyCParams.preset]
-  const modeTag = polyCParams.mode === 'baseline' ? '材质基线诊断' : '浅细节版'
+  const modeTag = polyCParams.mode === 'baseline'
+    ? '材质基线诊断'
+    : polyCParams.mode === 'photocraft-pbr'
+      ? 'PhotoCraft PBR'
+      : '旧程序浅细节'
   byId('rock-title').textContent = `${presetMeta.label} · 路线 C2 实验 (${modeTag} · 512 PBR)`
+  const pcBox = document.getElementById('rk-pc-import-box')
+  if (pcBox) pcBox.hidden = polyCParams.mode !== 'photocraft-pbr'
+  const pcResetBtn = document.getElementById('polyc-pc-reset-btn')
+  if (pcResetBtn) pcResetBtn.hidden = !polyCCustomPbrLayers
+  const pcLbl = document.getElementById('rk-pc-import-label')
+  if (pcLbl) pcLbl.textContent = polyCCustomPbrLayers?.label ?? '🎨 PhotoCraft · 层叠砂岩 + 苔藓 PBR'
   document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach(btn => {
     btn.setAttribute('aria-pressed', 'false')
   })
@@ -1107,8 +1172,8 @@ function submitPolyCJob(stage: 'preview' | 'bake', reframe = false) {
       size: 512,
       mode: snapshot.mode,
       baseColorHex: snapshot.baseColorHex,
-      dilationPasses: 14,
-      aoRays: 16,
+      dilationPasses: snapshot.preset === 'terraced-moss-bluff-c2' ? 8 : 14,
+      aoRays: snapshot.preset === 'terraced-moss-bluff-c2' ? 10 : 16,
       strataStrength: snapshot.strataStrength,
     } : undefined,
   })
@@ -1128,11 +1193,17 @@ function enterPolyCProto(resetParams = false, nextPreset?: PolyCsgPresetId) {
     polyCParams = {
       ...DEFAULT_POLYC_PARAMS,
       preset: activePreset,
+      mode: activePreset === 'terraced-moss-bluff-c2' ? 'photocraft-pbr' : DEFAULT_POLYC_PARAMS.mode,
       seed: POLYC_PRESET_META[activePreset].canonicalSeed,
+      baseColorHex: activePreset === 'terraced-moss-bluff-c2' ? '#cfa87d' : DEFAULT_POLYC_PARAMS.baseColorHex,
     }
   } else if (nextPreset) {
     polyCParams.preset = nextPreset
     polyCParams.seed = POLYC_PRESET_META[nextPreset].canonicalSeed
+    if (nextPreset === 'terraced-moss-bluff-c2') {
+      polyCParams.mode = 'photocraft-pbr'
+      polyCParams.baseColorHex = '#cfa87d'
+    }
   }
   polyCProtoActive = true
   polyCLastBakeStats = null
@@ -1426,12 +1497,55 @@ document.querySelectorAll<HTMLButtonElement>('[data-polyc-preset]').forEach(btn 
     if (!next || polyCParams.preset === next) return
     polyCParams.preset = next
     polyCParams.seed = POLYC_PRESET_META[next].canonicalSeed
+    if (next === 'terraced-moss-bluff-c2') {
+      polyCParams.mode = 'photocraft-pbr'
+      polyCParams.baseColorHex = '#cfa87d'
+    }
     polyCLastBakeStats = null
     polyCLastUvAudit = null
     polyCAutoBakeAfterPreview = true
     syncPolyCPanel()
     submitPolyCJob('preview', true)
   })
+})
+
+byId('polyc-pc-stone-btn').addEventListener('click', () => byId<HTMLInputElement>('polyc-pc-stone-file').click())
+byId('polyc-pc-moss-btn').addEventListener('click', () => byId<HTMLInputElement>('polyc-pc-moss-file').click())
+byId('polyc-pc-reset-btn').addEventListener('click', () => {
+  polyCCustomPbrLayers = null
+  polyCWorkerClient.setExternalPbr(null)
+  syncPolyCPanel()
+  if (polyCProtoActive && polyCParams.mode === 'photocraft-pbr') submitPolyCJob('bake', false)
+  message('已恢复内置 PhotoCraft 精绘砂岩 + 苔藓 PBR')
+})
+
+const handlePhotoCraftImport = async (target: 'stone' | 'moss', files: FileList | null) => {
+  if (!files || files.length === 0) return
+  try {
+    const base = polyCCustomPbrLayers ?? await loadDefaultPhotoCraftPbrLayers()
+    const fallback = target === 'moss' ? (base.moss ?? base.stone) : base.stone
+    const { set, matched } = await decodePhotoCraftPbrFiles(files, fallback)
+    polyCCustomPbrLayers = {
+      label: `🎨 自定义 PhotoCraft (${target === 'moss' ? '苔藓' : '石体'}: ${matched.join('/')})`,
+      stone: target === 'stone' ? set : base.stone,
+      moss: target === 'moss' ? set : base.moss,
+    }
+    polyCWorkerClient.setExternalPbr(polyCCustomPbrLayers)
+    polyCParams.mode = 'photocraft-pbr'
+    syncPolyCPanel()
+    if (polyCProtoActive) submitPolyCJob('bake', false)
+    message(`已导入 PhotoCraft ${target === 'moss' ? '苔藓' : '石体'} PBR：${matched.join(' + ')}`)
+  } catch (err) {
+    message(err instanceof Error ? `PhotoCraft 贴图导入失败：${err.message}` : 'PhotoCraft 贴图导入失败', true)
+  }
+}
+byId<HTMLInputElement>('polyc-pc-stone-file').addEventListener('change', ev => {
+  const input = ev.target as HTMLInputElement
+  void handlePhotoCraftImport('stone', input.files).finally(() => { input.value = '' })
+})
+byId<HTMLInputElement>('polyc-pc-moss-file').addEventListener('change', ev => {
+  const input = ev.target as HTMLInputElement
+  void handlePhotoCraftImport('moss', input.files).finally(() => { input.value = '' })
 })
 
 document.querySelectorAll<HTMLButtonElement>('[data-polyc-mode]').forEach(btn => {
@@ -1698,6 +1812,13 @@ document.querySelectorAll<HTMLButtonElement>('[data-camera]').forEach(btn => {
 
 // JSON Import / Export, PNG Snapshot, GLB Export
 byId('json').addEventListener('click', () => {
+  if (polyCProtoActive) {
+    const c2Spec = currentPolyCSpec()
+    const blob = new Blob([JSON.stringify(c2Spec, null, 2)], { type: 'application/json' })
+    downloadBlob(blob, `${c2Spec.preset}-${c2Spec.seed}.rock.json`)
+    message('已导出路线 C2 石头参数 JSON')
+    return
+  }
   const blob = new Blob([JSON.stringify(spec, null, 2)], { type: 'application/json' })
   downloadBlob(blob, `${spec.preset}-${spec.seed}.rock.json`)
   message('已导出石头参数 JSON')
@@ -1708,14 +1829,23 @@ byId<HTMLInputElement>('file').addEventListener('change', async ev => {
   const file = (ev.target as HTMLInputElement).files?.[0]
   if (!file) return
   try {
-    const parsed = parseRockSpec(JSON.parse(await file.text()))
-    rockHistory.clear()
-    presetId = parsed.preset
-    spec = parsed
-    userDirty = false
-    syncPanel()
-    rebuild(true)
-    message(`已导入石头参数：${parsed.name}`)
+    const raw = JSON.parse(await file.text()) as Record<string, unknown>
+    if (typeof raw?.preset === 'string' && (polyCRockPresetIds as readonly string[]).includes(raw.preset)) {
+      const c2 = parsePolyCRockSpec(raw)
+      applyPolyCRockSpecToStudio(c2)
+      message(`已导入路线 C2 石头参数：${c2.name}`)
+    } else {
+      const parsed = parseRockSpec(raw)
+      exitPolyCProto()
+      exitSdfProto()
+      rockHistory.clear()
+      presetId = parsed.preset
+      spec = parsed
+      userDirty = false
+      syncPanel()
+      rebuild(true)
+      message(`已导入石头参数：${parsed.name}`)
+    }
   } catch (err) {
     message(err instanceof Error ? `JSON 解析失败：${err.message}` : 'JSON 解析失败', true)
   } finally {
@@ -1775,10 +1905,222 @@ bindGlbExportPopover({
   message,
 })
 
+// ---- Rock Preset Library (Save / Rename / Overwrite / Delete / Built-in Manage & Hide/Restore) ----
+type RockLibraryPayload = RockSpec | PolyCRockSpec
+interface RockLibrarySnapshot {
+  polyCProtoActive: boolean
+  sdfProtoActive: boolean
+  presetId: RockPresetId
+  spec: RockSpec
+  polyCParams: PolyCProtoParams
+  lighting: LightingPreset
+}
+
+function isPolyCRockSpec(p: RockLibraryPayload): p is PolyCRockSpec {
+  return (polyCRockPresetIds as readonly string[]).includes(p.preset)
+}
+
+function currentPolyCSpec(): PolyCRockSpec {
+  return {
+    version: 1,
+    preset: polyCParams.preset,
+    name: polyCRockPresets[polyCParams.preset].name,
+    mode: polyCParams.mode,
+    seed: polyCParams.seed,
+    shoulderDepth: polyCParams.shoulderDepth,
+    bevelScale: polyCParams.bevelScale,
+    notchDepth: polyCParams.notchDepth,
+    strataStrength: polyCParams.strataStrength,
+    baseColor: polyCParams.baseColorHex,
+  }
+}
+
+function applyPolyCRockSpecToStudio(c2: PolyCRockSpec) {
+  exitSdfProto()
+  polyCParams = {
+    preset: c2.preset,
+    mode: c2.mode,
+    seed: c2.seed,
+    shoulderDepth: c2.shoulderDepth,
+    bevelScale: c2.bevelScale,
+    notchDepth: c2.notchDepth,
+    strataStrength: c2.strataStrength,
+    baseColorHex: c2.baseColor,
+  }
+  polyCProtoActive = true
+  byId('rk-polyc-proto-btn').setAttribute('aria-pressed', 'true')
+  byId('rk-polyc-proto-box').hidden = false
+  byId('rk-legacy-controls').hidden = true
+  syncPolyCPanel()
+  polyCAutoBakeAfterPreview = true
+  submitPolyCJob('preview', true)
+}
+
+const rockBuiltInShowcases: ShowcaseOption<RockLibraryPayload>[] = [
+  ...([...polyCRockPresetIds].reverse().map((cid): ShowcaseOption<RockLibraryPayload> => ({
+    id: `rock-c2:${cid}`,
+    name: polyCRockPresets[cid].name,
+    subtitle: polyCRockPresets[cid].subtitle,
+    tag: '路线 C2',
+    lighting: 'neutral',
+    thumbnail: '',
+    build: () => defaultPolyCRockSpec(cid),
+  }))),
+  ...rockPresetIds.map((rid): ShowcaseOption<RockLibraryPayload> => ({
+    id: `rock:${rid}`,
+    name: rockPresets[rid].name,
+    subtitle: rockPresets[rid].style === 'cel' ? '赛璐璐风格切面岩' : rockPresets[rid].style === 'handpainted' ? '手绘裂纹雕塑岩' : '厚涂切面风格岩',
+    tag: presetBadges[rid],
+    lighting: 'neutral',
+    thumbnail: '',
+    build: () => effectivePresetState(rid).spec,
+  })),
+]
+
+const presetStore = createPresetStore()
+const hiddenRockStore = createHiddenShowcaseStore({
+  validIds: rockBuiltInShowcases.map(s => s.id),
+  storageKey: 'vegetation-studio:rock-hidden-presets:v1',
+})
+
+const applyRockPresetPayload = (preset: SavedPreset<RockLibraryPayload>) => {
+  setLightingMood(preset.lighting)
+  if (isPolyCRockSpec(preset.payload)) {
+    applyPolyCRockSpecToStudio(parsePolyCRockSpec(preset.payload))
+  } else {
+    exitPolyCProto()
+    exitSdfProto()
+    rockHistory.clear()
+    const parsed = parseRockSpec(preset.payload)
+    presetId = parsed.preset
+    spec = parsed
+    userDirty = false
+    syncPanel()
+    rebuild(true)
+  }
+}
+
+const presetLibrary = mountPresetLibrary<RockLibraryPayload, RockLibrarySnapshot>({
+  scope: 'rock',
+  store: presetStore,
+  showcasesTabLabel: '🪨 内置预设',
+  mineTabLabel: '★ 我的石头',
+  showcases: rockBuiltInShowcases,
+  getHiddenShowcaseIds: () => hiddenRockStore.hiddenIds(),
+  deleteShowcase: async sc => { await hiddenRockStore.hide(sc.id) },
+  restoreShowcases: async () => { await hiddenRockStore.restoreAll() },
+  capture: () => {
+    if (polyCProtoActive) {
+      const c2 = currentPolyCSpec()
+      const triCount = polyCPreviewMesh?.geometry.index
+        ? Math.round(polyCPreviewMesh.geometry.index.count / 3)
+        : (built?.stats.triangles ?? 0)
+      return {
+        defaultName: c2.name,
+        kind: 'rock-c2',
+        kindLabel: '路线 C2 · 512 PBR',
+        triangles: triCount,
+        lighting,
+        thumbnail: captureViewportThumbnail(viewer),
+        payload: c2,
+      }
+    }
+    return {
+      defaultName: spec.name,
+      kind: 'rock',
+      kindLabel: spec.style === 'cel' ? '赛璐璐岩' : spec.style === 'handpainted' ? '手绘裂纹' : '厚涂切面',
+      triangles: built?.stats.triangles ?? 0,
+      lighting,
+      thumbnail: captureViewportThumbnail(viewer),
+      payload: deepClone(spec),
+    }
+  },
+  snapshotState: () => ({
+    polyCProtoActive,
+    sdfProtoActive,
+    presetId,
+    spec: deepClone(spec),
+    polyCParams: { ...polyCParams },
+    lighting,
+  }),
+  restoreState: snap => {
+    setLightingMood(snap.lighting)
+    if (snap.polyCProtoActive) {
+      applyPolyCRockSpecToStudio({
+        version: 1,
+        preset: snap.polyCParams.preset,
+        name: polyCRockPresets[snap.polyCParams.preset].name,
+        mode: snap.polyCParams.mode,
+        seed: snap.polyCParams.seed,
+        shoulderDepth: snap.polyCParams.shoulderDepth,
+        bevelScale: snap.polyCParams.bevelScale,
+        notchDepth: snap.polyCParams.notchDepth,
+        strataStrength: snap.polyCParams.strataStrength,
+        baseColor: snap.polyCParams.baseColorHex,
+      })
+    } else {
+      exitPolyCProto()
+      exitSdfProto()
+      presetId = snap.presetId
+      spec = deepClone(snap.spec)
+      syncPanel()
+      rebuild(true)
+    }
+  },
+  preview: applyRockPresetPayload,
+  apply: applyRockPresetPayload,
+  message: (text, err) => message(text, err),
+})
+
+const syncRockPresetBadge = () => {
+  byId('rk-preset-count').textContent = String(presetStore.list('rock').length)
+}
+const syncHiddenBuiltInRocks = () => {
+  const hidden = hiddenRockStore.hiddenIds()
+  document.querySelectorAll<HTMLButtonElement>('#rk-preset-grid [data-preset]').forEach(btn => {
+    btn.hidden = hidden.has(`rock:${btn.dataset.preset}`)
+  })
+  document.querySelectorAll<HTMLButtonElement>('[data-polyc-preset]').forEach(btn => {
+    btn.hidden = hidden.has(`rock-c2:${btn.dataset.polycPreset}`)
+  })
+  const restoreBox = byId('rk-hidden-restore')
+  const count = hidden.size
+  restoreBox.hidden = count === 0
+  if (count > 0) {
+    byId('rk-hidden-restore-text').textContent = `已删除/隐藏 ${count} 个内置预设`
+  }
+  presetLibrary.refreshShowcases()
+}
+
+byId('rk-hidden-restore-btn').addEventListener('click', () => {
+  void hiddenRockStore.restoreAll().then(n => {
+    syncHiddenBuiltInRocks()
+    message(n > 0 ? `已恢复全部 ${n} 个内置石头预设` : '内置石头预设已为完整状态')
+  }).catch(err => message(err, true))
+})
+
+presetStore.subscribe(syncRockPresetBadge)
+void presetStore.ready().then(syncRockPresetBadge)
+syncRockPresetBadge()
+
+hiddenRockStore.subscribe(syncHiddenBuiltInRocks)
+void hiddenRockStore.ready().then(syncHiddenBuiltInRocks)
+syncHiddenBuiltInRocks()
+
 const activityLogDrawer = mountActivityLogDrawer({
   triggerButton: byId<HTMLButtonElement>('activity-log-btn'),
   badgeElement: byId('al-badge'),
+  onBeforeOpen: () => presetLibrary.close(),
   message: (text, err) => message(text, err, false),
+})
+
+byId('rk-save-preset').addEventListener('click', () => {
+  activityLogDrawer.close()
+  presetLibrary.open(true, 'mine')
+})
+byId('rk-open-presets').addEventListener('click', () => {
+  activityLogDrawer.close()
+  presetLibrary.toggle('mine')
 })
 
 // Expose clean automation & debug handle
@@ -1894,6 +2236,27 @@ const activityLogDrawer = mountActivityLogDrawer({
     if (!sdfProtoActive && !polyCProtoActive && vertexColorsDirty) rebuild(false)
     const blob = await exportGlb(built.group, { mode: 'merged', excludeDecorations: false })
     return blob.size
+  },
+  exportGlbBase64: async () => {
+    if (!built) return ''
+    if (!sdfProtoActive && !polyCProtoActive && vertexColorsDirty) rebuild(false)
+    const blob = await exportGlb(built.group, { mode: 'merged', excludeDecorations: false })
+    const bytes = new Uint8Array(await blob.arrayBuffer())
+    let bin = ''
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+    }
+    return btoa(bin)
+  },
+  presets: {
+    store: presetStore,
+    hiddenStore: hiddenRockStore,
+    open: (focus?: boolean, tab?: 'mine' | 'showcases') => presetLibrary.open(focus, tab),
+    close: () => presetLibrary.close(),
+    list: () => presetStore.list<RockLibraryPayload>('rock'),
+    hiddenBuiltIns: () => hiddenRockStore.listHiddenIds(),
+    deleteBuiltIn: (id: string) => hiddenRockStore.hide(id),
+    restoreBuiltIns: () => hiddenRockStore.restoreAll(),
   },
 }
 

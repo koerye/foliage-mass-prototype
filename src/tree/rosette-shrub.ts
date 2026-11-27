@@ -5,6 +5,7 @@
 // - Zero chaotic cross-card intersections; smooth dome-blended vertex normals + tiered inner AO
 import { BufferAttribute, BufferGeometry, Color, MathUtils, Vector3 } from 'three'
 import { rng, seedFor } from '../shape'
+import { sampleHorizontalSlots, type BotanicalLayout } from './botanical-layout'
 import type { CrownEnvelope } from './envelope'
 import type { TreeSpec } from './spec'
 
@@ -155,22 +156,29 @@ export function buildRosetteShrub(spec: TreeSpec, env: CrownEnvelope): BuiltRose
 
   interface CandidateLeaf {
     angle: number
+    x?: number
+    z?: number
     hFrac: number
     rFrac: number
     proud: boolean
     pitchDeg: number
     szScale: number
     tierIdx: number
+    sideSign: number
   }
   const candidates: CandidateLeaf[] = []
 
   // 1. Crown apex cap (5 staggered buoyant leaves closing TOP VIEW cleanly into a rounded dome peak — zero center hole!)
+  const hj = MathUtils.clamp(spec.botanical?.heightJitter ?? 0.36, 0, 1)
+  const lj = MathUtils.clamp(spec.botanical?.lateralJitter ?? 0.42, 0, 1)
+  const layout: BotanicalLayout = spec.botanical?.layout ?? 'phyllotaxis'
+  const hjAmp = MathUtils.lerp(0.15, 2.40, hj)
   const crownCount = Math.max(4, Math.min(6, Math.round(totalTarget * 0.13)))
   for (let i = 0; i < crownCount; i++) {
     const u = i / Math.max(1, crownCount - 1) // 0 = very peak, 1 = upper shoulder ring
-    const angle = i * GOLDEN + 0.45 + (random() - 0.5) * 0.25
+    const angle = i * GOLDEN + 0.45 + (random() - 0.5) * MathUtils.lerp(0.12, 0.46, lj)
     const rFrac = u === 0 ? 0.04 + random() * 0.04 : MathUtils.lerp(0.14, 0.34, u) * (0.90 + random() * 0.20)
-    const hFrac = MathUtils.lerp(1.00, 0.78, u) + (random() - 0.5) * 0.04
+    const hFrac = MathUtils.clamp(MathUtils.lerp(1.00, 0.78, u) + (random() - 0.5) * 0.06 * hjAmp, 0.64, 1.14)
     const pitchDeg = u === 0 ? 14 + random() * 8 : MathUtils.lerp(20, 36, u) + (random() - 0.5) * 8
     const szScale = MathUtils.lerp(0.76, 0.90, u) * (0.94 + random() * 0.12)
     candidates.push({
@@ -181,51 +189,72 @@ export function buildRosetteShrub(spec: TreeSpec, env: CrownEnvelope): BuiltRose
       pitchDeg,
       szScale,
       tierIdx: 2,
+      sideSign: i % 2 === 0 ? 1 : -1,
     })
   }
 
-  // 2. Proud outer sunlit dome shell arranged by golden-angle phyllotaxis from lush lifted skirt -> shoulders
+  // 2. Proud outer sunlit dome shell using chosen horizontal distribution pattern!
   const proudCount = Math.max(20, Math.round(totalTarget * 0.68))
-  for (let i = 0; i < proudCount; i++) {
-    // u from 0 (outer lower skirt) to 1 (upper shoulder below crown cap)
-    const u = (i + 0.35) / proudCount
-    // Rounded bell-dome profile: wider lush base skirt tapering smoothly into rounded upper shoulder!
+  const proudSlots = sampleHorizontalSlots({
+    layout,
+    count: proudCount,
+    radius: cfg.domeWidth,
+    areaRadius: cfg.domeWidth * 1.12,
+    lateralJitter: lj,
+    random,
+    phaseOffset: crownCount * GOLDEN,
+  })
+  for (let i = 0; i < proudSlots.length; i++) {
+    const slot = proudSlots[i]
+    // Rounded bell-dome profile driven by slot radial fraction (0 = upper shoulder -> 1 = wide skirt)
+    const u = 1 - MathUtils.clamp(slot.rFrac, 0.12, 1)
     const polar = MathUtils.lerp(Math.PI * 0.48, Math.PI * 0.17, u)
-    const rBase = Math.sin(polar) ** 0.90
     const yBase = MathUtils.lerp(0.16, 0.82, Math.cos(polar) ** 0.88)
-    const angle = (i + crownCount) * GOLDEN + (random() - 0.5) * 0.20
-    // Generous outward heart-face pitch so EVERY front/side leaf shows its complete glossy heart face!
     const pitchDeg = MathUtils.lerp(54, 24, u ** 0.90) + (random() - 0.5) * 10
     const szScale = MathUtils.lerp(1.08, 0.86, u) * (0.92 + random() * 0.16)
     candidates.push({
-      angle,
-      hFrac: MathUtils.clamp(yBase + (random() - 0.5) * 0.05, 0.14, 0.86),
-      rFrac: rBase * (0.94 + random() * 0.16),
+      angle: slot.angle,
+      x: layout === 'phyllotaxis' ? undefined : slot.x,
+      z: layout === 'phyllotaxis' ? undefined : slot.z,
+      hFrac: MathUtils.clamp(yBase + (random() - 0.5) * 0.08 * hjAmp, 0.12, 0.98),
+      rFrac: Math.sin(polar) ** 0.90 * (0.94 + random() * 0.16),
       proud: true,
       pitchDeg,
       szScale,
       tierIdx: u < 0.42 ? 0 : 1,
+      sideSign: slot.sideSign,
     })
   }
 
   // 3. Recessed interior depth-pocket leaves nestled behind gaps for lush dark-emerald puffiness!
   const innerCount = Math.max(16, Math.round(totalTarget * 0.55))
-  for (let i = 0; i < innerCount; i++) {
-    const u = (i + 0.5) / innerCount
+  const innerSlots = sampleHorizontalSlots({
+    layout,
+    count: innerCount,
+    radius: cfg.domeWidth * 0.68,
+    areaRadius: cfg.domeWidth * 0.86,
+    lateralJitter: lj,
+    random,
+    phaseOffset: 2.15,
+  })
+  for (let i = 0; i < innerSlots.length; i++) {
+    const slot = innerSlots[i]
+    const u = 1 - MathUtils.clamp(slot.rFrac, 0.12, 1)
     const polar = MathUtils.lerp(Math.PI * 0.48, Math.PI * 0.16, u)
-    const rBase = Math.sin(polar) ** 0.90
     const yBase = MathUtils.lerp(0.16, 0.78, Math.cos(polar) ** 0.88)
-    const angle = i * GOLDEN + 2.15 + (random() - 0.5) * 0.30
     const pitchDeg = MathUtils.lerp(52, 22, u) + (random() - 0.5) * 12
     const szScale = MathUtils.lerp(1.04, 0.82, u) * (0.90 + random() * 0.18)
     candidates.push({
-      angle,
-      hFrac: MathUtils.clamp(yBase + (random() - 0.5) * 0.06, 0.13, 0.84),
-      rFrac: rBase * (0.58 + random() * 0.20),
+      angle: slot.angle,
+      x: layout === 'phyllotaxis' ? undefined : slot.x,
+      z: layout === 'phyllotaxis' ? undefined : slot.z,
+      hFrac: MathUtils.clamp(yBase + (random() - 0.5) * 0.09 * hjAmp, 0.11, 0.95),
+      rFrac: Math.sin(polar) ** 0.90 * (0.58 + random() * 0.20),
       proud: false,
       pitchDeg,
       szScale,
       tierIdx: u < 0.4 ? 0 : 1,
+      sideSign: slot.sideSign,
     })
   }
 
@@ -237,14 +266,17 @@ export function buildRosetteShrub(spec: TreeSpec, env: CrownEnvelope): BuiltRose
     const height = cfg.domeHeight * cand.hFrac
 
     const outDir = new Vector3(Math.cos(cand.angle), 0, Math.sin(cand.angle))
-    const socket = new Vector3(outDir.x * radius, height, outDir.z * radius)
+    const tangShift = cand.sideSign * cfg.domeWidth * 0.11 * lj * (cand.tierIdx === 2 ? 0.45 : 1.0)
+    const socket = cand.x !== undefined && cand.z !== undefined
+      ? new Vector3(cand.x, height, cand.z)
+      : new Vector3(outDir.x * radius - outDir.z * tangShift, height, outDir.z * radius + outDir.x * tangShift)
     const deformedSocket = env.deform(socket, cand.hFrac)
     // Keep bottom skirt lifted slightly so bush feels light & airy over grounded stems (no pancake floor smear!)
     if (deformedSocket.y < 0.07) deformedSocket.y = 0.07
 
     const pitchRad = MathUtils.degToRad(MathUtils.clamp(cand.pitchDeg, 6, 66))
-    const rollRad = MathUtils.degToRad((random() - 0.5) * 22)
-    const yawJitter = (random() - 0.5) * 0.26
+    const rollRad = MathUtils.degToRad((random() - 0.5) * 22 + cand.sideSign * lj * 7)
+    const yawJitter = (random() - 0.5) * MathUtils.lerp(0.14, 0.44, lj)
     const fwdHoriz = new Vector3(Math.cos(cand.angle + yawJitter), 0, Math.sin(cand.angle + yawJitter)).normalize()
     const leafFwd = fwdHoriz.clone().multiplyScalar(Math.cos(pitchRad)).addScaledVector(UP, -Math.sin(pitchRad)).normalize()
     // Right-handed leaf frame: right = cross(fwd, UP), up = cross(right, fwd) -> strictly +Y upward normal & CCW winding!
@@ -256,11 +288,12 @@ export function buildRosetteShrub(spec: TreeSpec, env: CrownEnvelope): BuiltRose
     // Check true 3D blade-center separation so individual heart leaves breathe cleanly without smashing into each other!
     const leafCenter = deformedSocket.clone().addScaledVector(leafFwd, sz * 0.44).addScaledVector(leafUp, sz * 0.08)
     const bladeRad = sz * 0.50
+    const clearScale = MathUtils.lerp(0.84, 1.14, lj)
     let tooCrowded = false
     for (const prev of placedBlades) {
-      const clearance = cand.tierIdx === 2
+      const clearance = (cand.tierIdx === 2
         ? 0.54
-        : (cand.proud && prev.proud) ? 0.78 : 0.60
+        : (cand.proud && prev.proud) ? 0.78 : 0.60) * clearScale
       const minD = (bladeRad + prev.radius) * clearance
       if (leafCenter.distanceToSquared(prev.center) < minD * minD) {
         tooCrowded = true
@@ -271,12 +304,16 @@ export function buildRosetteShrub(spec: TreeSpec, env: CrownEnvelope): BuiltRose
     placedBlades.push({ center: leafCenter.clone(), radius: bladeRad, proud: cand.proud })
 
     // 1. Slender arching green petiole rising cleanly from compact root crown to lifted leaf socket
-    const rootR = Math.min(radius * 0.40, cfg.domeWidth * 0.26) * (0.45 + random() * 0.55)
-    const rootPt = new Vector3(
-      Math.cos(cand.angle + (random() - 0.5) * 0.22) * rootR,
-      0,
-      Math.sin(cand.angle + (random() - 0.5) * 0.22) * rootR,
-    )
+    const rootPt = cand.x !== undefined && cand.z !== undefined
+      ? new Vector3(cand.x * 0.42, 0, cand.z * 0.42)
+      : (() => {
+        const rootR = Math.min(radius * 0.40, cfg.domeWidth * 0.26) * (0.45 + random() * 0.55)
+        return new Vector3(
+          Math.cos(cand.angle + (random() - 0.5) * 0.22) * rootR,
+          0,
+          Math.sin(cand.angle + (random() - 0.5) * 0.22) * rootR,
+        )
+      })()
     const mid1 = rootPt.clone().lerp(deformedSocket, 0.36)
     mid1.y = Math.max(0.04, deformedSocket.y * 0.58)
     const mid2 = rootPt.clone().lerp(deformedSocket, 0.72)

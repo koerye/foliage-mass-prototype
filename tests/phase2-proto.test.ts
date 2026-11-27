@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import type { Mesh } from 'three'
 import { buildAssemblyItem, type AssemblySharedTextures } from '../src/assembly/builder'
-import { createRockC2Item, defaultPolyCRockSpec } from '../src/assembly/spec'
+import { createRockC2Item, defaultPolyCRockSpec, parsePolyCRockSpec } from '../src/assembly/spec'
+import { makeSolidMapSet } from '../src/rock-v2/photocraft-pbr'
 import { buildTerracedMossBluffRouteC } from '../src/rock-v2/poly-csg'
 import { bakePolyCsgPbr, unwrapPolyCsgUvCharts } from '../src/rock-v2/poly-pbr'
 import { buildTree, type TreeTextures } from '../src/tree/assemble'
 import { botanicalTextureKeys, getBotanicalTexture } from '../src/tree/botanical-textures'
+import { botanicalLayouts, sampleHorizontalSlots, type BotanicalLayout } from '../src/tree/botanical-layout'
+import { rng } from '../src/shape'
 import { CrownEnvelope } from '../src/tree/envelope'
 import { buildHerbShrub } from '../src/tree/herb-shrub'
 import { buildRosetteShrub } from '../src/tree/rosette-shrub'
@@ -204,5 +207,197 @@ describe('Phase 2 High-Craft Benchmark Prototypes', () => {
     })
     expect(hasMesh).toBe(true)
     built.dispose()
+  })
+
+  it('botanical.heightJitter alters vertical leaf height spread cleanly with finite normals and round-trips through parseTreeSpec', () => {
+    const stubTextures = {} as unknown as TreeTextures
+    const measureYStats = (presetId: PresetId, hj: number) => {
+      const raw = presetSpec(presetId)
+      raw.botanical = { ...raw.botanical!, heightJitter: hj }
+      const parsed = parseTreeSpec(JSON.parse(JSON.stringify(raw)))
+      expect(parsed.botanical?.heightJitter).toBeCloseTo(hj, 4)
+      const built = buildTree(parsed, stubTextures)
+      let maxY = -Infinity
+      let sumY = 0
+      let sumY2 = 0
+      let count = 0
+      built.group.traverse(obj => {
+        const m = obj as Mesh
+        if (!m.isMesh) return
+        const pos = m.geometry.getAttribute('position').array as Float32Array
+        const nor = m.geometry.getAttribute('normal').array as Float32Array
+        assertFiniteGeometry(pos, nor)
+        for (let i = 1; i < pos.length; i += 3) {
+          const y = pos[i]
+          if (y > maxY) maxY = y
+          sumY += y
+          sumY2 += y * y
+          count++
+        }
+      })
+      built.dispose()
+      const mean = sumY / Math.max(1, count)
+      const std = Math.sqrt(Math.max(0, sumY2 / Math.max(1, count) - mean * mean))
+      return { maxY, mean, std }
+    }
+
+    // Clamp bounds check
+    const clampedHigh = parseTreeSpec({ ...presetSpec('botanical-large-grass-a'), botanical: { ...presetSpec('botanical-large-grass-a').botanical!, heightJitter: 5 } })
+    const clampedLow = parseTreeSpec({ ...presetSpec('botanical-large-grass-a'), botanical: { ...presetSpec('botanical-large-grass-a').botanical!, heightJitter: -1 } })
+    expect(clampedHigh.botanical?.heightJitter).toBe(1)
+    expect(clampedLow.botanical?.heightJitter).toBe(0)
+
+    // Fountain grass (02 大型草丛 A), fern (01 大蕨类 A), broadleaf rosette (04 阔叶灌木 A) all widen vertical distribution cleanly
+    for (const id of ['botanical-large-grass-a', 'botanical-fern-a', 'botanical-shrub-a'] as const) {
+      const low = measureYStats(id, 0)
+      const high = measureYStats(id, 0.85)
+      expect(high.maxY).toBeGreaterThan(low.maxY)
+      expect(high.std).toBeGreaterThan(low.std)
+    }
+  })
+
+  it('botanical.layout (all 5 algorithms) and botanical.lateralJitter produce distinct horizontal footprints & valid meshes', () => {
+    // 1. Direct horizontal algorithm invariants
+    for (const layout of botanicalLayouts) {
+      const slots = sampleHorizontalSlots({
+        layout,
+        count: 18,
+        radius: 0.12,
+        areaRadius: 0.45,
+        lateralJitter: 0.5,
+        random: rng(4242),
+      })
+      expect(slots.length).toBe(18)
+      for (const s of slots) {
+        expect(Number.isFinite(s.x)).toBe(true)
+        expect(Number.isFinite(s.z)).toBe(true)
+        expect(Number.isFinite(s.angle)).toBe(true)
+      }
+      if (layout === 'fan') {
+        // Fan must be strongly bilateral (X span >> Z span) with strictly alternating left/right sides
+        const spanX = Math.max(...slots.map(s => s.x)) - Math.min(...slots.map(s => s.x))
+        const spanZ = Math.max(...slots.map(s => s.z)) - Math.min(...slots.map(s => s.z))
+        expect(spanX).toBeGreaterThan(spanZ * 1.4)
+        for (let i = 1; i < slots.length; i++) {
+          expect(slots[i].sideSign).toBe(-slots[i - 1].sideSign)
+        }
+      }
+      if (layout === 'phyllotaxis' || layout === 'ring') {
+        // Every 90° quadrant must be covered cleanly (no empty half-circle)
+        const quads = new Set(slots.map(s => Math.floor(((s.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI / 2))))
+        expect(quads.size).toBe(4)
+      }
+    }
+
+    // 2. End-to-end 3D build across all 5 layouts + parseTreeSpec round-trip + lateralJitter effect
+    const stubTextures = {} as unknown as TreeTextures
+    const measureXZ = (presetId: PresetId, layout: BotanicalLayout, lj: number) => {
+      const raw = presetSpec(presetId)
+      raw.botanical = { ...raw.botanical!, layout, lateralJitter: lj }
+      const parsed = parseTreeSpec(JSON.parse(JSON.stringify(raw)))
+      expect(parsed.botanical?.layout).toBe(layout)
+      expect(parsed.botanical?.lateralJitter).toBeCloseTo(lj, 4)
+      const built = buildTree(parsed, stubTextures)
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity
+      let sumR = 0, count = 0
+      built.group.traverse(obj => {
+        const m = obj as Mesh
+        if (!m.isMesh) return
+        const pos = m.geometry.getAttribute('position').array as Float32Array
+        const nor = m.geometry.getAttribute('normal').array as Float32Array
+        assertFiniteGeometry(pos, nor)
+        for (let i = 0; i < pos.length; i += 3) {
+          const x = pos[i], z = pos[i + 2]
+          if (x < minX) minX = x
+          if (x > maxX) maxX = x
+          if (z < minZ) minZ = z
+          if (z > maxZ) maxZ = z
+          sumR += Math.hypot(x, z)
+          count++
+        }
+      })
+      built.dispose()
+      return { spanX: maxX - minX, spanZ: maxZ - minZ, meanR: sumR / Math.max(1, count) }
+    }
+
+    for (const id of ['botanical-large-grass-a', 'botanical-shrub-a', 'botanical-clover-cover'] as const) {
+      for (const layout of botanicalLayouts) {
+        const m = measureXZ(id, layout, 0.5)
+        expect(m.spanX).toBeGreaterThan(0.1)
+        expect(m.spanZ).toBeGreaterThan(0.1)
+      }
+    }
+
+    // On 02 大型草丛 A, fan is wider in X than Z, lateralJitter widens footprint, and scatter spreads root anchors much wider than tight spiral
+    const grassFan = measureXZ('botanical-large-grass-a', 'fan', 0.55)
+    expect(grassFan.spanX).toBeGreaterThan(grassFan.spanZ * 1.15)
+    const grassTight = measureXZ('botanical-large-grass-a', 'phyllotaxis', 0)
+    const grassLoose = measureXZ('botanical-large-grass-a', 'phyllotaxis', 0.9)
+    expect(grassLoose.meanR).toBeGreaterThan(grassTight.meanR)
+    const grassScatter = measureXZ('botanical-large-grass-a', 'scatter', 0.65)
+    expect(grassScatter.meanR).toBeGreaterThan(grassTight.meanR)
+    const scatterSlots = sampleHorizontalSlots({ layout: 'scatter', count: 18, radius: 0.08, areaRadius: 0.28, lateralJitter: 0.65, random: rng(77) })
+    const spiralSlots = sampleHorizontalSlots({ layout: 'phyllotaxis', count: 18, radius: 0.08, areaRadius: 0.28, lateralJitter: 0.0, random: rng(77) })
+    const avgSlotR = (arr: typeof scatterSlots) => arr.reduce((a, s) => a + Math.hypot(s.x, s.z), 0) / arr.length
+    expect(avgSlotR(scatterSlots)).toBeGreaterThan(avgSlotR(spiralSlots) * 2.0)
+
+    // Backward-compatible legacy JSON without layout/lateralJitter falls back cleanly
+    const legacyRaw = JSON.parse(JSON.stringify(presetSpec('botanical-large-grass-a')))
+    delete legacyRaw.botanical.layout
+    delete legacyRaw.botanical.lateralJitter
+    const parsedLegacy = parseTreeSpec(legacyRaw)
+    expect(parsedLegacy.botanical?.layout).toBe('phyllotaxis')
+    expect(parsedLegacy.botanical?.lateralJitter).toBeGreaterThan(0)
+  })
+
+  it('supports PhotoCraft PBR mode on terraced-moss-bluff-c2 with triplanar strata, moss roughness & normal baking', async () => {
+    const def = defaultPolyCRockSpec('terraced-moss-bluff-c2')
+    expect(def.mode).toBe('photocraft-pbr')
+    const parsed = parsePolyCRockSpec(JSON.parse(JSON.stringify(def)))
+    expect(parsed.mode).toBe('photocraft-pbr')
+
+    // Build synthetic stratified stone + velvety moss ExternalPbrLayers to test triplanar + tangent normal + roughness math cleanly in headless Node
+    const stone = makeSolidMapSet([212, 166, 118], 0.76, 16)
+    const moss = makeSolidMapSet([92, 168, 42], 0.92, 16)
+    for (let y = 0; y < 16; y++) {
+      const band = Math.sin((y / 16) * Math.PI * 4)
+      for (let x = 0; x < 16; x++) {
+        const o = (y * 16 + x) * 4
+        stone.albedo[o] = Math.round(205 + band * 24)
+        stone.albedo[o + 1] = Math.round(160 + band * 20)
+        stone.albedo[o + 2] = Math.round(112 + band * 16)
+        stone.normal[o] = Math.round(128 + band * 26)
+        stone.normal[o + 1] = Math.round(128 + Math.cos((y / 16) * Math.PI * 4) * 32)
+        stone.normal[o + 2] = 248
+      }
+    }
+
+    const c2 = await buildTerracedMossBluffRouteC('c2', { seed: 7301 })
+    const uv = unwrapPolyCsgUvCharts(c2, { atlasSize: 256, gutterPx: 4 })
+    const baked = bakePolyCsgPbr(c2, uv, {
+      size: 256,
+      mode: 'photocraft-pbr',
+      baseColorHex: '#cfa87d',
+      dilationPasses: 4,
+      aoRays: 6,
+      seed: 7301,
+      mossTop: true,
+      externalPbr: { stone, moss },
+    })
+
+    expect(baked.roughness.length).toBe(256 * 256 * 4)
+    expect(baked.stats.maxNormalDeviationDeg).toBeGreaterThan(2.5)
+    let mossPx = 0, stonePx = 0, minRgh = 255, maxRgh = 0
+    for (let i = 0; i < baked.albedo.length; i += 4) {
+      const r = baked.albedo[i], g = baked.albedo[i + 1], b = baked.albedo[i + 2]
+      const rg = baked.roughness[i]
+      if (rg < minRgh) minRgh = rg
+      if (rg > maxRgh) maxRgh = rg
+      if (g > r + 18 && g > b + 40) mossPx++
+      else if (r > g + 8 && g > b + 8) stonePx++
+    }
+    expect(mossPx).toBeGreaterThan(800)
+    expect(stonePx).toBeGreaterThan(8000)
+    expect(maxRgh - minRgh).toBeGreaterThan(25)
   })
 })

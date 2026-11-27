@@ -9,6 +9,7 @@
 // - fine-herb           (15 细叶草 A, 16 细叶草 B: arching/upright slender green stalks + dense 3D narrow lance leaves)
 import { BufferAttribute, BufferGeometry, Color, MathUtils, Vector3 } from 'three'
 import { rng, seedFor } from '../shape'
+import { sampleHorizontalSlots, type BotanicalLayout } from './botanical-layout'
 import type { BotanicalTextureKey } from './botanical-textures'
 import type { CrownEnvelope } from './envelope'
 import { buildHerbShrub } from './herb-shrub'
@@ -298,130 +299,216 @@ function buildFountainClump(spec: TreeSpec, env: CrownEnvelope, b: BotanicalSpec
 
   let leaves = 0
   let globalIdx = 0
+  const hj = MathUtils.clamp(b.heightJitter ?? 0.36, 0, 1)
+  const lj = MathUtils.clamp(b.lateralJitter ?? 0.46, 0, 1)
+  const layout: BotanicalLayout = b.layout ?? (isFern ? 'ring' : 'phyllotaxis')
+  const areaRad = Math.max(b.spread * 1.45, b.leafSize * MathUtils.lerp(0.16, 0.34, lj))
+  const slots = sampleHorizontalSlots({
+    layout,
+    count: totalCount,
+    radius: b.spread,
+    areaRadius: areaRad,
+    lateralJitter: lj,
+    random,
+  }).sort((a, z) => a.group - z.group || a.rFrac - z.rFrac)
+
+  const placedMids: Vector3[] = []
   const tmpC = new Color(), vA = new Vector3(), vB = new Vector3(), nL = new Vector3(), nD = new Vector3()
 
-  for (let ri = 0; ri < rings.length; ri++) {
-    const rd = rings[ri]
-    const nRing = Math.max(3, Math.round(totalCount * rd.frac))
-    const angleOff = ri * 1.15 + random() * 0.45
-
-    for (let j = 0; j < nRing; j++) {
-      globalIdx++
-      const angle = angleOff + (j / nRing) * Math.PI * 2 + (random() - 0.5) * (Math.PI * 0.82 / nRing)
-      const rad = b.spread * rd.rScale * (0.42 + random() * 0.64)
-      const len = b.leafSize * MathUtils.lerp(rd.lenMin, rd.lenMax, random()) * scaleBoost
-      const width = len * b.leafAspect * (0.92 + random() * 0.16)
-      const launchRad = MathUtils.degToRad(MathUtils.lerp(rd.launchMin, rd.launchMax, random()))
-      // Total fountain bend in radians so inner fronds arch gracefully & outer fronds cascade over past horizontal!
-      const bendTotal = (b.arch * 1.48 + b.droop * 1.05) * rd.bendMul * (0.88 + random() * 0.24)
-      const sideSway = (random() - 0.5) * len * 0.14
-      const twistMax = MathUtils.degToRad((random() - 0.5) * (isFern ? 18 : 24))
-
-      const outHoriz = new Vector3(Math.cos(angle), 0, Math.sin(angle))
-      const baseSide = new Vector3().crossVectors(outHoriz, UP).normalize()
-      const origin = new Vector3(outHoriz.x * rad, 0, outHoriz.z * rad)
-
-      // Integrate smooth graceful fountain spine: upright base -> full rounded crest -> weeping outward tip!
-      const spine: Vector3[] = [origin]
-      const tans: Vector3[] = []
-      const step = len / segV
-      for (let rv = 1; rv <= segV; rv++) {
-        const f = (rv - 0.5) / segV
-        const theta = Math.min(Math.PI * 0.86, launchRad + bendTotal * Math.pow(f, isFern ? 1.32 : 1.38))
-        const tan = new Vector3(
-          outHoriz.x * Math.sin(theta) + baseSide.x * (sideSway / Math.max(0.1, len)) * f,
-          Math.cos(theta),
-          outHoriz.z * Math.sin(theta) + baseSide.z * (sideSway / Math.max(0.1, len)) * f,
-        ).normalize()
-        tans.push(tan)
-        const nextPt = spine[rv - 1].clone().addScaledVector(tan, step)
-        if (nextPt.y < 0.015) nextPt.y = 0.015
-        spine.push(env.deform(nextPt, rv / segV))
-      }
-      tans.push(tans[tans.length - 1].clone())
-
-      const pts: Vector3[] = []
-      const ups: Vector3[] = []
-      for (let rv = 0; rv < rowsV; rv++) {
-        const v = rv / segV
-        const tan = tans[rv]
-        const roll = twistMax * v
-        let rSide = new Vector3().crossVectors(tan, UP)
-        if (rSide.lengthSq() < 1e-5) rSide = baseSide.clone()
-        rSide.normalize()
-        const rUp = new Vector3().crossVectors(rSide, tan).normalize()
-        const side = rSide.clone().multiplyScalar(Math.cos(roll)).addScaledVector(rUp, Math.sin(roll)).normalize()
-        const up = new Vector3().crossVectors(side, tan).normalize()
-        ups.push(up)
-        // Fullness profile stays full through the middle so texture silhouette never gets pinched!
-        const wHere = width * (isFern ? 1.0 : MathUtils.lerp(0.86, 1.04, Math.sin(Math.PI * Math.min(1, v * 0.85 + 0.1))))
-        for (let cu = 0; cu < colsU; cu++) {
-          const u = cu / segU
-          const s = 2 * u - 1
-          // Crisp botanical V-fold trough along central midrib/rachis (catches realistic directional light across halves!)
-          const cupLift = b.cup * width * 0.34 * (Math.abs(s) - 0.35) * Math.sin(Math.PI * MathUtils.clamp(v * 0.92 + 0.04, 0, 1))
-          const p = spine[rv].clone()
-            .addScaledVector(side, s * wHere * 0.5)
-            .addScaledVector(up, cupLift)
-          if (p.y < 0.012) p.y = 0.012
-          pts.push(p)
-        }
-      }
-
-      const baseVert = leafBuf.pos.length / 3
-      const center = spine[Math.floor(segV * 0.5)]
-      const jitter = 0.94 + random() * 0.12
-
-      for (let rv = 0; rv < rowsV; rv++) {
-        const v = rv / segV
-        const up = ups[rv]
-        // Soft translucent stylized base AO (keeps lower emerald blades rich green, never pitch-black!)
-        const ao = 1 - b.aoStrength * (1 - v) * (ri === 0 ? 0.34 : 0.26)
-        tmpC.copy(colInner).lerp(colOuter, MathUtils.clamp(v * 1.12 + (ri === 1 ? 0.16 : 0.08), 0, 1))
-        tmpC.multiplyScalar(ao * rd.shade * jitter)
-
-        for (let cu = 0; cu < colsU; cu++) {
-          const u = cu / segU
-          const p = pts[rv * colsU + cu]
-          const pL = pts[rv * colsU + Math.max(0, cu - 1)]
-          const pR = pts[rv * colsU + Math.min(segU, cu + 1)]
-          const pD = pts[Math.max(0, rv - 1) * colsU + cu]
-          const pU = pts[Math.min(segV, rv + 1) * colsU + cu]
-          vA.subVectors(pR, pL); vB.subVectors(pU, pD)
-          nL.crossVectors(vB, vA)
-          if (nL.lengthSq() < 1e-8) nL.copy(up)
-          else { nL.normalize(); if (nL.dot(up) < 0) nL.negate() }
-          // Keep true geometric normal on the steep basal half (so DoubleSide front blades point OUTWARD toward light,
-          // never canceling into (0,+1,0) whose backface flips to pitch-black (0,-1,0)!), and gently sky-soften the arching upper crown.
-          const topSkyBlend = MathUtils.smoothstep(v, 0.38, 0.88) * (isFern ? 0.30 : 0.24)
-          if (topSkyBlend > 0.001) {
-            nD.subVectors(p, domeCenter)
-            if (nD.lengthSq() < 1e-6) nD.copy(UP)
-            else nD.normalize()
-            nD.y = Math.max(0.55, nD.y); nD.normalize()
-            nL.lerp(nD, topSkyBlend).normalize()
-          }
-
-          leafBuf.pos.push(p.x, p.y, p.z)
-          leafBuf.nor.push(nL.x, nL.y, nL.z)
-          leafBuf.uv.push(u, v)
-          leafBuf.col.push(Math.min(1.16, tmpC.r), Math.min(1.16, tmpC.g), Math.min(1.16, tmpC.b))
-          leafBuf.cen.push(center.x, center.y, center.z)
-          leafBuf.cor.push((u - 0.5) * width, (v - 0.5) * len)
-        }
-      }
-
-      for (let rv = 0; rv < segV; rv++) {
-        for (let cu = 0; cu < segU; cu++) {
-          const a = baseVert + rv * colsU + cu
-          const bIdx = a + 1
-          const d = a + colsU
-          const e = d + 1
-          leafBuf.idx.push(a, bIdx, e, a, e, d)
-        }
-      }
-      leaves++
+  const buildSpine = (
+    origin: Vector3,
+    outHoriz: Vector3,
+    baseSide: Vector3,
+    len: number,
+    launchRad: number,
+    bendTotal: number,
+    sideSway: number,
+  ) => {
+    const spine: Vector3[] = [origin]
+    const tans: Vector3[] = []
+    const step = len / segV
+    for (let rv = 1; rv <= segV; rv++) {
+      const f = (rv - 0.5) / segV
+      const theta = Math.min(Math.PI * 0.86, Math.max(0.06, launchRad + bendTotal * Math.pow(f, isFern ? 1.32 : 1.38)))
+      const tan = new Vector3(
+        outHoriz.x * Math.sin(theta) + baseSide.x * (sideSway / Math.max(0.1, len)) * f,
+        Math.cos(theta),
+        outHoriz.z * Math.sin(theta) + baseSide.z * (sideSway / Math.max(0.1, len)) * f,
+      ).normalize()
+      tans.push(tan)
+      const nextPt = spine[rv - 1].clone().addScaledVector(tan, step)
+      if (nextPt.y < 0.015) nextPt.y = 0.015
+      spine.push(env.deform(nextPt, rv / segV))
     }
+    tans.push(tans[tans.length - 1].clone())
+    return { spine, tans }
+  }
+
+  for (let si = 0; si < slots.length; si++) {
+    const slot = slots[si]
+    globalIdx++
+    const ri = MathUtils.clamp(slot.group, 0, rings.length - 1)
+    const rd = rings[ri]
+    let angle = slot.angle
+    // Stratified alternating + random vertical tier (-1..+1) so adjacent leaves sit on distinct height shells!
+    const tier = MathUtils.clamp((si % 2 === 0 ? 1 : -1) * 0.58 + (random() - 0.5) * 0.84, -1, 1)
+    const len = b.leafSize * MathUtils.lerp(rd.lenMin, rd.lenMax, random()) * (1 + tier * hj * 0.24) * scaleBoost
+    const width = len * b.leafAspect * (0.92 + random() * 0.16)
+    let launchRad = MathUtils.degToRad(MathUtils.lerp(rd.launchMin, rd.launchMax, random()) - tier * hj * 14)
+    if (layout === 'fan') {
+      // Fan silhouettes open slightly flatter on outer wings and stand taller at center!
+      launchRad = MathUtils.degToRad(MathUtils.lerp(8, 44, slot.rFrac) - tier * hj * 10)
+    }
+    launchRad = MathUtils.clamp(launchRad, MathUtils.degToRad(4), MathUtils.degToRad(58))
+    // Total fountain bend in radians so inner fronds arch gracefully & outer fronds cascade over past horizontal!
+    let bendTotal = (b.arch * 1.48 + b.droop * 1.05) * rd.bendMul * (0.88 + random() * 0.24) * (1 - tier * hj * 0.28)
+    let sideSway = (slot.sideSign * (0.35 + random() * 0.65) * lj * 0.18 + (random() - 0.5) * 0.08) * len
+    const twistMax = MathUtils.degToRad((slot.sideSign * lj * 10 + (random() - 0.5) * (isFern ? 16 : 22)))
+
+    let outHoriz = new Vector3(Math.cos(angle), 0, Math.sin(angle))
+    let baseSide = new Vector3().crossVectors(outHoriz, UP).normalize()
+    const baseY = Math.max(0, (tier * 0.5 + 0.5) * hj * Math.min(0.075, b.height * 0.11) * (ri === 2 ? 0.45 : 1.0))
+    const origin = new Vector3(slot.x, baseY, slot.z)
+
+    // Integrate graceful fountain spine + 2-stage anti-overlap solver:
+    // Stage 1: Horizontal left-right lateral push (lj) opens stacked top-down azimuth overlaps
+    // Stage 2: Vertical tier lift/drop (hj) separates any remaining close blades in height!
+    let { spine, tans } = buildSpine(origin, outHoriz, baseSide, len, launchRad, bendTotal, sideSway)
+    const midIdx = Math.max(1, Math.min(segV - 1, Math.round(segV * 0.45)))
+
+    if (lj > 0.04) {
+      const horizClear = width * MathUtils.lerp(0.32, 0.62, lj)
+      const vertOverlap = width * 0.55
+      for (let iter = 0; iter < 2; iter++) {
+        const mid = spine[midIdx]
+        let latPush = 0
+        for (const prev of placedMids) {
+          const dx = mid.x - prev.x, dz = mid.z - prev.z
+          const dh = Math.hypot(dx, dz)
+          if (dh < horizClear && Math.abs(mid.y - prev.y) < vertOverlap) {
+            // Signed horizontal side relative to outHoriz: push away from neighbor left or right!
+            const cross = outHoriz.x * dz - outHoriz.z * dx
+            latPush += (cross >= 0 ? 1 : -1) * (1 - dh / Math.max(1e-4, horizClear))
+          }
+        }
+        if (Math.abs(latPush) < 0.02) break
+        const sgn = latPush > 0 ? 1 : -1
+        const swingRad = MathUtils.degToRad(Math.min(18, (6 + lj * 10) * Math.min(1.5, Math.abs(latPush))))
+        angle += sgn * swingRad
+        sideSway += sgn * len * (0.04 + lj * 0.05)
+        outHoriz = new Vector3(Math.cos(angle), 0, Math.sin(angle))
+        baseSide = new Vector3().crossVectors(outHoriz, UP).normalize()
+        const rebuilt = buildSpine(origin, outHoriz, baseSide, len, launchRad, bendTotal, sideSway)
+        spine = rebuilt.spine
+        tans = rebuilt.tans
+      }
+    }
+
+    if (hj > 0.04) {
+      const horizClear = width * 0.42
+      const vertClear = width * (0.18 + hj * 0.34)
+      for (let iter = 0; iter < 2; iter++) {
+        const mid = spine[midIdx]
+        let pushDir = 0
+        for (const prev of placedMids) {
+          const dh = Math.hypot(mid.x - prev.x, mid.z - prev.z)
+          const dy = mid.y - prev.y
+          if (dh < horizClear && Math.abs(dy) < vertClear) {
+            pushDir += dy >= 0 ? 1 : -1
+          }
+        }
+        if (pushDir === 0) break
+        const sgn = pushDir > 0 ? 1 : -1
+        launchRad = MathUtils.clamp(launchRad - sgn * MathUtils.degToRad(5.5 + hj * 5), MathUtils.degToRad(4), MathUtils.degToRad(62))
+        bendTotal = Math.max(0.22, bendTotal * (1 - sgn * (0.08 + hj * 0.10)))
+        const rebuilt = buildSpine(origin, outHoriz, baseSide, len, launchRad, bendTotal, sideSway)
+        spine = rebuilt.spine
+        tans = rebuilt.tans
+      }
+    }
+    placedMids.push(spine[midIdx].clone())
+
+    const pts: Vector3[] = []
+    const ups: Vector3[] = []
+    for (let rv = 0; rv < rowsV; rv++) {
+      const v = rv / segV
+      const tan = tans[rv]
+      const roll = twistMax * v
+      let rSide = new Vector3().crossVectors(tan, UP)
+      if (rSide.lengthSq() < 1e-5) rSide = baseSide.clone()
+      rSide.normalize()
+      const rUp = new Vector3().crossVectors(rSide, tan).normalize()
+      const side = rSide.clone().multiplyScalar(Math.cos(roll)).addScaledVector(rUp, Math.sin(roll)).normalize()
+      const up = new Vector3().crossVectors(side, tan).normalize()
+      ups.push(up)
+      // Fullness profile stays full through the middle so texture silhouette never gets pinched!
+      const wHere = width * (isFern ? 1.0 : MathUtils.lerp(0.86, 1.04, Math.sin(Math.PI * Math.min(1, v * 0.85 + 0.1))))
+      for (let cu = 0; cu < colsU; cu++) {
+        const u = cu / segU
+        const s = 2 * u - 1
+        // Crisp botanical V-fold trough along central midrib/rachis (catches realistic directional light across halves!)
+        const cupLift = b.cup * width * 0.34 * (Math.abs(s) - 0.35) * Math.sin(Math.PI * MathUtils.clamp(v * 0.92 + 0.04, 0, 1))
+        const p = spine[rv].clone()
+          .addScaledVector(side, s * wHere * 0.5)
+          .addScaledVector(up, cupLift)
+        if (p.y < 0.012) p.y = 0.012
+        pts.push(p)
+      }
+    }
+
+    const baseVert = leafBuf.pos.length / 3
+    const center = spine[Math.floor(segV * 0.5)]
+    const jitter = 0.94 + random() * 0.12
+
+    for (let rv = 0; rv < rowsV; rv++) {
+      const v = rv / segV
+      const up = ups[rv]
+      // Soft translucent stylized base AO (keeps lower emerald blades rich green, never pitch-black!)
+      const ao = 1 - b.aoStrength * (1 - v) * (ri === 0 ? 0.34 : 0.26)
+      tmpC.copy(colInner).lerp(colOuter, MathUtils.clamp(v * 1.12 + (ri === 1 ? 0.16 : 0.08), 0, 1))
+      tmpC.multiplyScalar(ao * rd.shade * jitter)
+
+      for (let cu = 0; cu < colsU; cu++) {
+        const u = cu / segU
+        const p = pts[rv * colsU + cu]
+        const pL = pts[rv * colsU + Math.max(0, cu - 1)]
+        const pR = pts[rv * colsU + Math.min(segU, cu + 1)]
+        const pD = pts[Math.max(0, rv - 1) * colsU + cu]
+        const pU = pts[Math.min(segV, rv + 1) * colsU + cu]
+        vA.subVectors(pR, pL); vB.subVectors(pU, pD)
+        nL.crossVectors(vB, vA)
+        if (nL.lengthSq() < 1e-8) nL.copy(up)
+        else { nL.normalize(); if (nL.dot(up) < 0) nL.negate() }
+        // Keep true geometric normal on the steep basal half (so DoubleSide front blades point OUTWARD toward light,
+        // never canceling into (0,+1,0) whose backface flips to pitch-black (0,-1,0)!), and gently sky-soften the arching upper crown.
+        const topSkyBlend = MathUtils.smoothstep(v, 0.38, 0.88) * (isFern ? 0.30 : 0.24)
+        if (topSkyBlend > 0.001) {
+          nD.subVectors(p, domeCenter)
+          if (nD.lengthSq() < 1e-6) nD.copy(UP)
+          else nD.normalize()
+          nD.y = Math.max(0.55, nD.y); nD.normalize()
+          nL.lerp(nD, topSkyBlend).normalize()
+        }
+
+        leafBuf.pos.push(p.x, p.y, p.z)
+        leafBuf.nor.push(nL.x, nL.y, nL.z)
+        leafBuf.uv.push(u, v)
+        leafBuf.col.push(Math.min(1.16, tmpC.r), Math.min(1.16, tmpC.g), Math.min(1.16, tmpC.b))
+        leafBuf.cen.push(center.x, center.y, center.z)
+        leafBuf.cor.push((u - 0.5) * width, (v - 0.5) * len)
+      }
+    }
+
+    for (let rv = 0; rv < segV; rv++) {
+      for (let cu = 0; cu < segU; cu++) {
+        const a = baseVert + rv * colsU + cu
+        const bIdx = a + 1
+        const d = a + colsU
+        const e = d + 1
+        leafBuf.idx.push(a, bIdx, e, a, e, d)
+      }
+    }
+    leaves++
   }
   void globalIdx
 
@@ -466,20 +553,36 @@ function buildCosmosShrub(spec: TreeSpec, env: CrownEnvelope, b: BotanicalSpec):
   const shoots: Shoot[] = []
   let stems = 0, leaves = 0, flowers = 0
 
-  for (let i = 0; i < stemCount; i++) {
-    const isInner = i < Math.max(3, Math.round(stemCount * 0.38))
-    const angle = i * GOLDEN + (random() - 0.5) * 0.32
+  const hj = MathUtils.clamp(b.heightJitter ?? 0.36, 0, 1)
+  const lj = MathUtils.clamp(b.lateralJitter ?? 0.42, 0, 1)
+  const hjMul = MathUtils.lerp(0.20, 2.00, hj)
+  const stemSlots = sampleHorizontalSlots({
+    layout: b.layout ?? 'phyllotaxis',
+    count: stemCount,
+    radius: b.spread * 0.26,
+    areaRadius: b.spread * 0.62,
+    lateralJitter: lj,
+    random,
+  })
+  for (let i = 0; i < stemSlots.length; i++) {
+    const slot = stemSlots[i]
+    const isInner = slot.group === 0
+    const angle = slot.angle
     const out = new Vector3(Math.cos(angle), 0, Math.sin(angle))
-    const r0 = b.spread * (isInner ? 0.12 : 0.24) * (0.4 + random() * 0.6)
-    const len = b.height * (isInner ? 0.86 + random() * 0.22 : 0.66 + random() * 0.24)
+    const len = b.height * MathUtils.clamp((isInner ? 0.96 : 0.78) + (random() - 0.5) * 0.26 * hjMul, 0.42, 1.38)
     const leanRad = MathUtils.degToRad(isInner ? 10 + random() * 14 : 24 + random() * 20)
 
     const rings = 6
-    const spine: Vector3[] = [new Vector3(out.x * r0, 0, out.z * r0)]
+    const spine: Vector3[] = [new Vector3(slot.x, 0, slot.z)]
+    const sideAxis = new Vector3().crossVectors(out, UP).normalize()
     for (let k = 1; k < rings; k++) {
       const t = (k - 0.5) / (rings - 1)
       const aHere = leanRad + b.arch * t * t * 0.65
-      const dir = UP.clone().multiplyScalar(Math.cos(aHere)).addScaledVector(out, Math.sin(aHere)).normalize()
+      const dir = UP.clone()
+        .multiplyScalar(Math.cos(aHere))
+        .addScaledVector(out, Math.sin(aHere))
+        .addScaledVector(sideAxis, slot.sideSign * lj * 0.14 * t)
+        .normalize()
       spine.push(env.deform(spine[k - 1].clone().addScaledVector(dir, len / (rings - 1)), k / (rings - 1)))
     }
     appendTube(stemBuf, spine, 0.0068, 0.0026, stemSegs, stemBase, stemTip)
@@ -600,21 +703,31 @@ function buildFlowerGroundcover(spec: TreeSpec, env: CrownEnvelope, b: Botanical
 
   let stems = 0, leaves = 0, flowers = 0
 
-  // 1. Plush low mounded carpet of crisp 3D cupped small ovate leaves (golden-angle multi-tier ground-hugging cushion!)
+  // 1. Plush low mounded carpet of crisp 3D cupped small ovate leaves using chosen horizontal layout!
+  const hj = MathUtils.clamp(b.heightJitter ?? 0.36, 0, 1)
+  const lj = MathUtils.clamp(b.lateralJitter ?? 0.48, 0, 1)
+  const layout: BotanicalLayout = b.layout ?? 'scatter'
+  const leafSlots = sampleHorizontalSlots({
+    layout,
+    count: Math.round(targetLeaves * 1.45),
+    radius: b.spread * 0.95,
+    areaRadius: b.spread,
+    lateralJitter: lj,
+    random,
+  })
   const placedLeafCenters: Vector3[] = []
-  for (let i = 0; i < targetLeaves * 1.6 && leaves < targetLeaves; i++) {
-    const u = (i + 0.5) / (targetLeaves * 1.6)
-    const angle = i * GOLDEN + (random() - 0.5) * 0.35
-    const rFrac = Math.sqrt(u) * (0.88 + random() * 0.22)
+  for (let i = 0; i < leafSlots.length && leaves < targetLeaves; i++) {
+    const slot = leafSlots[i]
+    const rFrac = MathUtils.clamp(Math.hypot(slot.x, slot.z) / Math.max(0.08, b.spread), 0, 1.15)
     const domeH = Math.sqrt(Math.max(0.05, 1 - Math.min(0.95, rFrac * rFrac * 0.86)))
-    const r = b.spread * rFrac
-    const y = b.height * domeH * (0.24 + random() * 0.62)
-    const out = new Vector3(Math.cos(angle), 0, Math.sin(angle))
-    const sock = env.deform(new Vector3(out.x * r, Math.max(0.016, y), out.z * r), domeH)
+    const ySpread = MathUtils.lerp(0.16, 1.05, hj)
+    const y = b.height * domeH * MathUtils.clamp(0.55 + (random() - 0.5) * ySpread, 0.14, 1.18)
+    const out = new Vector3(Math.cos(slot.angle), 0, Math.sin(slot.angle))
+    const sock = env.deform(new Vector3(slot.x, Math.max(0.016, y), slot.z), domeH)
     const sz = b.leafSize * (0.86 + random() * 0.32) * scaleBoost
-    const leafDir = out.clone().multiplyScalar(0.86).addScaledVector(UP, MathUtils.lerp(0.28, -0.24, rFrac) + (random() - 0.5) * 0.22).normalize()
+    const leafDir = out.clone().multiplyScalar(0.86).addScaledVector(UP, MathUtils.lerp(0.28, -0.24, Math.min(1, rFrac)) + (random() - 0.5) * 0.22).normalize()
     const mid = sock.clone().addScaledVector(leafDir, sz * 0.42)
-    if (placedLeafCenters.some(p => p.distanceToSquared(mid) < (sz * 0.35) ** 2)) continue
+    if (placedLeafCenters.some(p => p.distanceToSquared(mid) < (sz * MathUtils.lerp(0.26, 0.44, lj)) ** 2)) continue
     placedLeafCenters.push(mid)
 
     // Short basal petiole anchoring every 3rd leaf cleanly to the ground without leggy bare stems
@@ -631,18 +744,25 @@ function buildFlowerGroundcover(spec: TreeSpec, env: CrownEnvelope, b: Botanical
     leaves++
   }
 
-  // 2. Sprinkle 28-36 proud upward-facing 3D cupped violet-blue 5-petal wildflowers across the lush dome!
+  // 2. Sprinkle 28-36 proud upward-facing 3D cupped violet-blue 5-petal wildflowers across the same layout!
+  const flwSlots = sampleHorizontalSlots({
+    layout,
+    count: Math.round(targetFlowers * 1.6),
+    radius: b.spread * 0.90,
+    areaRadius: b.spread * 0.94,
+    lateralJitter: lj,
+    random,
+    phaseOffset: 0.85,
+  })
   const placedFlw: Vector3[] = []
-  for (let i = 0; i < targetFlowers * 2 && flowers < targetFlowers; i++) {
-    const u = (i + 0.35) / (targetFlowers * 1.35)
-    const angle = i * GOLDEN + 0.8 + (random() - 0.5) * 0.35
-    const rFrac = Math.sqrt(Math.min(0.95, u)) * (0.85 + random() * 0.22)
+  for (let i = 0; i < flwSlots.length && flowers < targetFlowers; i++) {
+    const slot = flwSlots[i]
+    const rFrac = MathUtils.clamp(Math.hypot(slot.x, slot.z) / Math.max(0.08, b.spread), 0, 1.1)
     const domeH = Math.sqrt(Math.max(0.08, 1 - Math.min(0.92, rFrac * rFrac * 0.86)))
-    const r = b.spread * rFrac * 0.94
     const y = b.height * domeH * (0.78 + random() * 0.26) + 0.024
-    const out = new Vector3(Math.cos(angle), 0, Math.sin(angle))
-    const center = env.deform(new Vector3(out.x * r, y, out.z * r), domeH)
-    if (placedFlw.some(p => p.distanceTo(center) < b.flowerSize * 0.86)) continue
+    const out = new Vector3(Math.cos(slot.angle), 0, Math.sin(slot.angle))
+    const center = env.deform(new Vector3(slot.x, y, slot.z), domeH)
+    if (placedFlw.some(p => p.distanceTo(center) < b.flowerSize * MathUtils.lerp(0.70, 0.96, lj))) continue
     placedFlw.push(center)
 
     // Delicate green pedicel rising from cushion up to blossom
@@ -691,33 +811,32 @@ function buildCloverGroundcover(spec: TreeSpec, env: CrownEnvelope, b: Botanical
   const qSeg = opt.flatCards ? 1 : 2
   const isCreeping = b.stemCount > 0 // stemCount=1 enables creeping stolon runner mode (14 小叶蔓延地被)
 
-  // Generate 5 organic meadow sub-cluster hubs so patch outline is irregular & painterly (NOT a sterile disc!)
-  const hubs: { x: number; z: number; r: number }[] = [
-    { x: 0, z: 0, r: b.spread * 0.60 },
-  ]
-  for (let h = 0; h < 4; h++) {
-    const a = h * (Math.PI * 0.5) + (random() - 0.5) * 0.75
-    const d = b.spread * (0.34 + random() * 0.24)
-    hubs.push({ x: Math.cos(a) * d, z: Math.sin(a) * d, r: b.spread * (0.34 + random() * 0.18) })
-  }
-
+  const hj = MathUtils.clamp(b.heightJitter ?? 0.40, 0, 1)
+  const lj = MathUtils.clamp(b.lateralJitter ?? 0.50, 0, 1)
+  const layout: BotanicalLayout = b.layout ?? 'clumps'
+  const cloverSlots = sampleHorizontalSlots({
+    layout,
+    count: Math.round(targetCount * 1.45),
+    radius: b.spread * 0.92,
+    areaRadius: b.spread,
+    lateralJitter: lj,
+    random,
+  })
   const placed: { pos: Vector3; sz: number }[] = []
   let stems = 0, leaves = 0
 
-  for (let attempt = 0; attempt < targetCount * 3.2 && leaves < targetCount; attempt++) {
-    const hub = hubs[attempt % hubs.length]
-    const ang = random() * Math.PI * 2
-    // Soft Gaussian-like falloff from hub center -> dense rich carpet inside, airy trailing scatter at perimeter!
-    const dist = hub.r * Math.pow(random(), isCreeping ? 0.62 : 0.72)
-    const x = hub.x + Math.cos(ang) * dist
-    const z = hub.z + Math.sin(ang) * dist
+  for (let attempt = 0; attempt < cloverSlots.length && leaves < targetCount; attempt++) {
+    const slot = cloverSlots[attempt]
+    const x = slot.x
+    const z = slot.z
     const edgeFactor = MathUtils.clamp(Math.hypot(x, z) / Math.max(0.1, b.spread), 0, 1.2)
-    const hHere = b.height * MathUtils.lerp(1.0, 0.36, Math.min(1, edgeFactor * 0.85)) * (0.45 + random() * 0.75)
+    const hSpread = MathUtils.lerp(0.14, 1.25, hj)
+    const hHere = b.height * MathUtils.lerp(1.0, 0.36, Math.min(1, edgeFactor * 0.85)) * MathUtils.clamp(0.82 + (random() - 0.5) * hSpread, 0.24, 1.55)
     const pos = env.deform(new Vector3(x, Math.max(isCreeping ? 0.016 : 0.026, hHere), z), 0.2)
     const sz = b.leafSize * (0.76 + random() * 0.48) * scaleBoost
 
     // Gentle non-overlap clearance so individual 3-leaf shamrocks & creeping rosettes stay crisp & distinct!
-    const minSep = sz * (isCreeping ? 0.56 : 0.52)
+    const minSep = sz * (isCreeping ? 0.52 : 0.48) * MathUtils.lerp(0.75, 1.22, lj)
     if (placed.some(p => {
       const dx = p.pos.x - pos.x, dz = p.pos.z - pos.z, dy = p.pos.y - pos.y
       return dx * dx + dz * dz < minSep * minSep && Math.abs(dy) < 0.032
@@ -800,27 +919,38 @@ function buildFineHerb(spec: TreeSpec, env: CrownEnvelope, b: BotanicalSpec): Bu
   const segV = opt.flatCards ? 1 : (isDenseUpright ? 2 : 3)
   const cBase = new Color(), cTip = new Color()
 
+  const hj = MathUtils.clamp(b.heightJitter ?? 0.36, 0, 1)
+  const lj = MathUtils.clamp(b.lateralJitter ?? 0.44, 0, 1)
+  const hjMul = MathUtils.lerp(0.20, 2.00, hj)
+  const herbSlots = sampleHorizontalSlots({
+    layout: b.layout ?? 'phyllotaxis',
+    count: stemCount,
+    radius: b.spread * 0.44,
+    areaRadius: b.spread * 0.80,
+    lateralJitter: lj,
+    random,
+  })
   let stems = 0, leaves = 0
 
-  for (let i = 0; i < stemCount; i++) {
-    const isInner = i < Math.round(stemCount * 0.34)
-    const angle = i * GOLDEN + (random() - 0.5) * 0.35
+  for (let i = 0; i < herbSlots.length; i++) {
+    const slot = herbSlots[i]
+    const isInner = slot.group === 0
+    const angle = slot.angle
     const out = new Vector3(Math.cos(angle), 0, Math.sin(angle))
-    const r0 = b.spread * (isInner ? 0.16 : 0.42) * (0.35 + random() * 0.65)
-    const len = b.height * (isInner ? 0.86 + random() * 0.20 : 0.64 + random() * 0.26)
+    const len = b.height * MathUtils.clamp((isInner ? 0.96 : 0.77) + (random() - 0.5) * 0.26 * hjMul, 0.40, 1.38)
     const leanDeg = isDenseUpright
       ? (isInner ? 6 + random() * 12 : 16 + random() * 20)
       : (isInner ? 14 + random() * 14 : 26 + random() * 22)
     const leanRad = MathUtils.degToRad(leanDeg)
 
     const rings = 7
-    const spine: Vector3[] = [new Vector3(out.x * r0, 0, out.z * r0)]
+    const spine: Vector3[] = [new Vector3(slot.x, 0, slot.z)]
     const wavePhase = random() * Math.PI * 2
     const sideAxis = new Vector3().crossVectors(out, UP).normalize()
     for (let k = 1; k < rings; k++) {
       const t = (k - 0.5) / (rings - 1)
       const aHere = leanRad + b.arch * t * t * (isDenseUpright ? 0.58 : 0.96)
-      const sway = Math.sin(t * Math.PI * 1.4 + wavePhase) * (isDenseUpright ? 0.09 : 0.06)
+      const sway = (Math.sin(t * Math.PI * 1.4 + wavePhase) + slot.sideSign * lj * 0.55) * (isDenseUpright ? 0.09 : 0.07)
       const dir = UP.clone().multiplyScalar(Math.cos(aHere)).addScaledVector(out, Math.sin(aHere)).addScaledVector(sideAxis, sway).normalize()
       spine.push(env.deform(spine[k - 1].clone().addScaledVector(dir, len / (rings - 1)), k / (rings - 1)))
     }

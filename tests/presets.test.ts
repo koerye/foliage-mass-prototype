@@ -12,7 +12,8 @@ import { createHiddenShowcaseStore } from '../src/ai/showcase-store'
 import type { AiSceneSpec } from '../src/ai/scene'
 import { createDefaultOverrideStore } from '../src/studio/default-overrides'
 import { createAssemblySceneStore } from '../src/assembly/store'
-import { blankAssemblyScene } from '../src/assembly/spec'
+import { blankAssemblyScene, defaultPolyCRockSpec, type PolyCRockSpec } from '../src/assembly/spec'
+import { rockPresetSpec, type RockSpec } from '../src/rock/spec'
 
 function memoryStorage(): StorageLike & { data: Map<string, string> } {
   const data = new Map<string, string>()
@@ -267,6 +268,62 @@ describe('preset-store', () => {
     const merged = mergePresetLists(storeB.list('tree'), storeA.list('tree'))
     expect(merged.length).toBe(1)
   })
+
+  it('supports scope=rock for both legacy RockSpec and Route C2 PolyCRockSpec (save, rename, overwrite, delete)', async () => {
+    const storage = memoryStorage()
+    const store = createPresetStore({ storage, apiUrl: null })
+    await store.ready()
+
+    const legacyRock = rockPresetSpec('boulder-sand-cap')
+    const c2Rock = defaultPolyCRockSpec('terraced-moss-bluff-c2')
+
+    const savedLegacy = await store.saveNew({
+      scope: 'rock',
+      name: '我的沙顶岩',
+      kind: 'rock',
+      kindLabel: '厚涂切面',
+      triangles: 1420,
+      lighting: 'neutral',
+      thumbnail: VALID_THUMB,
+      payload: legacyRock,
+    })
+    const savedC2 = await store.saveNew({
+      scope: 'rock',
+      name: '苔藓层叠巨岩自定义',
+      kind: 'rock-c2',
+      kindLabel: '路线 C2 · 512 PBR',
+      triangles: 512,
+      lighting: 'neutral',
+      thumbnail: VALID_THUMB,
+      payload: c2Rock,
+    })
+
+    expect(store.list('rock').length).toBe(2)
+    expect(store.list('tree').length).toBe(0)
+    expect(store.list('ai').length).toBe(0)
+    expect(savedLegacy.kind).toBe('rock')
+    expect((savedLegacy.payload as RockSpec).preset).toBe('boulder-sand-cap')
+    expect(savedC2.kind).toBe('rock-c2')
+    expect((savedC2.payload as PolyCRockSpec).preset).toBe('terraced-moss-bluff-c2')
+
+    // Round-trip parsePresetItem
+    const parsedC2 = parsePresetItem(JSON.parse(JSON.stringify(savedC2)))
+    expect(parsedC2?.scope).toBe('rock')
+    expect(parsedC2?.kind).toBe('rock-c2')
+    expect((parsedC2?.payload as PolyCRockSpec).preset).toBe('terraced-moss-bluff-c2')
+
+    // Rename & delete
+    const renamed = await store.rename(savedLegacy.id, '改名砂岩')
+    expect(renamed?.name).toBe('改名砂岩')
+    expect(await store.remove(savedLegacy.id)).toBe(true)
+    expect(store.list('rock').map(x => x.id)).toEqual([savedC2.id])
+
+    // Fresh store reloads rock presets from storage
+    const reloaded = createPresetStore({ storage, apiUrl: null })
+    await reloaded.ready()
+    expect(reloaded.list('rock').length).toBe(1)
+    expect(reloaded.list('rock')[0].kind).toBe('rock-c2')
+  })
 })
 
 describe('ai hidden-showcase store', () => {
@@ -349,6 +406,44 @@ describe('ai hidden-showcase store', () => {
     })
     await offline.ready()
     expect(offline.storageMode).toBe('local')
+  })
+
+  it('preserves foreign IDs from other workbenches sharing /api/hidden-showcases (AI + Rock coexistence)', async () => {
+    let remote = { schemaVersion: 1, persisted: true, hiddenIds: ['sakura', 'rock:boulder-moss'] }
+    const mockFetch: typeof fetch = (async (_url, init) => {
+      if (init?.method === 'PUT') {
+        const body = JSON.parse(String(init.body))
+        remote = { schemaVersion: 1, persisted: true, hiddenIds: body.hiddenIds }
+        return new Response(JSON.stringify({ ok: true, count: remote.hiddenIds.length }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify(remote), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    const rockValidIds = ['rock:boulder-moss', 'rock:boulder-sand-cap', 'rock-c2:terraced-moss-bluff-c2']
+    const rockStore = createHiddenShowcaseStore({
+      validIds: rockValidIds,
+      storageKey: 'test:rock-hidden',
+      storage: memoryStorage(),
+      apiUrl: '/api/hidden-showcases',
+      fetcher: mockFetch,
+    })
+    await rockStore.ready()
+    expect(rockStore.listHiddenIds()).toEqual(['rock:boulder-moss'])
+
+    // Hiding a rock preset preserves AI's 'sakura'
+    await rockStore.hide('rock-c2:terraced-moss-bluff-c2')
+    expect(remote.hiddenIds).toEqual(expect.arrayContaining(['sakura', 'rock:boulder-moss', 'rock-c2:terraced-moss-bluff-c2']))
+
+    // Restoring all rock presets STILL preserves AI's 'sakura'
+    expect(await rockStore.restoreAll()).toBe(2)
+    expect(rockStore.hiddenCount()).toBe(0)
+    expect(remote.hiddenIds).toEqual(['sakura'])
   })
 
   it('REQ-C4: rolls back in-memory state on disk write failure across all 4 stores and enforces readOnly default overrides', async () => {
